@@ -1,0 +1,13 @@
+[parameters]
+[parameters.general]
+use_db = true
+workdir_self = "C:\\Users\\bj7610\\simstack"
+# these are parameters for one user for all hosts
+[parameters.db]
+database = "wolfgang_test"
+test_database = "wolfgang_test"
+connection_string="mongodb://wolfgang:!SimStack2025@simstack.int.kit.edu:27017/"
+mongodump_path = "C:\\Users\\bj7610\\AppData\\Local\\MongoTools\\bin\\mongodump.exe"
+[parameters.server]
+url="http://127.0.0.1:8000"
+token="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXAiOiJydW5uZXIiLCJzdWIiOiJ3b2xmZ2FuZyIsInVpZCI6IjY3Zjk1NzBmMmEyOTI5ZDJkOTg0MTA4ZSIsInJlcyI6ImxvY2FsIiwic2NvcGUiOlsiZmlsZXM6dXBsb2FkIiwiZmlsZXM6ZG93bmxvYWQiLCJmaWxlOnVwbG9hZCIsImZpbGU6ZG93bmxvYWQiLCJmaWxlOnN0YXR1cyIsImZpbGU6Y29tcGxldGUiLCJmaWxlOmRlbGV0ZS10ZW1wIl0sInZlciI6NSwiaWF0IjoxNzgxMTAxODI5LCJleHAiOjE4MTI2Mzc4Mjl9.12QP6rE6ravA8vqJDCfSezib2jg1E8b-vM_y0VeRlQU"

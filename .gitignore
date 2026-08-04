@@ -1,0 +1,75 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# IDEs and Editors
+.idea/
+.run/
+.vscode/
+.spyderproject
+.spyproject
+.ropeproject
+
+# Environments and Package Managers
+.env
+.env.test
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.pixi/
+__pypackages__/
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# mypy / ruff / type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pyright/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local / temp
+*.log
+*.tmp
+.output.txt
