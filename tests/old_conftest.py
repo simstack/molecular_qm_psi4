@@ -11,8 +11,6 @@ from simstack.tables.model_table import make_model_table
 from simstack.tables.node_table import make_node_table
 from simstack.models.files import FileStack
 
-from runner_conftest import test_runner
-
 @pytest.fixture(scope="session")
 def event_loop():
     """Create an instance of the default event loop for the test session."""
