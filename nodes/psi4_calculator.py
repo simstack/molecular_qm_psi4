@@ -507,8 +507,7 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     Parameters:
         qm_input (QMInput): Quantum mechanical input parameters.
         
-    Returns:
-        SimstackResult: The result of the Psi4 calculation.
+    SimstackResult:
         qm_result (QMResult): Parsed result from the Psi4 calculation.
     """
     node_runner = kwargs.get("node_runner")

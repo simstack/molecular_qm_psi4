@@ -57,6 +57,7 @@ async def interpolate_molecules(mol1: Molecule, mol2: Molecule, n: IntData, **kw
         
     Returns:
         SimstackResult: The result containing the dataset of interpolated molecules.
+        interpolated_molecules (MoleculeList): List of interpolated molecules.
     """
     node_runner = kwargs.get("node_runner")
     

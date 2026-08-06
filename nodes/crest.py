@@ -46,8 +46,8 @@ async def crest(crest_input: CrestInput, **kwargs) -> SimstackResult:
     Parameters:
         crest_input (CrestInput): The input parameters for CREST.
         
-    Returns:
-        SimstackResult: The result of the CREST calculation (conformers).
+    SimstackResult:
+        molecule_list (MoleculeList): The resulting conformers.
     """
     node_runner = kwargs.get("node_runner")
     
@@ -216,7 +216,35 @@ async def crest(crest_input: CrestInput, **kwargs) -> SimstackResult:
 @node
 async def xtb_molecule_list(xtb_input: XTBInput, **kwargs) -> SimstackResult:
     """
-    Node implementation for computing energy/gradients for a list of molecules using xtb-python.
+    Asynchronously performs calculations for a list of molecular structures using the xTB Python library.
+
+    This function is designed to handle multiple molecules and compute energy and optional gradient
+    data based on the specified level of theory. It automatically configures xTB to use the correct
+    method, charge, and spin multiplicity as well as solvent effects if requested. Computed properties
+    are stored within the molecule objects and also tied to resulting dataset entries.
+
+    Errors during computation are handled gracefully, and metadata is included to track computational
+    details. If xTB Python is not installed, the computation will fail with an appropriate message.
+
+    Attributes:
+        xtb_input (XTBInput): Input data structure containing level of theory, molecular structures,
+        and calculation options.
+        **kwargs: Additional arguments, typically including a node_runner instance.
+
+    Parameters:
+        xtb_input (XTBInput): Input object specifying details about the molecules to compute, the
+        level of theory, and additional calculation needs.
+        **kwargs: Optional arguments, including a `node_runner` instance used to manage the execution.
+
+    SimstackResult:
+        result: A DataSet containing the results of the computation, each row of the DatasetSection
+                results_section includes the molecule and its energy
+        molecule_list: A list of Molecule objects representing the input molecules. Their properties contain
+                the energy
+
+    Raises:
+        Exception: Any exceptions raised during xTB Python computations are logged and captured for
+        downstream failure handling.
     """
     node_runner = kwargs.get("node_runner")
     if Calculator is None:

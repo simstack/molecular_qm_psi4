@@ -30,10 +30,23 @@ def make_ts_guesses(
     **kwargs
 ) -> SimstackResult:
     """
-    Generates Transition State (TS) candidates by interpolating between chair and twist-boat conformers.
-    
-    The selection should contain molecules classified by 'classify_ring_conformers'.
-    It expects 'chair-like' and 'twist-boat-like' sections in the dataset.
+    Generates transition state (TS) guesses by interpolating between chair-like and
+    twist-boat-like conformers of six-membered rings and selecting candidates with
+    high TS-like properties.
+
+    Parameters:
+        input_params (MakeTSGuessesInput): Input parameters containing dataset, number of
+            images to interpolate, number of top candidates to keep, and optional
+            ring indices.
+        **kwargs: Keyword arguments passed to the function. Expects 'node_runner',
+            which is used for logging.
+
+    SimstackResult:
+        output_dataset (DataSet): The generated dataset containing the TS guesses in the section 'ts_guesses'.
+    Raises:
+        ValueError: Raised if no 'chair-like' or 'twist-boat-like' sections are found
+            in the dataset.
+        Exception: Raised for other errors during the TS guess generation process.
     """
     node_runner = kwargs.get("node_runner")
     node_runner.info("Starting TS guess generation")

@@ -21,8 +21,8 @@ async def geometric_neb(molecules: MoleculeList, qm_input: QMInput, **kwargs) ->
         molecules (MoleculeList): List of initial images for the NEB path.
         qm_input (QMInput): QM parameters (basis, functional, charge, multiplicity).
 
-    Returns:
-        SimstackResult: The result containing the optimized path and transition state.
+    SimstackResult:
+        result (QMResult): Parsed QM result. with the final structure
     """
     node_runner = kwargs.get("node_runner")
 

@@ -129,10 +129,8 @@ def dihedral_puckering_filter(
           - node_runner : NodeRunner
             The object used to manage and report node execution.
 
-    Returns
-    -------
-    SimstackResult
-        result: Dataset containing filtered conformers and optional pair suggestions.
+    SimstackResult:
+        result (Dataset): containing filtered conformers and optional pair suggestions.
 
     Raises
     ------
