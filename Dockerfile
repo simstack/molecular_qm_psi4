@@ -24,7 +24,7 @@ RUN micromamba install -y -n base -c conda-forge psi4 crest geometric xtb-python
 
 # Flat package layout so hatch force-include paths in pyproject.docker match.
 COPY . /app
-COPY pyproject.docker /app/pyproject.toml
+RUN cp /app/pyproject.docker /app/pyproject.toml
 
 ENV UV_PYTHON=/opt/conda/bin/python
 ENV UV_PROJECT_ENVIRONMENT=/opt/conda
