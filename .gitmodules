@@ -1,9 +1,0 @@
-[submodule "molecular_qm_models"]
-	path = molecular_qm_models
-	url = https://github.com/simstack/molecular_qm_models.git
-[submodule "molecular_qm_util"]
-	path = molecular_qm_util
-	url = https://github.com/simstack/molecular_qm_util.git
-[submodule "simstack"]
-	path = simstack
-	url = https://github.com/simstack/simstack.git

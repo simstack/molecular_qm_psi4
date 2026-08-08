@@ -1,5 +1,4 @@
 .git
-.gitmodules
 .venv
 __pycache__
 **/__pycache__
@@ -14,7 +13,3 @@ dist
 build
 .coverage
 htmlcov
-# Nested submodules (installed from git in the image)
-molecular_qm_models
-molecular_qm_util
-simstack

@@ -400,19 +400,7 @@ class Psi4Calculator:
           
         except Exception as e_prep:
             node_runner.log(f"Failed to prepare manual thermo call: {str(e_prep)}. Trying high-level fallbacks...")
-            # # Fallback to simpler calls if preparation fails
-            # try:
-            #     import psi4.driver.p4util.python_helpers as p4helpers
-            #     p4helpers.thermo(wfn, wfn.molecule().molecular_charge())
-            #     node_runner.log("p4helpers.thermo successful")
-            # except Exception as e:
-            #     node_runner.log(f"p4helpers.thermo failed: {str(e)}")
-            #     try:
-            #         import psi4.driver.qcdb.vib as vib
-            #         vib.thermo(wfn, wfn.molecule().molecular_charge())
-            #         node_runner.log("vib.thermo successful")
-            #     except Exception as e2:
-            #         node_runner.log(f"vib.thermo failed: {str(e2)}")
+           
 
         return thermo_result
 
@@ -539,6 +527,7 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             
             # Execute calculation
             wfn_freq = None
+            thermo_result = None
             if qm_input.optimization:
                 node_runner.log("Starting optimization...")
                 if qm_input.frequencies:
