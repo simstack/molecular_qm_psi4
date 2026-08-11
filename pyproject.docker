@@ -1,6 +1,7 @@
-# Declares dependency pins for the Psi4 Docker image.
-# The Dockerfile COPYs molecular_qm_models / molecular_qm_util / molecular_qm_psi4
-# onto PYTHONPATH and installs simstack from the copied tree (rev below).
+# Container-only install manifest (dual-use capability package).
+# Host: no pyproject.toml — flat tree under simstack-model for create_*_table.
+# Image: Dockerfile copies this to pyproject.toml, then `uv pip install .`
+# (hatch force-include + deps from git via [tool.uv.sources]).
 [project]
 name = "molecular_qm_psi4"
 version = "0.1.0"
@@ -17,6 +18,9 @@ dependencies = [
     "simstack",
 ]
 
+[project.entry-points."simstack.modules"]
+molecular_qm_psi4 = "molecular_qm_psi4"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -24,7 +28,7 @@ build-backend = "hatchling.build"
 [tool.hatch.metadata]
 allow-direct-references = true
 
-# Repo root is the package when checked out as the molecular_qm_psi4 submodule.
+# Flat checkout root → nested import package in the wheel.
 [tool.hatch.build.targets.wheel]
 bypass-selection = true
 
@@ -44,4 +48,6 @@ simstack = { git = "https://github.com/simstack/simstack.git", rev = "fix-git-pu
 [tool.uv]
 override-dependencies = [
     "molecular_qm_models @ git+https://github.com/simstack/molecular_qm_models.git",
+    "molecular_qm_util @ git+https://github.com/simstack/molecular_qm_util.git",
+    "simstack @ git+https://github.com/simstack/simstack.git@fix-git-pull",
 ]
