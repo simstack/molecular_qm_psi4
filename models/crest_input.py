@@ -321,6 +321,7 @@ class XTBInput(Model):
     molecules: MoleculeList = Reference()
     level_of_theory: CrestLevelOfTheory = Field(default_factory=CrestLevelOfTheory)
     compute_gradients: bool = Field(False, description="Whether to compute gradients")
+    optimize: bool = Field(False, description="Whether to perform geometry optimization")
     additional_keywords: Optional[str] = Field(None, description="Any additional CREST command line arguments")
 
     @classmethod
@@ -344,6 +345,7 @@ class XTBInput(Model):
             "molecules",
             "level_of_theory",
             "compute_gradients",
+            "optimize",
             "additional_keywords"
         ]
         return ui_schema

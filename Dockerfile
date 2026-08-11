@@ -1,4 +1,5 @@
-# Build context: molecular_qm_psi4 repository root (nested submodules not required).
+# Build from the simstack-model repository root:
+#   docker build -t molecular-qm-psi4:latest -f molecular_qm_psi4/Dockerfile .
 FROM mambaorg/micromamba:latest
 
 USER root
@@ -22,21 +23,22 @@ WORKDIR /app
 RUN micromamba install -y -n base -c conda-forge psi4 crest geometric xtb-python python=3.12 && \
     micromamba clean --all --yes
 
-# Flat package layout so hatch force-include paths in pyproject.docker match.
-COPY . /app
-RUN cp /app/pyproject.docker /app/pyproject.toml
+# Flat monorepo packages (same pattern as molecular_qm_graci / fcctools).
+# Do not pip-install molecular_qm_models/util from git: their hatch configs
+# expect nested package dirs and produce empty wheels.
+# CI prepare-psi4 checks out simstack @ fix-git-pull (see pyproject.docker).
+COPY molecular_qm_models /app/molecular_qm_models
+COPY molecular_qm_util /app/molecular_qm_util
+COPY molecular_qm_psi4 /app/molecular_qm_psi4
+COPY simstack /app/simstack
 
+ENV PYTHONPATH="/app"
 ENV UV_PYTHON=/opt/conda/bin/python
 ENV UV_PROJECT_ENVIRONMENT=/opt/conda
 ENV PATH="/opt/conda/bin:/root/.local/bin:$PATH"
 
-# Install this package + deps from git ([tool.uv.sources] in pyproject.docker).
-RUN uv pip install --system . "setuptools>=80.9.0"
-
-# molecular_qm_models / molecular_qm_util use a flat repo layout; hatch wheels from
-# git are empty, so clone them onto PYTHONPATH for imports.
-RUN git clone --depth 1 https://github.com/simstack/molecular_qm_models.git /app/molecular_qm_models && \
-    git clone --depth 1 https://github.com/simstack/molecular_qm_util.git /app/molecular_qm_util
-ENV PYTHONPATH="/app"
+# Install the copied simstack tree (must be fix-git-pull in CI builds).
+RUN uv pip install --system "/app/simstack" "setuptools>=80.9.0" && \
+    python -c "import simstack; import molecular_qm_models; import molecular_qm_psi4; print('simstack', getattr(simstack, '__file__', simstack)); print('models', molecular_qm_models.__file__); print('psi4', molecular_qm_psi4.__file__)"
 
 ENTRYPOINT ["python", "-m", "simstack.core.run_node"]

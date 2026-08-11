@@ -32,7 +32,7 @@ async def xtb_molecule_list_2_water():
     crest_input = XTBInput(
         molecules=molecules,
         level_of_theory=CrestLevelOfTheory(method=CrestLevelOfTheoryEnum.GFN2_XTB),
-        compute_gradients=True
+        optimize=True
     )
 
     parameters = Parameters(resource="local", in_docker=True, force_rerun=True)

@@ -1,3 +1,6 @@
+# Declares dependency pins for the Psi4 Docker image.
+# The Dockerfile COPYs molecular_qm_models / molecular_qm_util / molecular_qm_psi4
+# onto PYTHONPATH and installs simstack from the copied tree (rev below).
 [project]
 name = "molecular_qm_psi4"
 version = "0.1.0"
