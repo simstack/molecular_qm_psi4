@@ -23,8 +23,8 @@ ENV PATH="/opt/conda/bin:/root/.local/bin:$PATH"
 
 WORKDIR /app
 
-# Install Psi4, crest, geometric and xtb-python from conda
-RUN micromamba install -y -n base -c conda-forge psi4 crest geometric xtb-python python=3.12 && \
+# Install Psi4, crest, geometric, openbabel, pymatgen and xtb-python from conda
+RUN micromamba install -y -n base -c conda-forge psi4 crest geometric openbabel pymatgen xtb-python python=3.12 && \
     micromamba clean --all --yes
 
 ENV UV_PYTHON=/opt/conda/bin/python
@@ -33,6 +33,7 @@ ENV PATH="/opt/conda/bin:/root/.local/bin:$PATH"
 
 # Capability package only — deps install from git via pyproject.docker.
 COPY molecular_qm_psi4 /build/molecular_qm_psi4
+
 WORKDIR /build/molecular_qm_psi4
 RUN cp pyproject.docker pyproject.toml \
  && uv pip install --system . "setuptools>=80.9.0" \

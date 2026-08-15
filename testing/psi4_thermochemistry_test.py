@@ -5,7 +5,8 @@ from pprint import pprint
 from pandas.core.window.doc import kwargs_scipy
 
 from molecular_qm_psi4 import psi4_calculator
-from molecular_qm_psi4.nodes.psi4_calculator import Psi4Result, Psi4Calculator
+from molecular_qm_psi4.util.psi4_result import Psi4Result
+from molecular_qm_psi4.util.psi4_calculator import Psi4Calculator
 from molecular_qm_models import Molecule, Atom, QMInput, QMMethod, Functional, BasisSet
 import pytest
 import numpy as np

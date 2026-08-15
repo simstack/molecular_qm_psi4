@@ -1,12 +1,14 @@
 import logging
 import re
-import numpy as np
 from contextlib import contextmanager
 from pathlib import Path
 
+from molecular_qm_psi4.util.psi4_calculator import Psi4Calculator
+from molecular_qm_psi4.util.psi4_result import Psi4Result
 from simstack.core.node_runner import NodeRunner
+from simstack.core.definitions import TaskStatus
 from simstack.models import FileStack
-from simstack.models.simple_table import SimpleTable, SimpleTableColumnType
+from simstack.models.simple_table import SimpleTable
 
 try:
     import psi4
@@ -15,7 +17,7 @@ except ImportError:
 
 from simstack.core.node import node
 from simstack.core.simstack_result import SimstackResult
-from molecular_qm_models import QMInput, QMResult, QMThermoResult, Molecule, Atom, MoleculeList, BOHR_TO_ANGSTROM
+from molecular_qm_models import QMInput, QMResult, Molecule
 
 logger = logging.getLogger(__name__)
 
@@ -189,304 +191,6 @@ def parse_psi4_thermo_output(output_content: str) -> SimpleTable:
     return table
 
 
-class Psi4Calculator:
-    def __init__(self, qm_input: QMInput, **kwargs):
-        self.qm_input = qm_input
-        self.node_runner = kwargs.get("node_runner")
-        self.psi4_result = None
-
-    def set_resources(self, memory: str = "8 GB", num_threads: int = 4):
-        if psi4:
-            psi4.set_memory(memory)
-            psi4.set_num_threads(num_threads)
-
-    def set_molecule(self):
-        # check qm_input.molecule.properties for constraints to determine symmetry
-        has_cartesian_constraints = False
-        if self.qm_input.molecule and "constraints" in self.qm_input.molecule.properties:
-            mol_constraints = self.qm_input.molecule.properties["constraints"]
-            if isinstance(mol_constraints, list):
-                for hc in mol_constraints:
-                    if hc.get("type") == "harmonic" and len(hc.get("indices", [])) == 1 and "value" in hc and len(hc["value"]) == 3:
-                        has_cartesian_constraints = True
-                        break
-
-        mol_str = qminput_to_psi4_molecule(
-            self.qm_input.molecule,
-            self.qm_input.charge,
-            self.qm_input.multiplicity,
-            symmetry_c1=has_cartesian_constraints
-        )
-        psi4.geometry(mol_str)
-
-    def set_options(self):
-        # Extract basis set name correctly from BasisSet object
-        if hasattr(self.qm_input.basis_set, "basis_set"):
-            basis_name = self.qm_input.basis_set.basis_set.value if hasattr(self.qm_input.basis_set.basis_set, "value") else str(self.qm_input.basis_set.basis_set)
-        else:
-            basis_name = self.qm_input.basis_set.value if hasattr(self.qm_input.basis_set, "value") else str(self.qm_input.basis_set)
-
-        # Mapping for Psi4 basis sets if they differ from SimStack enums
-        basis_mapping = {
-            "STO3G": "sto-3g",
-            "STO6G": "sto-6g",
-        }
-        basis_name = basis_mapping.get(basis_name, basis_name)
-
-        psi4_options = {
-            "basis": basis_name,
-            "reference": "uhf" if self.qm_input.open_shell_calculation else "rhf",
-            "scf_type": "df",  # Defaulting to density fitting for performance
-            "maxiter": 300,
-        }
-
-        # Configure auxiliary basis if provided
-        if hasattr(self.qm_input.basis_set, "aux_basis") and self.qm_input.basis_set.aux_basis:
-            aux_basis_val = self.qm_input.basis_set.aux_basis.aux_basis
-            if hasattr(aux_basis_val, "value"):
-                aux_basis_name = aux_basis_val.value
-            else:
-                aux_basis_name = str(aux_basis_val)
-
-            if aux_basis_name.lower() != "none":
-                psi4_options["auxiliary_basis"] = aux_basis_name
-
-        # SCF accuracy mapping (approximate)
-        accuracy_map = {
-            "Low": 1e-4,
-            "Medium": 1e-6,
-            "Tight": 1e-8,
-            "VeryTight": 1e-10
-        }
-        acc_val = self.qm_input.scf_accuracy.value if hasattr(self.qm_input.scf_accuracy, "value") else str(self.qm_input.scf_accuracy)
-        psi4_options["e_convergence"] = accuracy_map.get(acc_val, 1e-6)
-
-        psi4.set_options(psi4_options)
-
-    def set_constraints(self):
-        def clean_number(x, tol=1e-12):
-            if abs(x) < tol:
-                x = 0.0
-            return f"{x:.12f}"
-
-        ext_cart_lines = []
-        if self.qm_input.molecule and "constraints" in self.qm_input.molecule.properties:
-            mol_constraints = self.qm_input.molecule.properties["constraints"]
-            if isinstance(mol_constraints, list):
-                for hc in mol_constraints:
-                    if hc.get("type") == "harmonic":
-                        if len(hc["indices"]) == 1 and "value" in hc and len(hc["value"]) == 3:
-                            idx = hc["indices"][0]
-                            k = hc["spring_constant"]
-                            val = hc["value"]
-                            ext_cart_lines.append(f"{idx} x '-{clean_number(k)}*(x - {clean_number(val[0])})'")
-                            ext_cart_lines.append(f"{idx} y '-{clean_number(k)}*(x - {clean_number(val[1])})'")
-                            ext_cart_lines.append(f"{idx} z '-{clean_number(k)}*(x - {clean_number(val[2])})'")
-
-        if ext_cart_lines:
-            ext_cart_str = "\n".join(ext_cart_lines)
-            psi4.set_options({
-                "optking__ext_force_cartesian": ext_cart_str
-            })
-            self.node_runner.info(f"Set up {len(ext_cart_lines)} cartesian force lines via OPTKING__EXT_CART.")
-
-    def get_method(self):
-        if hasattr(self.qm_input.functional, "functional"):
-            method = self.qm_input.functional.functional.value if hasattr(self.qm_input.functional.functional, "value") else str(self.qm_input.functional.functional)
-        else:
-            method = self.qm_input.functional.value if hasattr(self.qm_input.functional, "value") else str(self.qm_input.functional)
-        return method
-
-    def run_manual_thermo(self, wfn, energy: float, node_runner: NodeRunner) -> QMThermoResult:
-        """
-        Manually triggers thermochemistry analysis in Psi4 when standard variables are missing.
-        Returns a QMThermoResult object.
-        """
-
-        node_runner.log("Attempting to call manual thermo...")
-
-        thermo_result = QMThermoResult()
-
-        try:
-            # The correct way to call vib.thermo manually
-            vibinfo = wfn.frequency_analysis
-            freq_mol = wfn.molecule()
-
-            masses = np.array([
-                freq_mol.mass(i)
-                for i in range(freq_mol.natom())
-            ])
-
-            # Determine the symmetry number in the same manner as Psi4
-            if psi4.core.has_option_changed("THERMO", "ROTATIONAL_SYMMETRY_NUMBER"):
-                sigma = psi4.core.get_option("THERMO", "ROTATIONAL_SYMMETRY_NUMBER")
-            else:
-                sigma = freq_mol.rotational_symmetry_number()
-
-           
-            # Attempt to use the robust manual call
-            node_runner.log("Attempting manual vib.thermo call...")
-            import psi4.driver.qcdb.vib as vib
-            therminfo, thermtext = vib.thermo(
-                vibinfo,
-                T=psi4.core.get_option("THERMO", "T"),
-                P=psi4.core.get_option("THERMO", "P"),
-                multiplicity=freq_mol.multiplicity(),
-                molecular_mass=np.sum(masses),
-                sigma=sigma,
-                rotor_type=freq_mol.rotor_type(),
-                rot_const=np.asarray(freq_mol.rotational_constants()),
-                E0=energy,
-            )
-            node_runner.log("Manual vib.thermo call successful")
-
-            # Populate QMThermoResult from therminfo
-            # therminfo is a dict containing the results
-            for key, val in therminfo.items():
-                if hasattr(thermo_result, key):
-                    # Convert to list if it's a numpy array for 'B'
-                    if key == 'B' and isinstance(val.data, np.ndarray):
-                        setattr(thermo_result, key, val.data.tolist())
-                    else:
-                        setattr(thermo_result, key, val.data)
-                else:
-                    node_runner.log(f"Key {key} not found in QMThermoResult")
-
-            # Add to wavefunction variables so they are found by parse_wfn too
-            # This ensures consistency between manual call and standard parsing
-            for key, val in therminfo.items():
-                try:
-                    psi4.core.set_variable(key.upper(), val)
-                except:
-                    pass
-
-            # Fill thermodynamics_table
-            try:
-                suffixes = ["elec", "rot", "trans", "vib", "tot"]
-                table = SimpleTable(name="Thermodynamics Table")
-                table.add_column("Label", SimpleTableColumnType.STRING)
-                for suffix in suffixes:
-                    table.add_column(suffix, SimpleTableColumnType.NUMBER)
-
-                # Group by prefix
-                row_data = {}
-                # therminfo keys are like 'S_elec', 'Cv_rot', etc.
-                for key, val in therminfo.items():
-                    if "_" in key:
-                        prefix, suffix = key.rsplit("_", 1)
-                        if suffix in suffixes:
-                            if prefix not in row_data:
-                                row_data[prefix] = {"Label": prefix}
-                            row_data[prefix][suffix] = val.data if hasattr(val, "data") else val
-                            node_runner.log(f"Added {prefix} {suffix} to row_data")
-
-                # Add rows in a somewhat consistent order if possible, otherwise alphabetical
-                # common prefixes: S, Cv, Cp, E, H, G, ZPE
-                common_order = ["S", "Cv", "Cp", "E", "H", "G", "ZPE"]
-                sorted_prefixes = sorted(row_data.keys(), key=lambda p: (common_order.index(p) if p in common_order else 99, p))
-                
-                for prefix in sorted_prefixes:
-                    # Only add if it has at least one valid suffix
-                    if len(row_data[prefix]) > 1:
-                        table.add_row(row_data[prefix])
-                        node_runner.log(f"Added row for {prefix}")
-                
-                if table.row:
-                    thermo_result.thermodynamics_table = table
-                    node_runner.log("Filled thermodynamics_table")
-            except Exception as e_table:
-                node_runner.log(f"Failed to fill thermodynamics_table: {str(e_table)}")
-          
-          
-        except Exception as e_prep:
-            node_runner.log(f"Failed to prepare manual thermo call: {str(e_prep)}. Trying high-level fallbacks...")
-           
-
-        return thermo_result
-
-class Psi4Result:
-    def __init__(self, qm_input: QMInput):
-        self.qm_input = qm_input
-        self.qm_result = QMResult()
-        self._log_path = Path("psi4.log")
-        self._output_path = Path("psi4.out")
-        # Capture Psi4 output in a file
-        if psi4:
-            psi4.core.set_output_file(str(self._output_path), False)
-
-    @property
-    def log_path(self):
-        return self._log_path
-
-    @property
-    def output_path(self):
-        return self._output_path
-
-    def parse_wfn(self, energy: float, wfn, node_runner: NodeRunner):
-        """Parse the Psi4 wavefunction and energy into QMResult."""
-        self.qm_result.final_energy = energy
-        self.qm_result.scf_converged = True  # Psi4 raises exception if not converged by default
-        self.qm_result.normal_termination = True
-
-        # Update structure (especially important after optimization)
-        if wfn.molecule():
-            final_mol = wfn.molecule()
-            new_molecule = Molecule()
-            for i in range(final_mol.natom()):
-                atom = Atom.from_coords(
-                    element=final_mol.symbol(i),
-                    coords=[
-                        final_mol.x(i) * BOHR_TO_ANGSTROM,
-                        final_mol.y(i) * BOHR_TO_ANGSTROM,
-                        final_mol.z(i) * BOHR_TO_ANGSTROM
-                    ]  # Bohr to Angstrom
-                )
-                new_molecule.add_atom(atom)
-            self.qm_result.final_structure = new_molecule
-            if self.qm_input.optimization:
-                self.qm_result.structures = MoleculeList(molecules=[new_molecule])
-
-        # Extract dipole if requested
-        if self.qm_input.Dipole:
-            try:
-                psi4.oeprop(wfn, "DIPOLE")
-                dipole_moment = wfn.variable("SCF DIPOLE")  # This is a vector
-                self.qm_result.dipole_moment = [dipole_moment[0], dipole_moment[1], dipole_moment[2]]
-                self.qm_result.dipole = (sum(d ** 2 for d in self.qm_result.dipole_moment)) ** 0.5
-            except Exception as e:
-                logger.warning(f"Failed to extract dipole: {str(e)}")
-
-        # Extraction of SCF energies
-        try:
-            # Defaulting to final energy if we don't parse iterations
-            self.qm_result.scf_energies = [energy]
-        except Exception:
-            return node_runner.fail("Failed to extract SCF energies from Psi4 output.")
-
-        return self.qm_result
-
-    def parse_thermo(self, energy: float, wfn, node_runner: NodeRunner, calculator: Psi4Calculator) -> QMThermoResult | None:
-        """Extract and parse thermochemistry results from the wavefunction and output file."""
-        node_runner.log("Parsing thermochemistry...")
-        if not self.qm_input.frequencies:
-            return None
-        thermo_result = calculator.run_manual_thermo(wfn, energy, node_runner)
-
-        # try:
-        #     if self.output_path.exists():
-        #         with open(self.output_path, "r") as f:
-        #             output_content = f.read()
-        #         parsed_table = parse_psi4_thermo_output(output_content)
-        #         if parsed_table.row:
-        #             if thermo_result is None:
-        #                 thermo_result = QMThermoResult()
-        #             thermo_result.detailed_thermo_table = parsed_table
-        #             node_runner.log("Successfully parsed detailed thermochemistry from output file")
-        # except Exception as e_parse:
-        #     node_runner.warning(f"Output file thermochemistry parsing failed: {str(e_parse)}")
-
-        return thermo_result
-
 @node
 async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     """
@@ -523,28 +227,74 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             # Configure harmonic constraints if provided
             calculator.set_constraints()
             method = calculator.get_method()
+            
+            # Search for the restart wavefunction in restart_files
+            restart_wfn = None
+            if hasattr(qm_input, "restart_files") and qm_input.restart_files:
+                for fs in qm_input.restart_files:
+                    if fs.name and fs.name.endswith(".wfn"):
+                        try:
+                            wfn_path = Path("restart.wfn")
+                            # FileStack.get() returns the path to the downloaded file
+                            downloaded_path = fs.get(local_dir=Path("."))
+                            
+                            # Rename to restart.wfn for consistency if needed
+                            if downloaded_path.name != "restart.wfn":
+                                if wfn_path.exists():
+                                    wfn_path.unlink()
+                                downloaded_path.rename(wfn_path)
+                            
+                            restart_wfn = psi4.core.Wavefunction.from_file(str(wfn_path))
+                            node_runner.info(f"Loaded restart wavefunction from {fs.name}")
+                            break
+                        except Exception as e_wfn:
+                            node_runner.warning(f"Failed to load restart wavefunction {fs.name}: {e_wfn}")
+
             node_runner.info(f"Starting Psi4 calculation with method {method}")
             
             # Execute calculation
             wfn_freq = None
             thermo_result = None
+            
             if qm_input.optimization:
                 node_runner.log("Starting optimization...")
                 if qm_input.frequencies:
-                    energy, wfn = psi4.optimize(method, return_wfn=True)
+                    energy, wfn = psi4.optimize(method, return_wfn=True, ref_wfn=restart_wfn)
                     node_runner.log("Optimization finished, starting frequency calculation...")
                     # For optimization+freq, frequency() is usually the right driver
-                    energy, wfn_freq = psi4.frequency(method, return_wfn=True, molecule=wfn.molecule())
+                    energy, wfn_freq = psi4.frequency(method, return_wfn=True, molecule=wfn.molecule(), ref_wfn=wfn)
                     node_runner.log("Frequency calculation finished")
+                else:
+                    energy, wfn = psi4.optimize(method, return_wfn=True, ref_wfn=restart_wfn)
             elif qm_input.frequencies:
-                # Ensure we use frequencies() for standalone frequency calculations if frequency() fails or is missing
-                energy, wfn_freq = psi4.frequency(method, return_wfn=True)
+                # Check if restart_wfn already has frequencies
+                if restart_wfn and hasattr(restart_wfn, "frequency_analysis") and restart_wfn.frequency_analysis is not None:
+                    node_runner.info("Restart wavefunction already contains frequency analysis. Skipping frequency calculation.")
+                    wfn_freq = restart_wfn
+                    wfn = restart_wfn
+                    energy = wfn.energy()
+                else:
+                    # Ensure we use frequencies() for standalone frequency calculations if frequency() fails or is missing
+                    energy, wfn_freq = psi4.frequency(method, return_wfn=True, ref_wfn=restart_wfn)
+                    wfn = wfn_freq
             else:
-                energy, wfn = psi4.energy(method, return_wfn=True)
+                energy, wfn = psi4.energy(method, return_wfn=True, ref_wfn=restart_wfn)
                 
             qm_result = psi4_result.parse_wfn(energy, wfn, node_runner=node_runner)
             if wfn_freq is not None:
-                thermo_result = psi4_result.parse_thermo(energy, wfn_freq, node_runner=node_runner, calculator=calculator)
+                thermo_result = psi4_result.calculate_thermo(energy, wfn_freq, node_runner=node_runner)
+
+            # Save wavefunction for future reuse
+            try:
+                save_wfn = wfn_freq if wfn_freq is not None else wfn
+                wfn_output_path = Path("result.wfn")
+                save_wfn.to_file(str(wfn_output_path))
+                if wfn_output_path.exists():
+                    wfn_fs = FileStack.from_local_file(wfn_output_path, in_memory=False, is_hashable=True, secure_source=True)
+                    node_runner.files.append(wfn_fs)
+                    node_runner.info(f"Saved reusable wavefunction to {wfn_output_path}")
+            except Exception as e_save:
+                node_runner.warning(f"Failed to save wavefunction for reuse: {e_save}")
 
             node_runner.info("Psi4 calculation finished successfully")
             node_runner.psi4_result = qm_result
@@ -571,3 +321,97 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             node_runner.info(f"Psi4 output file: {psi4_result.output_path}")
 
 
+
+
+@node
+async def psi4_thermochemistry(qm_result: QMResult, temperature: float = 298.15, pressure: float = 101325.0, **kwargs) -> SimstackResult:
+    """
+    Node to compute thermochemistry at specific T and P using a previous wavefunction.
+    
+    Parameters:
+        qm_result (QMResult): Result from a previous Psi4 calculation containing result.wfn.
+        temperature (float): Temperature in K (default 298.15).
+        pressure (float): Pressure in Pa (default 101325.0).
+    """
+    node_runner: NodeRunner = kwargs.get("node_runner")
+    
+    if psi4 is None:
+        return node_runner.fail("Psi4 is not installed in the current environment.")
+
+    # Find result.wfn in qm_result.files
+    wfn_file = None
+    for fs in qm_result.files:
+        if fs.name == "result.wfn" or (fs.name and fs.name.endswith(".wfn")):
+            wfn_file = fs
+            break
+            
+    if not wfn_file:
+        return node_runner.fail("No wavefunction file found in the input QMResult.")
+
+    wfn_path = Path("restart.wfn")
+    # FileStack.get() returns the path to the downloaded file
+    downloaded_path = wfn_file.get(local_dir=Path("."))
+    
+    # Ensure it's named restart.wfn for psi4.core.Wavefunction.from_file if it was different
+    if downloaded_path.name != "restart.wfn":
+        if wfn_path.exists():
+            wfn_path.unlink()
+        downloaded_path.rename(wfn_path)
+    
+    try:
+        # We need a dummy QMInput to initialize Psi4Calculator for run_manual_thermo
+        # Even though we just want thermo, Psi4Calculator handles the manual vib.thermo call
+        from molecular_qm_models import BasisSet, Functional, BasisSetEnum, FunctionalEnum
+        dummy_input = QMInput(
+            molecule=Molecule(atoms=[]),
+            basis_set=BasisSet(basis_set=BasisSetEnum.STO3G),
+            functional=Functional(functional=FunctionalEnum.B3LYP)
+        )
+        
+        psi4.core.clean()
+        wfn = psi4.core.Wavefunction.from_file(str(wfn_path))
+        
+        if not hasattr(wfn, "frequency_analysis") or wfn.frequency_analysis is None:
+             return node_runner.fail("The provided wavefunction does not contain frequency analysis results.")
+
+        # Set T and P in Psi4 options
+        psi4.set_options({
+            "T": temperature,
+            "P": pressure
+        })
+        
+        calculator = Psi4Calculator(dummy_input, node_runner=node_runner)
+        energy = wfn.energy()
+        
+        node_runner.info(f"Computing thermochemistry at T={temperature} K, P={pressure} Pa")
+        thermo_result = calculator.run_manual_thermo(wfn, energy, node_runner)
+        
+        # Create a new QMResult to return
+        new_qm_result = QMResult()
+        new_qm_result.final_energy = energy
+        # Link to the original wfn file
+        new_qm_result.files.append(wfn_file)
+        
+        # Copy basic info from old result if available
+        new_qm_result.charge = qm_result.charge
+        new_qm_result.final_structure = qm_result.final_structure
+        
+        # Update thermo values
+        new_qm_result.enthalpy = thermo_result.H_tot
+        new_qm_result.gibbs_free_energy = thermo_result.G_tot
+        new_qm_result.entropy = thermo_result.S_tot
+        new_qm_result.internal_energy = thermo_result.E_tot
+        
+        # Attach the detailed tables
+        if thermo_result.thermodynamics_table:
+            new_qm_result.vibrational_frequencies = thermo_result.thermodynamics_table
+            
+        return SimstackResult(
+            status=TaskStatus.COMPLETED,
+            qm_result=new_qm_result,
+            thermo_result=thermo_result,
+            files=[wfn_file]
+        )
+
+    except Exception as e:
+        return node_runner.fail(f"Failed to compute thermochemistry: {str(e)}")

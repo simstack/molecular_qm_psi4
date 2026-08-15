@@ -36,18 +36,19 @@ bypass-selection = true
 "__init__.py" = "molecular_qm_psi4/__init__.py"
 "nodes" = "molecular_qm_psi4/nodes"
 "models" = "molecular_qm_psi4/models"
+"util" = "molecular_qm_psi4/util"
 "scripts" = "molecular_qm_psi4/scripts"
 "testing" = "molecular_qm_psi4/testing"
 "data" = "molecular_qm_psi4/data"
 
 [tool.uv.sources]
-molecular_qm_models = { git = "https://github.com/simstack/molecular_qm_models.git" }
+molecular_qm_models = { git = "https://github.com/simstack/molecular_qm_models.git", rev= "feature-psi4" }
 molecular_qm_util = { git = "https://github.com/simstack/molecular_qm_util.git" }
 simstack = { git = "https://github.com/simstack/simstack.git", rev = "fix-git-pull" }
 
 [tool.uv]
 override-dependencies = [
-    "molecular_qm_models @ git+https://github.com/simstack/molecular_qm_models.git",
+    "molecular_qm_models @ git+https://github.com/simstack/molecular_qm_models.git@feature-psi4",
     "molecular_qm_util @ git+https://github.com/simstack/molecular_qm_util.git",
     "simstack @ git+https://github.com/simstack/simstack.git@fix-git-pull",
 ]
