@@ -1,12 +1,19 @@
-from typing import Union
-from odmantic import ObjectId
-from molecular_qm_models import QMInput, Molecule, MoleculeList
-from odmantic import Model, Field, Reference
-from simstack.core.node import node
-from simstack.models import simstack_model
-from simstack.core.simstack_result import SimstackResult
-from simstack.core.definitions import TaskStatus
+from typing import Any, Dict, Iterator, List, Optional
+
+from odmantic import Field, Model, ObjectId, Reference
+from pydantic import model_validator
+
+from molecular_qm_models import Molecule, QMInput
+from molecular_qm_models.basis_set import BasisSet
+from molecular_qm_models.density_functional import Functional
 from molecular_qm_psi4.nodes.psi4_calculator import psi4_calculator
+from simstack.core.definitions import TaskStatus
+from simstack.core.node import node
+from simstack.core.simstack_result import SimstackResult
+from simstack.models import simstack_model
+from simstack.models.base_lists import GenericListMixin, ObjectListMixin
+from simstack.models.simple_table import SimpleTable
+
 import logging
 
 logger = logging.getLogger(__name__)
@@ -14,19 +21,205 @@ logger = logging.getLogger(__name__)
 
 @simstack_model
 class CompareConformersModel(Model):
+    field_name: str = "CompareConformersModel"
     qm_input: QMInput = Reference()
     molecule: Molecule = Reference()
     temperature: float = 298.15
     pressure: float = 101325.0
 
+
 @simstack_model
 class CompareConformersResult(Model):
+    field_name: str = "CompareConformersResult"
     molecule2: Molecule = Reference()
     temperature: float = 298.15
     pressure: float = 101325.0
     qm_input: QMInput = Reference()
     delta_delta_g: float = Field(None, description="Delta Delta G of the conformers")
     delta_delta_zpe_tot: float = Field(None, description="Delta Delta ZPE Total of the conformers")
+
+    def molecule_for_table(self) -> Optional[Molecule]:
+        if self.qm_input is not None and getattr(self.qm_input, "molecule", None) is not None:
+            return self.qm_input.molecule
+        return self.molecule2
+
+    def make_table_entries(self, **kwargs) -> Dict[str, Any]:
+        molecule = self.molecule_for_table()
+        return {
+            "smiles": molecule.smiles if molecule is not None else None,
+            "formula": molecule.formula if molecule is not None else None,
+            "pressure": self.pressure,
+            "temperature": self.temperature,
+            "DDG": self.delta_delta_g,
+            "DDZ": self.delta_delta_zpe_tot,
+        }
+
+
+@simstack_model
+class CompareConformersResultList(Model, ObjectListMixin[CompareConformersResult]):
+    field_name: str = "CompareConformersResultList"
+    elements: List[ObjectId] = Field(default_factory=list)
+
+    def __init__(self, **data):
+        data, cache = self._normalize_elements_for_init(data)
+        Model.__init__(self, **data)
+        if cache is not None:
+            self._set_cache(cache)
+
+    def __iter__(self) -> Iterator[CompareConformersResult]:
+        return ObjectListMixin.__iter__(self)
+
+    @model_validator(mode="before")
+    @classmethod
+    def ensure_fieldname(cls, data):
+        if isinstance(data, dict) and "field_name" not in data:
+            data["field_name"] = cls.__name__
+        return data
+
+
+@simstack_model
+class BasisSetList(Model, GenericListMixin[BasisSet]):
+    field_name: str = "BasisSetList"
+    elements: List[BasisSet] = Field(default_factory=list)
+
+    def __iter__(self) -> Iterator[BasisSet]:
+        return iter(self.elements)
+
+    @model_validator(mode="before")
+    @classmethod
+    def ensure_fieldname(cls, data):
+        if isinstance(data, dict) and "field_name" not in data:
+            data["field_name"] = cls.__name__
+        return data
+
+
+@simstack_model
+class FunctionalList(Model, GenericListMixin[Functional]):
+    field_name: str = "FunctionalList"
+    elements: List[Functional] = Field(default_factory=list)
+
+    def __iter__(self) -> Iterator[Functional]:
+        return iter(self.elements)
+
+    @model_validator(mode="before")
+    @classmethod
+    def ensure_fieldname(cls, data):
+        if isinstance(data, dict) and "field_name" not in data:
+            data["field_name"] = cls.__name__
+        return data
+
+
+def _basis_set_name(basis_set: Optional[BasisSet]) -> Optional[str]:
+    if basis_set is None:
+        return None
+    value = getattr(basis_set, "basis_set", basis_set)
+    return getattr(value, "value", value)
+
+
+def _functional_name(functional) -> Optional[str]:
+    if functional is None:
+        return None
+    value = getattr(functional, "functional", functional)
+    return getattr(value, "value", value)
+
+
+def _qm_input_copy(
+    qm_input: QMInput,
+    basis_set: Optional[BasisSet] = None,
+    functional: Optional[Functional] = None,
+) -> QMInput:
+    return QMInput(
+        molecule=qm_input.molecule,
+        charge=qm_input.charge,
+        multiplicity=qm_input.multiplicity,
+        open_shell_calculation=qm_input.open_shell_calculation,
+        basis_set=basis_set if basis_set is not None else qm_input.basis_set,
+        functional=functional if functional is not None else qm_input.functional,
+        method=qm_input.method,
+        optimization=True,
+        frequencies=True,
+        solvent=qm_input.solvent,
+        solvent_model=qm_input.solvent_model,
+        restart_files=qm_input.restart_files,
+    )
+
+
+def empty_compare_conformers_method_table(name: str) -> SimpleTable:
+    table = SimpleTable(name=name)
+    table.add_column("smiles", "string")
+    table.add_column("formula", "string")
+    table.add_column("basis_set", "string")
+    table.add_column("functional", "string")
+    table.add_column("DDG", "number")
+    table.add_column("DDZ", "number")
+    return table
+
+
+async def _fill_compare_conformers_method_table(
+    qm_inputs: List[QMInput],
+    molecule: Molecule,
+    table: SimpleTable,
+    node_runner,
+    kwargs,
+) -> Optional[str]:
+    for current_input in qm_inputs:
+        basis_name = _basis_set_name(current_input.basis_set)
+        functional_name = _functional_name(current_input.functional)
+        node_runner.info(
+            f"Running compare_conformers for basis set {basis_name}, "
+            f"functional {functional_name}"
+        )
+        arg = CompareConformersModel(
+            qm_input=current_input,
+            molecule=molecule,
+        )
+        calc_result = await compare_conformers(arg, **kwargs)
+        if calc_result.status != TaskStatus.COMPLETED:
+            return calc_result.error_message or (
+                f"compare_conformers failed for basis set {basis_name}, "
+                f"functional {functional_name}"
+            )
+
+        compare_result = getattr(calc_result, "result", None)
+        if compare_result is None:
+            return (
+                f"compare_conformers returned no result for basis set {basis_name}, "
+                f"functional {functional_name}"
+            )
+
+        row_molecule = compare_result.molecule_for_table() or current_input.molecule
+        table.add_row(
+            {
+                "smiles": row_molecule.smiles if row_molecule is not None else None,
+                "formula": row_molecule.formula if row_molecule is not None else None,
+                "basis_set": basis_name,
+                "functional": functional_name,
+                "DDG": compare_result.delta_delta_g,
+                "DDZ": compare_result.delta_delta_zpe_tot,
+            }
+        )
+    return None
+
+
+def empty_compare_conformers_table(name: str = "Compare Conformers") -> SimpleTable:
+    table = SimpleTable(name=name)
+    table.add_column("smiles", "string")
+    table.add_column("formula", "string")
+    table.add_column("pressure", "number")
+    table.add_column("temperature", "number")
+    table.add_column("DDG", "number")
+    table.add_column("DDZ", "number")
+    return table
+
+
+def compare_conformers_results_to_simple_table(
+    results: List[CompareConformersResult],
+    name: str = "Compare Conformers",
+) -> SimpleTable:
+    table = empty_compare_conformers_table(name=name)
+    for result in results:
+        table.add_row(result.make_table_entries())
+    return table
 
 @node
 async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackResult:
@@ -133,3 +326,109 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
     )
     node_runner.result = result
     return node_runner.succeed()
+
+
+@node
+async def compare_conformers_over_basis_sets(
+    qm_input: QMInput,
+    molecule: Molecule,
+    basis_sets: BasisSetList,
+    **kwargs,
+) -> SimstackResult:
+    """
+    Run compare_conformers for each basis set and collect DDG / DDZ in a SimpleTable.
+
+    Parameters:
+        qm_input (QMInput): Conformer 1 and shared QM settings (functional, charge, ...).
+        molecule (Molecule): Conformer 2 to compare against ``qm_input.molecule``.
+        basis_sets (BasisSetList): Basis sets to evaluate.
+
+    Called Nodes:
+        compare_conformers
+
+    SimstackResult:
+        table (SimpleTable): One row per basis set with smiles, formula, basis_set,
+            functional, DDG, and DDZ.
+    """
+    node_runner = kwargs.get("node_runner")
+    table = empty_compare_conformers_method_table("Compare Conformers by Basis Set")
+    try:
+        if len(basis_sets) == 0:
+            node_runner.warning("No basis sets provided")
+            node_runner.table = table
+            return node_runner.succeed()
+
+        node_runner.info(
+            f"Comparing conformers over {len(basis_sets)} basis set(s) "
+            f"with functional {_functional_name(qm_input.functional)}"
+        )
+        error_message = await _fill_compare_conformers_method_table(
+            [_qm_input_copy(qm_input, basis_set=basis_set) for basis_set in basis_sets],
+            molecule,
+            table,
+            node_runner,
+            kwargs,
+        )
+        if error_message:
+            node_runner.error(error_message)
+            return node_runner.fail(error_message=error_message)
+
+        node_runner.table = table
+        node_runner.info(f"Built basis-set compare-conformers table with {len(table.row)} row(s)")
+        return node_runner.succeed()
+    except Exception as e:
+        node_runner.error(str(e))
+        return node_runner.fail(error_message=str(e))
+
+
+@node
+async def compare_conformers_over_functionals(
+    qm_input: QMInput,
+    molecule: Molecule,
+    functionals: FunctionalList,
+    **kwargs,
+) -> SimstackResult:
+    """
+    Run compare_conformers for each functional and collect DDG / DDZ in a SimpleTable.
+
+    Parameters:
+        qm_input (QMInput): Conformer 1 and shared QM settings (basis set, charge, ...).
+        molecule (Molecule): Conformer 2 to compare against ``qm_input.molecule``.
+        functionals (FunctionalList): Functionals to evaluate.
+
+    Called Nodes:
+        compare_conformers
+
+    SimstackResult:
+        table (SimpleTable): One row per functional with smiles, formula, basis_set,
+            functional, DDG, and DDZ.
+    """
+    node_runner = kwargs.get("node_runner")
+    table = empty_compare_conformers_method_table("Compare Conformers by Functional")
+    try:
+        if len(functionals) == 0:
+            node_runner.warning("No functionals provided")
+            node_runner.table = table
+            return node_runner.succeed()
+
+        node_runner.info(
+            f"Comparing conformers over {len(functionals)} functional(s) "
+            f"with basis set {_basis_set_name(qm_input.basis_set)}"
+        )
+        error_message = await _fill_compare_conformers_method_table(
+            [_qm_input_copy(qm_input, functional=functional) for functional in functionals],
+            molecule,
+            table,
+            node_runner,
+            kwargs,
+        )
+        if error_message:
+            node_runner.error(error_message)
+            return node_runner.fail(error_message=error_message)
+
+        node_runner.table = table
+        node_runner.info(f"Built functional compare-conformers table with {len(table.row)} row(s)")
+        return node_runner.succeed()
+    except Exception as e:
+        node_runner.error(str(e))
+        return node_runner.fail(error_message=str(e))

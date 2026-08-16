@@ -1,4 +1,18 @@
 from molecular_qm_psi4.nodes.psi4_calculator import psi4_calculator
+from molecular_qm_psi4.nodes.compare_conformers import (
+    BasisSetList,
+    CompareConformersModel,
+    CompareConformersResult,
+    CompareConformersResultList,
+    FunctionalList,
+    compare_conformers,
+    compare_conformers_over_basis_sets,
+    compare_conformers_over_functionals,
+)
+from molecular_qm_psi4.nodes.compare_conformers_table import (
+    compare_conformers_list_to_table,
+    compare_conformers_to_table,
+)
 from molecular_qm_psi4.nodes.compute_energy import compute_energy
 from molecular_qm_psi4.nodes.crest import crest
 from molecular_qm_psi4.nodes.geometric_neb import geometric_neb
@@ -27,6 +41,16 @@ from molecular_qm_psi4.testing import (
 
 __all__ = [
     "psi4_calculator",
+    "CompareConformersModel",
+    "CompareConformersResult",
+    "CompareConformersResultList",
+    "BasisSetList",
+    "FunctionalList",
+    "compare_conformers",
+    "compare_conformers_over_basis_sets",
+    "compare_conformers_over_functionals",
+    "compare_conformers_to_table",
+    "compare_conformers_list_to_table",
     "compute_energy",
     "crest",
     "geometric_neb",
