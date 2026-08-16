@@ -1,3 +1,5 @@
+simstack
+simstack_tests
 .git
 .venv
 __pycache__
