@@ -1,13 +1,22 @@
+import copy
 import logging
 import re
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
 
 from molecular_qm_psi4.util.psi4_calculator import Psi4Calculator
 from molecular_qm_psi4.util.psi4_result import Psi4Result
+from molecular_qm_psi4.util.psi4_thermo import run_manual_thermo
+from simstack.core.context import context
 from simstack.core.node_runner import NodeRunner
 from simstack.core.definitions import TaskStatus
-from simstack.models import FileStack
+from simstack.models import FileStack, FloatData
 from simstack.models.simple_table import SimpleTable
 
 try:
@@ -21,70 +30,268 @@ from molecular_qm_models import QMInput, QMResult, Molecule
 
 logger = logging.getLogger(__name__)
 
+_WFN_NPY_NAME = "result.wfn.npy"
+_FREQ_ANALYSIS_KEY = "frequency_analysis"
 
-def _wavefunction_has_mo_coefficients(wfn) -> bool:
-    if wfn is None:
-        return False
+
+def _safe_call(fn, default=None):
     try:
-        return wfn.Ca() is not None
+        return fn()
     except Exception:
-        return False
+        return default
 
 
-def _serializable_wavefunction(wfn, wfn_freq):
-    """Pick a wavefunction Psi4 can serialize.
+def _safe_array(getter):
+    obj = _safe_call(getter)
+    if obj is None:
+        return None
+    to_array = getattr(obj, "to_array", None)
+    if callable(to_array):
+        try:
+            return to_array()
+        except Exception:
+            return None
+    return obj
 
-    Frequency wavefunctions often have no MO coefficients. ``to_file()`` always
-    calls ``Ca()`` and raises ``Wavefunction::Ca: Unable to obtain MO coefficients``.
-    Prefer the energy/optimization wavefunction, then copy Hessian / frequency
-    analysis onto it when those live only on the frequency object.
+
+def _serialize_frequency_analysis(vibinfo):
+    if not vibinfo:
+        return None
+    serialized = {}
+    for key, val in dict(vibinfo).items():
+        if hasattr(val, "data"):
+            serialized[key] = {
+                "__vibdatum__": True,
+                "label": getattr(val, "label", key),
+                "units": getattr(val, "units", ""),
+                "data": val.data,
+                "comment": getattr(val, "comment", ""),
+                "numeric": getattr(val, "numeric", True),
+            }
+        else:
+            serialized[key] = val
+    return serialized
+
+
+def _vib_datum(label, units, data, comment="", numeric=True):
+    try:
+        from qcelemental import Datum
+        return Datum(label, units, data, comment=comment, numeric=numeric)
+    except Exception:
+        return SimpleNamespace(label=label, units=units, data=data, comment=comment, numeric=numeric)
+
+
+def _deserialize_frequency_analysis(raw):
+    if not raw:
+        return None
+    restored = {}
+    for key, val in dict(raw).items():
+        if isinstance(val, dict) and val.get("__vibdatum__"):
+            restored[key] = _vib_datum(
+                val.get("label", key),
+                val.get("units", ""),
+                val.get("data"),
+                comment=val.get("comment", ""),
+                numeric=val.get("numeric", True),
+            )
+        else:
+            restored[key] = val
+    return restored
+
+
+def _wavefunction_to_payload(wfn):
+    """Serialize a Psi4 wavefunction without calling ``to_file()``.
+
+    Psi4's ``to_file()`` always evaluates ``wfn.Ca()``. Frequency/Hessian
+    wavefunctions often have no MO coefficients, which raises
+    ``Wavefunction::Ca: Unable to obtain MO coefficients``. Missing matrices
+    are stored as ``None`` so thermochemistry data can still be written.
     """
-    candidates = []
-    if wfn is not None:
-        candidates.append(wfn)
-    if wfn_freq is not None and wfn_freq is not wfn:
-        candidates.append(wfn_freq)
-
-    save_wfn = next((candidate for candidate in candidates if _wavefunction_has_mo_coefficients(candidate)), None)
-    if save_wfn is None:
+    if wfn is None:
         return None
 
-    freq_source = wfn_freq if wfn_freq is not None else wfn
-    if freq_source is not None and freq_source is not save_wfn:
-        try:
-            hessian = freq_source.hessian()
-            if hessian is not None:
-                save_wfn.set_hessian(hessian)
-        except Exception:
-            pass
-        frequency_analysis = getattr(freq_source, "frequency_analysis", None)
-        if frequency_analysis is not None:
-            try:
-                save_wfn.frequency_analysis = frequency_analysis
-            except Exception:
-                pass
-    return save_wfn
+    molecule = _safe_call(lambda: wfn.molecule().to_dict(quiet=True))
+    if molecule is None:
+        return None
+
+    basis = _safe_call(wfn.basisset)
+    basisname = _safe_call(lambda: basis.name(), default="") if basis is not None else ""
+    basispuream = _safe_call(lambda: basis.has_puream(), default=False) if basis is not None else False
+    dipole = _safe_call(wfn.get_dipole_field_strength, default=(0.0, 0.0, 0.0)) or (0.0, 0.0, 0.0)
+
+    matrixarr = {}
+    for key, val in (_safe_call(wfn.array_variables, default={}) or {}).items():
+        array = _safe_array(lambda matrix=val: matrix)
+        if array is not None:
+            matrixarr[key] = array
+
+    return {
+        "molecule": molecule,
+        "matrix": {
+            "Ca": _safe_array(wfn.Ca),
+            "Cb": _safe_array(wfn.Cb),
+            "Da": _safe_array(wfn.Da),
+            "Db": _safe_array(wfn.Db),
+            "Fa": _safe_array(wfn.Fa),
+            "Fb": _safe_array(wfn.Fb),
+            "H": _safe_array(wfn.H),
+            "S": _safe_array(wfn.S),
+            "X": _safe_array(wfn.lagrangian),
+            "aotoso": _safe_array(wfn.aotoso),
+            "gradient": _safe_array(wfn.gradient),
+            "hessian": _safe_array(wfn.hessian),
+        },
+        "vector": {
+            "epsilon_a": _safe_array(wfn.epsilon_a),
+            "epsilon_b": _safe_array(wfn.epsilon_b),
+            "frequencies": _safe_array(wfn.frequencies),
+        },
+        "dimension": {
+            "doccpi": _safe_call(lambda: wfn.doccpi().to_tuple()),
+            "frzcpi": _safe_call(lambda: wfn.frzcpi().to_tuple()),
+            "frzvpi": _safe_call(lambda: wfn.frzvpi().to_tuple()),
+            "nalphapi": _safe_call(lambda: wfn.nalphapi().to_tuple()),
+            "nbetapi": _safe_call(lambda: wfn.nbetapi().to_tuple()),
+            "nmopi": _safe_call(lambda: wfn.nmopi().to_tuple()),
+            "nsopi": _safe_call(lambda: wfn.nsopi().to_tuple()),
+            "soccpi": _safe_call(lambda: wfn.soccpi().to_tuple()),
+        },
+        "int": {
+            "nalpha": _safe_call(wfn.nalpha, default=0),
+            "nbeta": _safe_call(wfn.nbeta, default=0),
+            "nfrzc": _safe_call(wfn.nfrzc, default=0),
+            "nirrep": _safe_call(wfn.nirrep, default=1),
+            "nmo": _safe_call(wfn.nmo, default=0),
+            "nso": _safe_call(wfn.nso, default=0),
+            "print": _safe_call(wfn.get_print, default=1),
+        },
+        "string": {
+            "name": _safe_call(wfn.name, default=""),
+            "module": _safe_call(wfn.module, default=""),
+            "basisname": basisname,
+        },
+        "boolean": {
+            "PCM_enabled": _safe_call(wfn.PCM_enabled, default=False),
+            "same_a_b_dens": _safe_call(wfn.same_a_b_dens, default=True),
+            "same_a_b_orbs": _safe_call(wfn.same_a_b_orbs, default=True),
+            "basispuream": basispuream,
+        },
+        "float": {
+            "energy": _safe_call(wfn.energy, default=0.0),
+            "efzc": _safe_call(wfn.efzc, default=0.0),
+            "dipole_field_x": dipole[0],
+            "dipole_field_y": dipole[1],
+            "dipole_field_z": dipole[2],
+        },
+        "floatvar": _safe_call(wfn.scalar_variables, default={}) or {},
+        "matrixarr": matrixarr,
+        _FREQ_ANALYSIS_KEY: _serialize_frequency_analysis(getattr(wfn, "frequency_analysis", None)),
+    }
+
+
+def _merge_wavefunction_payloads(*payloads):
+    merged = None
+    for payload in payloads:
+        if not payload:
+            continue
+        if merged is None:
+            merged = copy.deepcopy(payload)
+            continue
+        for section in ("matrix", "vector", "dimension", "int", "string", "boolean", "float"):
+            for key, value in payload.get(section, {}).items():
+                if value is not None:
+                    merged.setdefault(section, {})[key] = copy.deepcopy(value)
+        if payload.get("floatvar"):
+            merged.setdefault("floatvar", {}).update(copy.deepcopy(payload["floatvar"]))
+        if payload.get("matrixarr"):
+            merged.setdefault("matrixarr", {}).update(copy.deepcopy(payload["matrixarr"]))
+        if payload.get("molecule"):
+            merged["molecule"] = copy.deepcopy(payload["molecule"])
+        if payload.get(_FREQ_ANALYSIS_KEY):
+            merged[_FREQ_ANALYSIS_KEY] = copy.deepcopy(payload[_FREQ_ANALYSIS_KEY])
+    return merged
+
+
+def _payload_from_wfn_or_reference(wfn):
+    if wfn is None:
+        return None
+    payloads = []
+    reference = _safe_call(wfn.reference_wavefunction)
+    if reference is not None and reference is not wfn:
+        payloads.append(_wavefunction_to_payload(reference))
+    payloads.append(_wavefunction_to_payload(wfn))
+    return _merge_wavefunction_payloads(*payloads)
+
+
+def _write_wavefunction_payload(payload, path: Path) -> Path:
+    if np is None:
+        raise RuntimeError("numpy is required to save a Psi4 wavefunction")
+    npy_path = path if str(path).endswith(".npy") else Path(str(path) + ".npy")
+    np.save(npy_path, payload, allow_pickle=True)
+    return npy_path
 
 
 def _is_wavefunction_artifact(name: str) -> bool:
     if not name:
         return False
     lowered = name.lower()
-    return lowered.endswith(".wfn") or lowered.endswith(".wfn.npy") or lowered == "result.wfn.npy"
+    return lowered.endswith(".wfn") or lowered.endswith(".wfn.npy") or lowered == _WFN_NPY_NAME
+
+
+def _resolve_wavefunction_path(path: Path) -> Path:
+    path = Path(path)
+    for candidate in (path, Path(str(path) + ".npy")):
+        if candidate.exists():
+            return candidate
+    return path
+
+
+def _minimal_wavefunction_from_payload(data):
+    molecule = psi4.core.Molecule.from_dict(data["molecule"])
+    basis_name = data.get("string", {}).get("basisname") or "sto-3g"
+    if ".gbs" in basis_name:
+        basis_name = basis_name.split("/")[-1].replace(".gbs", "")
+    basis_puream = data.get("boolean", {}).get("basispuream", False)
+    basisset = psi4.core.BasisSet.build(molecule, "ORBITAL", basis_name, puream=basis_puream)
+    wfn = psi4.core.Wavefunction(molecule, basisset)
+    energy = data.get("float", {}).get("energy")
+    if energy is not None:
+        wfn.set_energy(energy)
+    hessian = data.get("matrix", {}).get("hessian")
+    if hessian is not None:
+        wfn.set_hessian(psi4.core.Matrix.from_array(hessian, name="hessian"))
+    return wfn
 
 
 def _load_wavefunction(path: Path):
-    """Load a Psi4 wavefunction written by ``to_file()``.
+    """Load a wavefunction written by ``_write_wavefunction_payload`` or Psi4 ``to_file()``."""
+    if np is None:
+        raise RuntimeError("numpy is required to load a Psi4 wavefunction")
+    load_path = _resolve_wavefunction_path(Path(path))
+    data = np.load(str(load_path), allow_pickle=True).item()
+    freq = _deserialize_frequency_analysis(data.pop(_FREQ_ANALYSIS_KEY, None))
+    try:
+        wfn = psi4.core.Wavefunction.from_file(data)
+    except Exception:
+        wfn = _minimal_wavefunction_from_payload(data)
+    if freq is not None:
+        wfn.frequency_analysis = freq
+    return wfn
 
-    ``to_file('result.wfn')`` writes ``result.wfn.npy``. Passing a string path
-    that does not end in ``.npy`` makes ``from_file`` append ``.npy``.
-    """
-    if path.suffix == ".npy" or str(path).endswith(".wfn.npy"):
-        return psi4.core.Wavefunction.from_file(str(path))
-    npy_sibling = Path(str(path) + ".npy")
-    if npy_sibling.exists():
-        return psi4.core.Wavefunction.from_file(str(path))
-    return psi4.core.Wavefunction.from_file(path)
+
+def _find_wavefunction_file(files):
+    if files is None:
+        return None
+    finder = getattr(files, "find", None)
+    if callable(finder):
+        for name in (_WFN_NPY_NAME, "result.wfn"):
+            found = finder(name)
+            if found:
+                return found
+    for fs in files:
+        if _is_wavefunction_artifact(getattr(fs, "name", "")):
+            return fs
+    return None
 
 
 @contextmanager
@@ -276,6 +483,26 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     if psi4 is None:
         return node_runner.fail("Psi4 is not installed in the current environment.")
 
+    molecule = qm_input.molecule
+    molecule_changed = False
+    if molecule.smiles is None:
+        try:
+            molecule.smiles = molecule.make_smiles()
+            molecule_changed = True
+        except Exception as e:
+            return node_runner.fail(f"Failed to generate SMILES: {e}")
+
+    if molecule.formula is None:
+        try:
+            molecule.formula = molecule.make_formula()
+            molecule_changed = True
+        except Exception as e:
+            return node_runner.fail(f"Failed to generate formula: {e}")
+
+    if molecule_changed:
+        await context.db.save(molecule)
+        node_runner.info(f"Generated SMILES and formula from molecule: {molecule.smiles} ({molecule.formula})")
+
     psi4_result = Psi4Result(qm_input)
     try:
         with redirect_psi4_logs(psi4_result.log_path):
@@ -312,63 +539,66 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             # Execute calculation
             wfn_freq = None
             thermo_result = None
-            
+            orbital_payload = _payload_from_wfn_or_reference(restart_wfn)
+
             if qm_input.optimization:
                 node_runner.log("Starting optimization...")
+                energy, wfn = psi4.optimize(method, return_wfn=True, ref_wfn=restart_wfn)
+                orbital_payload = _payload_from_wfn_or_reference(wfn)
                 if qm_input.frequencies:
-                    energy, wfn = psi4.optimize(method, return_wfn=True, ref_wfn=restart_wfn)
                     node_runner.log("Optimization finished, starting frequency calculation...")
-                    # For optimization+freq, frequency() is usually the right driver
                     energy, wfn_freq = psi4.frequency(method, return_wfn=True, molecule=wfn.molecule(), ref_wfn=wfn)
                     node_runner.log("Frequency calculation finished")
-                else:
-                    energy, wfn = psi4.optimize(method, return_wfn=True, ref_wfn=restart_wfn)
             elif qm_input.frequencies:
-                # Check if restart_wfn already has frequencies
-                if restart_wfn and hasattr(restart_wfn, "frequency_analysis") and restart_wfn.frequency_analysis is not None:
+                if restart_wfn and getattr(restart_wfn, "frequency_analysis", None) is not None:
                     node_runner.info("Restart wavefunction already contains frequency analysis. Skipping frequency calculation.")
                     wfn_freq = restart_wfn
                     wfn = restart_wfn
                     energy = wfn.energy()
                 else:
-                    # Ensure we use frequencies() for standalone frequency calculations if frequency() fails or is missing
                     energy, wfn_freq = psi4.frequency(method, return_wfn=True, ref_wfn=restart_wfn)
                     wfn = wfn_freq
             else:
                 energy, wfn = psi4.energy(method, return_wfn=True, ref_wfn=restart_wfn)
-                
+                orbital_payload = _payload_from_wfn_or_reference(wfn)
+
             qm_result = psi4_result.parse_wfn(energy, wfn, node_runner=node_runner)
             if wfn_freq is not None:
                 thermo_result = psi4_result.calculate_thermo(energy, wfn_freq, node_runner=node_runner)
 
-            # Save wavefunction for future reuse. Psi4 to_file() requires MO
-            # coefficients, which frequency wavefunctions often lack.
+            # Save a reusable wavefunction. Do not call Psi4 to_file(): it always
+            # reads Ca() and frequency wavefunctions often have no MO coefficients.
             try:
-                save_wfn = _serializable_wavefunction(wfn, wfn_freq)
-                if save_wfn is None:
-                    node_runner.warning(
-                        "Skipping wavefunction save: no MO coefficients available for reuse"
-                    )
+                freq_payload = _payload_from_wfn_or_reference(wfn_freq if wfn_freq is not None else wfn)
+                payload = _merge_wavefunction_payloads(orbital_payload, freq_payload)
+                if payload is None:
+                    node_runner.warning("Skipping wavefunction save: nothing serializable was available")
                 else:
-                    wfn_stem = Path("result.wfn")
-                    save_wfn.to_file(str(wfn_stem))
-                    wfn_npy_path = Path(str(wfn_stem) + ".npy")
-                    saved_path = wfn_npy_path if wfn_npy_path.exists() else wfn_stem
+                    saved_path = _write_wavefunction_payload(payload, Path(_WFN_NPY_NAME))
                     if saved_path.exists():
                         wfn_fs = FileStack.from_local_file(
                             saved_path, in_memory=False, is_hashable=True, secure_source=True
                         )
                         node_runner.files.append(wfn_fs)
-                        node_runner.info(f"Saved reusable wavefunction to {saved_path}")
-                    else:
-                        node_runner.warning(
-                            f"Wavefunction serialization produced no file at {wfn_stem} or {wfn_npy_path}"
+                        qm_result.files.append(wfn_fs)
+                        has_ca = payload.get("matrix", {}).get("Ca") is not None
+                        has_freq = payload.get(_FREQ_ANALYSIS_KEY) is not None
+                        node_runner.info(
+                            f"Saved reusable wavefunction to {saved_path} "
+                            f"(orbitals={'yes' if has_ca else 'no'}, "
+                            f"frequency_analysis={'yes' if has_freq else 'no'})"
                         )
+                    else:
+                        node_runner.warning(f"Wavefunction serialization produced no file at {saved_path}")
             except Exception as e_save:
                 node_runner.warning(f"Failed to save wavefunction for reuse: {e_save}")
 
             node_runner.info("Psi4 calculation finished successfully")
             node_runner.psi4_result = qm_result
+
+            current_name = kwargs.get("custom_name", None)
+            if current_name is None or current_name == "" and qm_input.molecule.name is not None:
+                node_runner["custom_name"] = qm_input.molecule.name
             if thermo_result:
                 node_runner.thermo_result = thermo_result
             return node_runner.succeed()
@@ -385,96 +615,81 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         if psi4_result.log_path.exists():
             psi4_log_fs = FileStack.from_local_file(psi4_result.log_path, in_memory=True, is_hashable=True, secure_source=True)
             node_runner.info_files.append(psi4_log_fs)
+            qm_result.files.append(psi4_log_fs)
             node_runner.info(f"Psi4 log file: {psi4_result.log_path}")
         if psi4_result.output_path.exists():
             psi4_output_fs = FileStack.from_local_file(psi4_result.output_path, in_memory=True, is_hashable=True, secure_source=True)
             node_runner.info_files.append(psi4_output_fs)
+            qm_result.files.append(psi4_output_fs)
             node_runner.info(f"Psi4 output file: {psi4_result.output_path}")
 
 
 
 
 @node
-async def psi4_thermochemistry(qm_result: QMResult, temperature: float = 298.15, pressure: float = 101325.0, **kwargs) -> SimstackResult:
+async def psi4_thermochemistry(qm_result: QMResult, temperature: FloatData, pressure: FloatData, **kwargs) -> SimstackResult:
     """
-    Node to compute thermochemistry at specific T and P using a previous wavefunction.
-    
-    Parameters:
-        qm_result (QMResult): Result from a previous Psi4 calculation containing result.wfn.
-        temperature (float): Temperature in K (default 298.15).
-        pressure (float): Pressure in Pa (default 101325.0).
+    Computes thermochemical properties using Psi4 from the wavefunction artifacts provided in
+    a QMResult object. The computation requires the wavefunction to include frequency analysis
+    results, which will be used in conjunction with the specified temperature and pressure to
+    calculate relevant thermochemical values.
+
+    Arguments:
+        qm_result (QMResult): A QMResult object containing the wavefunction files and molecular
+            information necessary for thermochemical computations.
+        temperature (FloatData): The temperature (in Kelvin) to use for the thermochemical
+            analysis.
+        pressure (FloatData): The pressure (in Pascal) to use for the thermochemical analysis.
+        **kwargs: Additional keyword arguments used for internal configurations, such as
+            `node_runner` for handling execution states.
+
+    Returns:
+        SimstackResult: A structured result containing updated thermochemical properties,
+        including enthalpy, Gibbs free energy, entropy, and internal energy. It also includes
+        a reference to the original wavefunction file and the associated vibrational frequency
+        table if available.
+
+    Raises:
+        ValueError: If Psi4 is not installed in the current environment.
+        ValueError: If no appropriate wavefunction file is found in the input QMResult.
+        ValueError: If the wavefunction does not include required frequency analysis results.
+        Exception: For any unexpected errors during thermochemical property computation.
     """
     node_runner: NodeRunner = kwargs.get("node_runner")
     
     if psi4 is None:
         return node_runner.fail("Psi4 is not installed in the current environment.")
 
-    # Find result.wfn / result.wfn.npy in qm_result.files
-    wfn_file = None
-    for fs in qm_result.files:
-        if _is_wavefunction_artifact(fs.name):
-            wfn_file = fs
-            break
-            
+    wfn_file = _find_wavefunction_file(qm_result.files)
     if not wfn_file:
-        return node_runner.fail("No wavefunction file found in the input QMResult.")
+        raise ValueError("No wavefunction file found in the input QMResult.")
 
     downloaded_path = Path(wfn_file.get(local_dir=Path(".")))
-    
+    temperature_value = temperature.value if hasattr(temperature, "value") else temperature
+    pressure_value = pressure.value if hasattr(pressure, "value") else pressure
+
     try:
-        # We need a dummy QMInput to initialize Psi4Calculator for run_manual_thermo
-        # Even though we just want thermo, Psi4Calculator handles the manual vib.thermo call
-        from molecular_qm_models import BasisSet, Functional, BasisSetEnum, FunctionalEnum
-        dummy_input = QMInput(
-            molecule=Molecule(atoms=[]),
-            basis_set=BasisSet(basis_set=BasisSetEnum.STO3G),
-            functional=Functional(functional=FunctionalEnum.B3LYP)
-        )
-        
         psi4.core.clean()
         wfn = _load_wavefunction(downloaded_path)
-        
-        if not hasattr(wfn, "frequency_analysis") or wfn.frequency_analysis is None:
-             return node_runner.fail("The provided wavefunction does not contain frequency analysis results.")
+        if wfn is None:
+            raise ValueError("Failed to load wavefunction from the provided file.")
 
-        # Set T and P in Psi4 options
+        if not hasattr(wfn, "frequency_analysis") or wfn.frequency_analysis is None:
+            return node_runner.fail("The provided wavefunction does not contain frequency analysis results.")
+
         psi4.set_options({
-            "T": temperature,
-            "P": pressure
+            "T": temperature_value,
+            "P": pressure_value
         })
         
-        calculator = Psi4Calculator(dummy_input, node_runner=node_runner)
+        #calculator = Psi4Calculator(dummy_input, node_runner=node_runner)
         energy = wfn.energy()
+        node_runner.info(f"Wavefunction energy: {energy}")
+        node_runner.info(f"Computing thermochemistry at T={temperature_value} K, P={pressure_value} Pa")
+        thermo_result = run_manual_thermo(wfn, energy, node_runner)
         
-        node_runner.info(f"Computing thermochemistry at T={temperature} K, P={pressure} Pa")
-        thermo_result = calculator.run_manual_thermo(wfn, energy, node_runner)
-        
-        # Create a new QMResult to return
-        new_qm_result = QMResult()
-        new_qm_result.final_energy = energy
-        # Link to the original wfn file
-        new_qm_result.files.append(wfn_file)
-        
-        # Copy basic info from old result if available
-        new_qm_result.charge = qm_result.charge
-        new_qm_result.final_structure = qm_result.final_structure
-        
-        # Update thermo values
-        new_qm_result.enthalpy = thermo_result.H_tot
-        new_qm_result.gibbs_free_energy = thermo_result.G_tot
-        new_qm_result.entropy = thermo_result.S_tot
-        new_qm_result.internal_energy = thermo_result.E_tot
-        
-        # Attach the detailed tables
-        if thermo_result.thermodynamics_table:
-            new_qm_result.vibrational_frequencies = thermo_result.thermodynamics_table
-            
-        return SimstackResult(
-            status=TaskStatus.COMPLETED,
-            qm_result=new_qm_result,
-            thermo_result=thermo_result,
-            files=[wfn_file]
-        )
+        node_runner.result = thermo_result
+        return node_runner.succeed()
 
     except Exception as e:
         return node_runner.fail(f"Failed to compute thermochemistry: {str(e)}")

@@ -5,13 +5,15 @@ from molecular_qm_psi4.nodes.compare_conformers import (
     CompareConformersResult,
     CompareConformersResultList,
     FunctionalList,
+    TemperatureList,
     compare_conformers,
     compare_conformers_over_basis_sets,
     compare_conformers_over_functionals,
+    compare_conformers_over_temperature,
 )
 from molecular_qm_psi4.nodes.compare_conformers_table import (
-    compare_conformers_list_to_table,
-    compare_conformers_to_table,
+
+    delta_g_table,
 )
 from molecular_qm_psi4.nodes.compute_energy import compute_energy
 from molecular_qm_psi4.nodes.crest import crest
@@ -49,8 +51,8 @@ __all__ = [
     "compare_conformers",
     "compare_conformers_over_basis_sets",
     "compare_conformers_over_functionals",
-    "compare_conformers_to_table",
-    "compare_conformers_list_to_table",
+    "delta_g_table",
+
     "compute_energy",
     "crest",
     "geometric_neb",
