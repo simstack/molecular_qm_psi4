@@ -174,13 +174,18 @@ async def _fill_compare_conformers_method_table(
             molecule=molecule,
         )
         calc_result = await compare_conformers(arg, **kwargs)
-        if calc_result.status != TaskStatus.COMPLETED:
-            return calc_result.error_message or (
-                f"compare_conformers failed for basis set {basis_name}, "
-                f"functional {functional_name}"
-            )
+        if isinstance(calc_result, CompareConformersResult):
+            compare_result = calc_result
+        elif isinstance(calc_result, SimstackResult):
+            if calc_result.status != TaskStatus.COMPLETED:
+                return calc_result.error_message or (
+                    f"compare_conformers failed for basis set {basis_name}, "
+                    f"functional {functional_name}"
+                )
+            compare_result = getattr(calc_result, "result", None)
+        else:
+            compare_result = getattr(calc_result, "result", None)
 
-        compare_result = getattr(calc_result, "result", None)
         if compare_result is None:
             return (
                 f"compare_conformers returned no result for basis set {basis_name}, "
@@ -371,14 +376,14 @@ async def compare_conformers_over_basis_sets(
         )
         if error_message:
             node_runner.error(error_message)
-            return node_runner.fail(error_message=error_message)
+            return node_runner.fail(error_message)
 
         node_runner.table = table
         node_runner.info(f"Built basis-set compare-conformers table with {len(table.row)} row(s)")
         return node_runner.succeed()
     except Exception as e:
         node_runner.error(str(e))
-        return node_runner.fail(error_message=str(e))
+        return node_runner.fail(str(e))
 
 
 @node
@@ -424,11 +429,11 @@ async def compare_conformers_over_functionals(
         )
         if error_message:
             node_runner.error(error_message)
-            return node_runner.fail(error_message=error_message)
+            return node_runner.fail(error_message)
 
         node_runner.table = table
         node_runner.info(f"Built functional compare-conformers table with {len(table.row)} row(s)")
         return node_runner.succeed()
     except Exception as e:
         node_runner.error(str(e))
-        return node_runner.fail(error_message=str(e))
+        return node_runner.fail(str(e))

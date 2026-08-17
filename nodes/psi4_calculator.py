@@ -21,6 +21,72 @@ from molecular_qm_models import QMInput, QMResult, Molecule
 
 logger = logging.getLogger(__name__)
 
+
+def _wavefunction_has_mo_coefficients(wfn) -> bool:
+    if wfn is None:
+        return False
+    try:
+        return wfn.Ca() is not None
+    except Exception:
+        return False
+
+
+def _serializable_wavefunction(wfn, wfn_freq):
+    """Pick a wavefunction Psi4 can serialize.
+
+    Frequency wavefunctions often have no MO coefficients. ``to_file()`` always
+    calls ``Ca()`` and raises ``Wavefunction::Ca: Unable to obtain MO coefficients``.
+    Prefer the energy/optimization wavefunction, then copy Hessian / frequency
+    analysis onto it when those live only on the frequency object.
+    """
+    candidates = []
+    if wfn is not None:
+        candidates.append(wfn)
+    if wfn_freq is not None and wfn_freq is not wfn:
+        candidates.append(wfn_freq)
+
+    save_wfn = next((candidate for candidate in candidates if _wavefunction_has_mo_coefficients(candidate)), None)
+    if save_wfn is None:
+        return None
+
+    freq_source = wfn_freq if wfn_freq is not None else wfn
+    if freq_source is not None and freq_source is not save_wfn:
+        try:
+            hessian = freq_source.hessian()
+            if hessian is not None:
+                save_wfn.set_hessian(hessian)
+        except Exception:
+            pass
+        frequency_analysis = getattr(freq_source, "frequency_analysis", None)
+        if frequency_analysis is not None:
+            try:
+                save_wfn.frequency_analysis = frequency_analysis
+            except Exception:
+                pass
+    return save_wfn
+
+
+def _is_wavefunction_artifact(name: str) -> bool:
+    if not name:
+        return False
+    lowered = name.lower()
+    return lowered.endswith(".wfn") or lowered.endswith(".wfn.npy") or lowered == "result.wfn.npy"
+
+
+def _load_wavefunction(path: Path):
+    """Load a Psi4 wavefunction written by ``to_file()``.
+
+    ``to_file('result.wfn')`` writes ``result.wfn.npy``. Passing a string path
+    that does not end in ``.npy`` makes ``from_file`` append ``.npy``.
+    """
+    if path.suffix == ".npy" or str(path).endswith(".wfn.npy"):
+        return psi4.core.Wavefunction.from_file(str(path))
+    npy_sibling = Path(str(path) + ".npy")
+    if npy_sibling.exists():
+        return psi4.core.Wavefunction.from_file(str(path))
+    return psi4.core.Wavefunction.from_file(path)
+
+
 @contextmanager
 def redirect_psi4_logs(output_file: Path):
     """
@@ -232,19 +298,10 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             restart_wfn = None
             if hasattr(qm_input, "restart_files") and qm_input.restart_files:
                 for fs in qm_input.restart_files:
-                    if fs.name and fs.name.endswith(".wfn"):
+                    if _is_wavefunction_artifact(fs.name):
                         try:
-                            wfn_path = Path("restart.wfn")
-                            # FileStack.get() returns the path to the downloaded file
-                            downloaded_path = fs.get(local_dir=Path("."))
-                            
-                            # Rename to restart.wfn for consistency if needed
-                            if downloaded_path.name != "restart.wfn":
-                                if wfn_path.exists():
-                                    wfn_path.unlink()
-                                downloaded_path.rename(wfn_path)
-                            
-                            restart_wfn = psi4.core.Wavefunction.from_file(str(wfn_path))
+                            downloaded_path = Path(fs.get(local_dir=Path(".")))
+                            restart_wfn = _load_wavefunction(downloaded_path)
                             node_runner.info(f"Loaded restart wavefunction from {fs.name}")
                             break
                         except Exception as e_wfn:
@@ -284,15 +341,29 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             if wfn_freq is not None:
                 thermo_result = psi4_result.calculate_thermo(energy, wfn_freq, node_runner=node_runner)
 
-            # Save wavefunction for future reuse
+            # Save wavefunction for future reuse. Psi4 to_file() requires MO
+            # coefficients, which frequency wavefunctions often lack.
             try:
-                save_wfn = wfn_freq if wfn_freq is not None else wfn
-                wfn_output_path = Path("result.wfn")
-                save_wfn.to_file(str(wfn_output_path))
-                if wfn_output_path.exists():
-                    wfn_fs = FileStack.from_local_file(wfn_output_path, in_memory=False, is_hashable=True, secure_source=True)
-                    node_runner.files.append(wfn_fs)
-                    node_runner.info(f"Saved reusable wavefunction to {wfn_output_path}")
+                save_wfn = _serializable_wavefunction(wfn, wfn_freq)
+                if save_wfn is None:
+                    node_runner.warning(
+                        "Skipping wavefunction save: no MO coefficients available for reuse"
+                    )
+                else:
+                    wfn_stem = Path("result.wfn")
+                    save_wfn.to_file(str(wfn_stem))
+                    wfn_npy_path = Path(str(wfn_stem) + ".npy")
+                    saved_path = wfn_npy_path if wfn_npy_path.exists() else wfn_stem
+                    if saved_path.exists():
+                        wfn_fs = FileStack.from_local_file(
+                            saved_path, in_memory=False, is_hashable=True, secure_source=True
+                        )
+                        node_runner.files.append(wfn_fs)
+                        node_runner.info(f"Saved reusable wavefunction to {saved_path}")
+                    else:
+                        node_runner.warning(
+                            f"Wavefunction serialization produced no file at {wfn_stem} or {wfn_npy_path}"
+                        )
             except Exception as e_save:
                 node_runner.warning(f"Failed to save wavefunction for reuse: {e_save}")
 
@@ -338,25 +409,17 @@ async def psi4_thermochemistry(qm_result: QMResult, temperature: float = 298.15,
     if psi4 is None:
         return node_runner.fail("Psi4 is not installed in the current environment.")
 
-    # Find result.wfn in qm_result.files
+    # Find result.wfn / result.wfn.npy in qm_result.files
     wfn_file = None
     for fs in qm_result.files:
-        if fs.name == "result.wfn" or (fs.name and fs.name.endswith(".wfn")):
+        if _is_wavefunction_artifact(fs.name):
             wfn_file = fs
             break
             
     if not wfn_file:
         return node_runner.fail("No wavefunction file found in the input QMResult.")
 
-    wfn_path = Path("restart.wfn")
-    # FileStack.get() returns the path to the downloaded file
-    downloaded_path = wfn_file.get(local_dir=Path("."))
-    
-    # Ensure it's named restart.wfn for psi4.core.Wavefunction.from_file if it was different
-    if downloaded_path.name != "restart.wfn":
-        if wfn_path.exists():
-            wfn_path.unlink()
-        downloaded_path.rename(wfn_path)
+    downloaded_path = Path(wfn_file.get(local_dir=Path(".")))
     
     try:
         # We need a dummy QMInput to initialize Psi4Calculator for run_manual_thermo
@@ -369,7 +432,7 @@ async def psi4_thermochemistry(qm_result: QMResult, temperature: float = 298.15,
         )
         
         psi4.core.clean()
-        wfn = psi4.core.Wavefunction.from_file(str(wfn_path))
+        wfn = _load_wavefunction(downloaded_path)
         
         if not hasattr(wfn, "frequency_analysis") or wfn.frequency_analysis is None:
              return node_runner.fail("The provided wavefunction does not contain frequency analysis results.")
