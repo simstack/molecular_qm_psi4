@@ -506,6 +506,9 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         node_runner.info(f"Generated SMILES and formula from molecule: {molecule.smiles} ({molecule.formula})")
 
     psi4_result = Psi4Result(qm_input)
+    # parse_wfn returns this same object; initialize here so finally can attach
+    # log/output files even when the calculation fails before parse_wfn.
+    qm_result = psi4_result.qm_result
     try:
         with redirect_psi4_logs(psi4_result.log_path):
             calculator = Psi4Calculator(qm_input, node_runner=node_runner)
@@ -614,16 +617,21 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     finally:
         if psi4 is not None:
             psi4.core.clean()
-        if psi4_result.log_path.exists():
-            psi4_log_fs = FileStack.from_local_file(psi4_result.log_path, in_memory=True, is_hashable=True, secure_source=True)
-            node_runner.info_files.append(psi4_log_fs)
-            qm_result.files.append(psi4_log_fs)
-            node_runner.info(f"Psi4 log file: {psi4_result.log_path}")
-        if psi4_result.output_path.exists():
-            psi4_output_fs = FileStack.from_local_file(psi4_result.output_path, in_memory=True, is_hashable=True, secure_source=True)
-            node_runner.info_files.append(psi4_output_fs)
-            qm_result.files.append(psi4_output_fs)
-            node_runner.info(f"Psi4 output file: {psi4_result.output_path}")
+        try:
+            if psi4_result.log_path.exists():
+                psi4_log_fs = FileStack.from_local_file(
+                    psi4_result.log_path, in_memory=True, is_hashable=True, secure_source=True
+                )
+                node_runner.info_files.append(psi4_log_fs)
+                node_runner.info(f"Psi4 log file: {psi4_result.log_path}")
+            if psi4_result.output_path.exists():
+                psi4_output_fs = FileStack.from_local_file(
+                    psi4_result.output_path, in_memory=True, is_hashable=True, secure_source=True
+                )
+                node_runner.info_files.append(psi4_output_fs)
+                node_runner.info(f"Psi4 output file: {psi4_result.output_path}")
+        except Exception as e_files:
+            node_runner.warning(f"Failed to collect Psi4 log/output files: {e_files}")
 
 
 
