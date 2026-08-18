@@ -1,0 +1,158 @@
+name: Science image
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+    inputs:
+      distribute:
+        description: Mirror to simstack.de :5000 and push Apptainer SIF to int-nano
+        type: boolean
+        default: true
+
+concurrency:
+  group: science-image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: molecular-qm-psi4
+  LOCAL_IMAGE: molecular-qm-psi4:latest
+  SIF_NAME: molecular_qm_psi4.sif
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      image_ref: ${{ steps.meta.outputs.tags }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long,prefix=
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  distribute:
+    needs: build
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      || (github.event_name == 'workflow_dispatch' && inputs.distribute)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+      GHCR_USER: ${{ github.actor }}
+      GHCR_TOKEN: ${{ secrets.GHCR_READ_TOKEN != '' && secrets.GHCR_READ_TOKEN || secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Mirror image to simstack.de :5000
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ vars.DEPLOY_HOST || 'www.simstack.de' }}
+          username: ${{ vars.DEPLOY_USER || 'simstack' }}
+          key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          envs: IMAGE,GHCR_USER,GHCR_TOKEN,LOCAL_IMAGE
+          script: |
+            set -euo pipefail
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            docker pull "$IMAGE"
+            docker tag "$IMAGE" "$LOCAL_IMAGE"
+            if ! docker ps --format '{{.Names}}' | grep -qx simstack-registry; then
+              echo "starting simstack-registry on :5000"
+              docker run -d --restart=unless-stopped --name simstack-registry -p 5000:5000 registry:2
+            fi
+            docker tag "$LOCAL_IMAGE" "127.0.0.1:5000/${LOCAL_IMAGE}"
+            docker push "127.0.0.1:5000/${LOCAL_IMAGE}"
+            PUBLIC_IP=$(ip -4 -o addr show eth0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1 || true)
+            if [ -n "${PUBLIC_IP:-}" ]; then
+              docker tag "$LOCAL_IMAGE" "${PUBLIC_IP}:5000/${LOCAL_IMAGE}"
+              echo "daemon also tagged ${PUBLIC_IP}:5000/${LOCAL_IMAGE}"
+            fi
+            docker image ls "$LOCAL_IMAGE"
+            docker image ls "127.0.0.1:5000/${LOCAL_IMAGE}"
+
+  apptainer:
+    needs: build
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      || (github.event_name == 'workflow_dispatch' && inputs.distribute)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+      CRANE_VERSION: v0.20.2
+    steps:
+      - name: Install crane and Apptainer
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin crane
+          crane version
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            uidmap fuse2fs squashfs-tools
+          curl -fsSL -o /tmp/apptainer.deb \
+            "https://github.com/apptainer/apptainer/releases/download/v1.4.2/apptainer_1.4.2_amd64.deb"
+          sudo apt-get install -y /tmp/apptainer.deb
+          apptainer version
+
+      - name: Pull GHCR image and build SIF
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | crane auth login ghcr.io -u "${{ github.actor }}" --password-stdin
+          mkdir -p "${RUNNER_TEMP}/apptainer-work"
+          export APPTAINER_TMPDIR="${RUNNER_TEMP}/apptainer-work/tmp"
+          export APPTAINER_CACHEDIR="${RUNNER_TEMP}/apptainer-work/cache"
+          mkdir -p "$APPTAINER_TMPDIR" "$APPTAINER_CACHEDIR"
+          crane pull "$IMAGE" "${RUNNER_TEMP}/apptainer-work/image.tar"
+          apptainer build --force --disable-cache \
+            "${RUNNER_TEMP}/apptainer-work/${SIF_NAME}" \
+            "docker-archive://${RUNNER_TEMP}/apptainer-work/image.tar"
+          ls -lh "${RUNNER_TEMP}/apptainer-work/${SIF_NAME}"
+
+      - name: Upload SIF to int-nano
+        env:
+          INT_NANO_DEPLOY_KEY: ${{ secrets.INT_NANO_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$INT_NANO_DEPLOY_KEY" > ~/.ssh/id_ci
+          chmod 600 ~/.ssh/id_ci
+          ssh-keyscan -H int-nano.int.kit.edu >> ~/.ssh/known_hosts
+          scp -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -i ~/.ssh/id_ci \
+            "${RUNNER_TEMP}/apptainer-work/${SIF_NAME}" \
+            "software@int-nano.int.kit.edu:/shared/software/simstack2/containers/${SIF_NAME}"

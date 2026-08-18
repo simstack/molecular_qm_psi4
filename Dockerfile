@@ -1,5 +1,7 @@
-# Build from the simstack-model repository root:
-#   docker build -t molecular-qm-psi4:latest -f molecular_qm_psi4/Dockerfile .
+# Build from this capability repository:
+#   docker build -t molecular-qm-psi4:latest .
+# From simstack-model:
+#   docker build -t molecular-qm-psi4:latest -f molecular_qm_psi4/Dockerfile molecular_qm_psi4
 #
 # Dual-use: capability tree is not installable on host (no pyproject.toml).
 # In the image, pyproject.docker is renamed and the package is pip-installed;
@@ -32,7 +34,7 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/conda
 ENV PATH="/opt/conda/bin:/root/.local/bin:$PATH"
 
 # Capability package only — deps install from git via pyproject.docker.
-COPY molecular_qm_psi4 /build/molecular_qm_psi4
+COPY . /build/molecular_qm_psi4
 
 WORKDIR /build/molecular_qm_psi4
 RUN cp pyproject.docker pyproject.toml \
