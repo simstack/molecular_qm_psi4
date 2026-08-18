@@ -8,6 +8,7 @@ from molecular_qm_models.basis_set import BasisSet
 from molecular_qm_models.density_functional import Functional
 from molecular_qm_models.energy_units import MolecularEnergyUnitEnum, convert_energy_unit
 from molecular_qm_psi4.nodes.psi4_calculator import psi4_calculator, psi4_thermochemistry
+from simstack.core.context import context
 from simstack.core.definitions import TaskStatus
 from simstack.core.node import node
 from simstack.core.simstack_result import SimstackResult
@@ -226,6 +227,23 @@ async def _fill_compare_conformers_method_table(
     return None
 
 
+def _completed_node_output(calc_result, attr_name: str):
+    """Return a named extra field from a node call.
+
+    When a node returns a SimstackResult with exactly one model, Simstack
+    unwraps it and the caller receives that model directly. Named attributes
+    such as ``result`` or ``psi4_result`` are then the object itself, not nested
+    under the wrapper.
+    """
+    if calc_result is None:
+        return None
+    if isinstance(calc_result, SimstackResult):
+        if calc_result.status != TaskStatus.COMPLETED:
+            return None
+        return getattr(calc_result, attr_name, None)
+    return calc_result
+
+
 def empty_compare_conformers_table(name: str = "Compare Conformers") -> SimpleTable:
     table = SimpleTable(name=name)
     table.add_column("smiles", "string")
@@ -286,8 +304,24 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
     zpe_values = []
     
     # We compare arg.qm_input.molecule (Conformer 1) and arg.molecule (Conformer 2)
+
+
     molecules = [arg.qm_input.molecule, arg.molecule]
-    
+    for molecule in molecules:
+        molecule_changed = False
+        if molecule.smiles is None:
+            molecule.smiles = molecule.make_smiles()
+            molecule_changed = True
+        if molecule.formula is None:
+            molecule.formula = molecule.make_formula()
+            molecule_changed = True
+        if molecule_changed:
+            await context.db.save(molecule)
+
+    custom_name = kwargs.get("custom_name", None)
+    if custom_name is None:
+        node_runner.custom_name = f"{molecules[0].formule}"
+
     for i, molecule in enumerate(molecules):
         node_runner.info(f"Starting calculation for molecule {i+1}...")
         
@@ -489,6 +523,11 @@ async def compare_conformers_over_temperature(
         qm_input (QMInput): Conformer 1 and shared QM settings.
         molecule (Molecule): Conformer 2.
         temperatures (TemperatureList): List of temperatures in Kelvin.
+
+    Called Nodes:
+        psi4_calculator
+        psi4_thermochemistry
+
     """
     node_runner = kwargs.get("node_runner")
     table = empty_compare_conformers_table("Compare Conformers by Temperature")
@@ -515,14 +554,17 @@ async def compare_conformers_over_temperature(
             node_runner.info(f"Starting base calculation for molecule {i+1}...")
             current_input = _qm_input_copy(qm_input)
             current_input.molecule = mol
-            
+
+
             calc_result = await psi4_calculator(current_input, **kwargs)
-            if calc_result.status != TaskStatus.COMPLETED:
-                return node_runner.fail(f"Base calculation failed for molecule {i+1}: {calc_result.error_message}")
-            
-            qm_res = getattr(calc_result, "psi4_result", None)
+            qm_res = _completed_node_output(calc_result, "psi4_result")
             if not qm_res:
-                return node_runner.fail(f"No psi4_result found for molecule {i+1}")
+                status = getattr(calc_result, "status", None)
+                error_message = getattr(calc_result, "error_message", None)
+                return node_runner.fail(
+                    f"No psi4_result found for molecule {i+1}"
+                    + (f" (status={status}, error={error_message})" if status or error_message else "")
+                )
 
             qm_results.append(qm_res)
 
@@ -543,17 +585,26 @@ async def compare_conformers_over_temperature(
                     pressure=FloatData(value=pressure),
                     **kwargs
                 )
-                
-                if thermo_calc_result.status != TaskStatus.COMPLETED:
-                    node_runner.error(f"Failed to compute thermo for molecule {i+1} at T={temp}: {thermo_calc_result.error_message}")
+
+                if (
+                    isinstance(thermo_calc_result, SimstackResult)
+                    and thermo_calc_result.status != TaskStatus.COMPLETED
+                ):
+                    node_runner.error(
+                        f"Failed to compute thermo for molecule {i+1} at T={temp}: "
+                        f"{thermo_calc_result.error_message}"
+                    )
                     continue
 
-                thermo_result = getattr(thermo_calc_result, "result", None)
-                if thermo_result and hasattr(thermo_result, "G_tot") and thermo_result.G_tot is not None:
+                thermo_result = _completed_node_output(thermo_calc_result, "result")
+                if thermo_result is not None and getattr(thermo_result, "G_tot", None) is not None:
                     g_values.append(thermo_result.G_tot)
-                    zpe_values.append(thermo_result.ZPE_tot)
+                    zpe_values.append(getattr(thermo_result, "ZPE_tot", None))
                 else:
-                    node_runner.error(f"G_tot not found in thermo_result for molecule {i+1} at T={temp}")
+                    node_runner.error(
+                        f"G_tot not found in thermo_result for molecule {i+1} at T={temp} "
+                        f"(got {type(thermo_calc_result).__name__})"
+                    )
 
             if len(g_values) == 2:
                 delta_delta_g_hartree = g_values[1] - g_values[0]

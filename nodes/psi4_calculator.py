@@ -74,11 +74,13 @@ def _serialize_frequency_analysis(vibinfo):
 
 
 def _vib_datum(label, units, data, comment="", numeric=True):
-    try:
-        from qcelemental import Datum
-        return Datum(label, units, data, comment=comment, numeric=numeric)
-    except Exception:
-        return SimpleNamespace(label=label, units=units, data=data, comment=comment, numeric=numeric)
+    """Rebuild one frequency-analysis quantity (omega, mu, IR intensity, ...).
+
+    Psi4 stores these as qcelemental.Datum objects on ``wfn.frequency_analysis``.
+    Thermochemistry only reads ``.data`` (and sometimes ``.units`` / ``.label``),
+    so a SimpleNamespace with those attributes is enough after a reload.
+    """
+    return SimpleNamespace(label=label, units=units, data=data, comment=comment, numeric=numeric)
 
 
 def _deserialize_frequency_analysis(raw):
@@ -597,8 +599,8 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             node_runner.psi4_result = qm_result
 
             current_name = kwargs.get("custom_name", None)
-            if current_name is None or current_name == "" and qm_input.molecule.name is not None:
-                node_runner["custom_name"] = qm_input.molecule.name
+            if current_name is None or current_name == "" and qm_input.molecule.formula is not None:
+                node_runner.custom_name = qm_input.molecule.formula
             if thermo_result:
                 node_runner.thermo_result = thermo_result
             return node_runner.succeed()
@@ -668,6 +670,10 @@ async def psi4_thermochemistry(qm_result: QMResult, temperature: FloatData, pres
     temperature_value = temperature.value if hasattr(temperature, "value") else temperature
     pressure_value = pressure.value if hasattr(pressure, "value") else pressure
 
+    pressure_atm = pressure_value / 101325.0
+    if kwargs["custom_name"] is None:
+        node_runner.custom_name = f"{temperature_value:.2f}/{pressure_atm:.2f}"
+
     try:
         psi4.core.clean()
         wfn = _load_wavefunction(downloaded_path)
@@ -685,7 +691,8 @@ async def psi4_thermochemistry(qm_result: QMResult, temperature: FloatData, pres
         #calculator = Psi4Calculator(dummy_input, node_runner=node_runner)
         energy = wfn.energy()
         node_runner.info(f"Wavefunction energy: {energy}")
-        node_runner.info(f"Computing thermochemistry at T={temperature_value} K, P={pressure_value} Pa")
+        node_runner.info(
+            f"Computing thermochemistry at T={temperature_value:.2f} K, P={pressure_value:.2f} Pa ({pressure_atm:.2f} atm)")
         thermo_result = run_manual_thermo(wfn, energy, node_runner)
         
         node_runner.result = thermo_result
