@@ -466,6 +466,80 @@ def parse_psi4_thermo_output(output_content: str) -> SimpleTable:
     return table
 
 
+_SLURM_MEMORY_PATTERN = re.compile(r"^(\d+(?:\.\d+)?)\s*([MGmg])B?$")
+_DEFAULT_PSI4_MEMORY = "8 GB"
+_DEFAULT_PSI4_THREADS = 4
+
+
+def _positive_int(value) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 1 else None
+
+
+def _slurm_cpu_count(slurm) -> int | None:
+    """Match docker: cpus_per_task * tasks (or tasks_per_node)."""
+    cpus_per_task = _positive_int(getattr(slurm, "cpus_per_task", None))
+    tasks = _positive_int(getattr(slurm, "tasks", None))
+    tasks_per_node = _positive_int(getattr(slurm, "tasks_per_node", None))
+    if cpus_per_task is None and tasks is None and tasks_per_node is None:
+        return None
+    return (cpus_per_task or 1) * (tasks or tasks_per_node or 1)
+
+
+def _parse_slurm_memory(value) -> tuple[float, str] | None:
+    if not isinstance(value, str):
+        return None
+    match = _SLURM_MEMORY_PATTERN.fullmatch(value.strip())
+    if match is None:
+        return None
+    return float(match.group(1)), match.group(2).lower()
+
+
+def _format_psi4_memory(amount: float, unit: str) -> str:
+    label = "GB" if unit == "g" else "MB"
+    if amount == int(amount):
+        return f"{int(amount)} {label}"
+    return f"{amount} {label}"
+
+
+def resources_from_parent_parameters(kwargs: dict) -> tuple[str, int, str]:
+    """Resolve Psi4 memory/threads from ``parent_parameters.slurm_parameters``."""
+    params = kwargs.get("parent_parameters") or kwargs.get("parameters")
+    slurm = getattr(params, "slurm_parameters", None) if params is not None else None
+    if slurm is None:
+        return (
+            _DEFAULT_PSI4_MEMORY,
+            _DEFAULT_PSI4_THREADS,
+            "Psi4 resources: memory="
+            f"{_DEFAULT_PSI4_MEMORY}, threads={_DEFAULT_PSI4_THREADS} "
+            "(no SlurmParameters on parent_parameters; using defaults)",
+        )
+
+    threads = _slurm_cpu_count(slurm) or _DEFAULT_PSI4_THREADS
+    mem = _parse_slurm_memory(getattr(slurm, "mem", None))
+    mem_per_cpu = _parse_slurm_memory(getattr(slurm, "mem_per_cpu", None))
+    if mem is not None:
+        memory = _format_psi4_memory(*mem)
+    elif mem_per_cpu is not None:
+        amount, unit = mem_per_cpu
+        memory = _format_psi4_memory(amount * (_slurm_cpu_count(slurm) or 1), unit)
+    else:
+        memory = _DEFAULT_PSI4_MEMORY
+
+    return (
+        memory,
+        threads,
+        "Psi4 resources from parent SlurmParameters: "
+        f"memory={memory}, threads={threads} "
+        f"(cpus_per_task={getattr(slurm, 'cpus_per_task', None)}, "
+        f"tasks={getattr(slurm, 'tasks', None)}, "
+        f"tasks_per_node={getattr(slurm, 'tasks_per_node', None)}, "
+        f"mem={getattr(slurm, 'mem', None)}, "
+        f"mem_per_cpu={getattr(slurm, 'mem_per_cpu', None)})",
+    )
+
+
 @node
 async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     """
@@ -479,8 +553,9 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     """
     node_runner = kwargs.get("node_runner")
 
-    memory = "8 GB"
-    num_threads = 4
+    memory, num_threads, resource_log = resources_from_parent_parameters(kwargs)
+    if node_runner is not None:
+        node_runner.info(resource_log)
 
     if psi4 is None:
         return node_runner.fail("Psi4 is not installed in the current environment.")
