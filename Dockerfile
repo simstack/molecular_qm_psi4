@@ -25,9 +25,19 @@ ENV PATH="/opt/conda/bin:/root/.local/bin:$PATH"
 
 WORKDIR /app
 
-# Install Psi4, crest, geometric, openbabel, pymatgen and xtb-python from conda
-RUN micromamba install -y -n base -c conda-forge psi4 crest geometric openbabel pymatgen xtb-python python=3.12 && \
-    micromamba clean --all --yes
+# Psi4 plus Grimme D3/D4 Python APIs. QCEngine's s-dftd3 engine needs
+# `import dftd3` (conda-forge dftd3-python), not only the s-dftd3 binary.
+RUN micromamba install -y -n base -c conda-forge \
+    python=3.12 \
+    psi4 \
+    crest \
+    geometric \
+    openbabel \
+    pymatgen \
+    xtb-python \
+    dftd3-python \
+    dftd4-python \
+    && micromamba clean --all --yes
 
 ENV UV_PYTHON=/opt/conda/bin/python
 ENV UV_PROJECT_ENVIRONMENT=/opt/conda
@@ -43,7 +53,12 @@ RUN cp pyproject.docker pyproject.toml \
 print('simstack', simstack.__file__); \
 print('models', molecular_qm_models.__file__); \
 print('util', molecular_qm_util.__file__); \
-print('psi4', molecular_qm_psi4.__file__)"
+print('psi4', molecular_qm_psi4.__file__)" \
+ && python -c "import dftd3, dftd4, qcengine as qcng; \
+qcng.get_program('s-dftd3'); \
+qcng.get_program('dftd4'); \
+print('s-dftd3', qcng.get_program('s-dftd3')); \
+print('dftd4', qcng.get_program('dftd4'))"
 
 WORKDIR /app
 ENTRYPOINT ["python", "-m", "simstack.core.run_node"]

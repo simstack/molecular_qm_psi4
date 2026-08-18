@@ -1,6 +1,21 @@
+import re
+
 from molecular_qm_models import QMInput
 # from molecular_qm_psi4.nodes.psi4_calculator import psi4, qminput_to_psi4_molecule
 # Import locally to avoid circular dependencies
+
+_PSI4_DISPERSION_SUFFIX = {
+    "D2": "d2",
+    "D3": "d3zero",
+    "D3BJ": "d3bj",
+    "D4": "d4",
+    "NL": "nl",
+}
+_PSI4_BUILTIN_DISP_RE = re.compile(
+    r"(?:-d(?:2|3(?:bj|zero|m(?:bj)?)?|4)?|-nl)$",
+    re.IGNORECASE,
+)
+
 
 class Psi4Calculator:
     def __init__(self, qm_input: QMInput, **kwargs):
@@ -117,4 +132,17 @@ class Psi4Calculator:
             method = self.qm_input.functional.functional.value if hasattr(self.qm_input.functional.functional, "value") else str(self.qm_input.functional.functional)
         else:
             method = self.qm_input.functional.value if hasattr(self.qm_input.functional, "value") else str(self.qm_input.functional)
+
+        dispersion = getattr(getattr(self.qm_input.functional, "dispersion_correction", None), "value", None)
+        disp_name = getattr(dispersion, "value", dispersion)
+        if not disp_name:
+            return method
+        disp_name = str(disp_name).upper()
+        if disp_name == "NONE":
+            return method
+        if _PSI4_BUILTIN_DISP_RE.search(method) or method.upper() in {"B97D", "B97-D"}:
+            return method
+        suffix = _PSI4_DISPERSION_SUFFIX.get(disp_name)
+        if suffix:
+            return f"{method}-{suffix}"
         return method

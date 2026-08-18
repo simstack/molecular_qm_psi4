@@ -78,7 +78,7 @@ jobs:
         with:
           host: ${{ vars.DEPLOY_HOST || 'www.simstack.de' }}
           username: ${{ vars.DEPLOY_USER || 'simstack' }}
-          key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY || secrets.SIMSTACK_SSH_PRIVATE_KEY }}
           envs: IMAGE,GHCR_USER,GHCR_TOKEN,LOCAL_IMAGE
           script: |
             set -euo pipefail
