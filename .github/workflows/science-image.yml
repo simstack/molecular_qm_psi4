@@ -2,8 +2,6 @@ name: Science image
 
 on:
   push:
-    branches:
-      - "**"
   workflow_dispatch:
     inputs:
       distribute:
@@ -29,8 +27,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 180
-    outputs:
-      image_ref: ${{ steps.meta.outputs.tags }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -51,7 +47,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=sha,format=long,prefix=
+            type=raw,value=${{ github.sha }}
             type=ref,event=branch
             type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
@@ -69,15 +65,13 @@ jobs:
 
   distribute:
     needs: build
-    if: >-
-      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-      || (github.event_name == 'workflow_dispatch' && inputs.distribute)
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || (github.event_name == 'workflow_dispatch' && inputs.distribute) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+      IMAGE: ghcr.io/simstack/molecular-qm-psi4:${{ github.sha }}
       GHCR_USER: ${{ github.actor }}
-      GHCR_TOKEN: ${{ secrets.GHCR_READ_TOKEN != '' && secrets.GHCR_READ_TOKEN || secrets.GITHUB_TOKEN }}
+      GHCR_TOKEN: ${{ secrets.GHCR_READ_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - name: Mirror image to simstack.de :5000
         uses: appleboy/ssh-action@v1.2.2
@@ -91,29 +85,18 @@ jobs:
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             docker pull "$IMAGE"
             docker tag "$IMAGE" "$LOCAL_IMAGE"
-            if ! docker ps --format '{{.Names}}' | grep -qx simstack-registry; then
-              echo "starting simstack-registry on :5000"
-              docker run -d --restart=unless-stopped --name simstack-registry -p 5000:5000 registry:2
-            fi
             docker tag "$LOCAL_IMAGE" "127.0.0.1:5000/${LOCAL_IMAGE}"
             docker push "127.0.0.1:5000/${LOCAL_IMAGE}"
-            PUBLIC_IP=$(ip -4 -o addr show eth0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1 || true)
-            if [ -n "${PUBLIC_IP:-}" ]; then
-              docker tag "$LOCAL_IMAGE" "${PUBLIC_IP}:5000/${LOCAL_IMAGE}"
-              echo "daemon also tagged ${PUBLIC_IP}:5000/${LOCAL_IMAGE}"
-            fi
             docker image ls "$LOCAL_IMAGE"
             docker image ls "127.0.0.1:5000/${LOCAL_IMAGE}"
 
   apptainer:
     needs: build
-    if: >-
-      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-      || (github.event_name == 'workflow_dispatch' && inputs.distribute)
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || (github.event_name == 'workflow_dispatch' && inputs.distribute) }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+      IMAGE: ghcr.io/simstack/molecular-qm-psi4:${{ github.sha }}
       CRANE_VERSION: v0.20.2
     steps:
       - name: Install crane and Apptainer
