@@ -10,7 +10,11 @@ try:
 except ImportError:
     np = None
 
-from molecular_qm_psi4.util.psi4_calculator import Psi4Calculator
+from molecular_qm_psi4.util.psi4_calculator import (
+    Psi4Calculator,
+    clamp_print_level,
+    python_log_level_for_print_level,
+)
 from molecular_qm_psi4.util.psi4_result import Psi4Result
 from molecular_qm_psi4.util.psi4_thermo import run_manual_thermo
 from simstack.core.context import context
@@ -296,26 +300,88 @@ def _find_wavefunction_file(files):
     return None
 
 
+class OptKingSummaryFilter(logging.Filter):
+    """Keep driver output and short OptKing progress; drop Hessian / internals dumps."""
+
+    MAX_CHARS = 1500
+    MAX_LINES = 25
+    DENY = re.compile(r"hessian|B-matrix|G-matrix|internal coordinates", re.IGNORECASE)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name.startswith("psi4.driver"):
+            return True
+        msg = record.getMessage()
+        if len(msg) > self.MAX_CHARS or msg.count("\n") > self.MAX_LINES:
+            return False
+        if self.DENY.search(msg):
+            return False
+        return True
+
+
+class NodeRunnerLogHandler(logging.Handler):
+    """Forward Psi4 Python log records to NodeRunner as they are emitted."""
+
+    def __init__(self, node_runner):
+        super().__init__()
+        self.node_runner = node_runner
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self.node_runner is None:
+            return
+        try:
+            msg = self.format(record)
+            if record.levelno >= logging.ERROR:
+                self.node_runner.error(msg)
+            elif record.levelno >= logging.WARNING:
+                self.node_runner.warning(msg)
+            else:
+                self.node_runner.info(msg)
+        except Exception:
+            self.handleError(record)
+
+
 @contextmanager
-def redirect_psi4_logs(output_file: Path):
+def redirect_psi4_logs(output_file: Path, print_level: int = 1, node_runner=None):
     """
-    Redirect Psi4/OptKing Python logging to a file instead of the SimStack logs.
+    Redirect Psi4/OptKing Python logging to a file, and stream driver/opt
+    summaries to NodeRunner as they are emitted.
 
     Psi4's native output is handled separately via psi4.core.set_output_file().
-    This context manager catches Python logging messages such as:
-      psi4.optking.optwrapper - INFO - ...
+    File verbosity follows QMInput.print_level (0-4). Default 1 is WARNING, which
+    keeps OptKing from dumping Hessians and internals into psi4.log.
     """
     logger_names = [
         "psi4",
+        "psi4.driver",
         "psi4.optking",
         "psi4.optking.optwrapper",
         "optking",
+        "optking.optwrapper",
+        "qcoptking",
     ]
+    live_logger_names = {
+        "psi4.driver",
+        "psi4.optking",
+        "psi4.optking.optwrapper",
+        "optking",
+        "optking.optwrapper",
+        "qcoptking",
+    }
+    file_level = python_log_level_for_print_level(print_level)
+    live_enabled = clamp_print_level(print_level) >= 1 and node_runner is not None
 
     file_handler = logging.FileHandler(output_file, mode="a", encoding="utf-8")
+    file_handler.setLevel(file_level)
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(filename)s : %(lineno)d - %(message)s")
     )
+
+    live_handler = None
+    if live_enabled:
+        live_handler = NodeRunnerLogHandler(node_runner)
+        live_handler.setLevel(logging.INFO)
+        live_handler.setFormatter(logging.Formatter("%(name)s - %(message)s"))
+        live_handler.addFilter(OptKingSummaryFilter())
 
     previous_states = []
     try:
@@ -331,8 +397,13 @@ def redirect_psi4_logs(output_file: Path):
                 )
             )
 
-            psi_logger.handlers = [file_handler]
-            psi_logger.setLevel(logging.INFO)
+            handlers = [file_handler]
+            if live_handler is not None and name in live_logger_names:
+                handlers.append(live_handler)
+                psi_logger.setLevel(logging.INFO)
+            else:
+                psi_logger.setLevel(file_level)
+            psi_logger.handlers = handlers
             psi_logger.propagate = False
             psi_logger.disabled = False
 
@@ -585,7 +656,7 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     # log/output files even when the calculation fails before parse_wfn.
     qm_result = psi4_result.qm_result
     try:
-        with redirect_psi4_logs(psi4_result.log_path):
+        with redirect_psi4_logs(psi4_result.log_path, qm_input.print_level, node_runner=node_runner):
             calculator = Psi4Calculator(qm_input, node_runner=node_runner)
             
             # Set up memory and threads

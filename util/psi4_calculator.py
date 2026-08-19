@@ -1,3 +1,4 @@
+import logging
 import re
 
 from molecular_qm_models import QMInput
@@ -15,6 +16,38 @@ _PSI4_BUILTIN_DISP_RE = re.compile(
     r"(?:-d(?:2|3(?:bj|zero|m(?:bj)?)?|4)?|-nl)$",
     re.IGNORECASE,
 )
+
+# QMInput.print_level is 0-4 (default 1). OptKing dumps Hessians/internals at INFO.
+_PYTHON_LOG_LEVEL_BY_PRINT_LEVEL = {
+    0: logging.ERROR,
+    1: logging.WARNING,
+    2: logging.INFO,
+    3: logging.DEBUG,
+    4: logging.DEBUG,
+}
+
+
+def clamp_print_level(print_level) -> int:
+    try:
+        level = int(print_level)
+    except (TypeError, ValueError):
+        level = 1
+    return max(0, min(level, 4))
+
+
+def python_log_level_for_print_level(print_level) -> int:
+    return _PYTHON_LOG_LEVEL_BY_PRINT_LEVEL[clamp_print_level(print_level)]
+
+
+def psi4_print_options(print_level) -> dict:
+    """Map QMInput.print_level (0-4) onto Psi4 / OptKing print keywords."""
+    level = clamp_print_level(print_level)
+    return {
+        "print": level,
+        "debug": max(0, level - 2),
+        # OptKing PRINT is 1-5; 0 would fail validation.
+        "optking__print": max(1, level),
+    }
 
 
 class Psi4Calculator:
@@ -69,7 +102,9 @@ class Psi4Calculator:
             "basis": basis_name,
             "reference": "uhf" if self.qm_input.open_shell_calculation else "rhf",
             "scf_type": "df",  # Defaulting to density fitting for performance
-            "maxiter": 300,
+            "maxiter": self.qm_input.max_scf_iterations,
+            "geom_maxiter": self.qm_input.max_optimization_iterations,
+            **psi4_print_options(getattr(self.qm_input, "print_level", 1)),
         }
 
         # Set thermochemistry options if provided
