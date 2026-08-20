@@ -1,7 +1,10 @@
 import logging
 from unittest.mock import MagicMock, patch
 
-from molecular_qm_psi4.nodes.psi4_calculator import redirect_psi4_logs
+from molecular_qm_psi4.nodes.psi4_calculator import (
+    OptimizationSnapshotter,
+    redirect_psi4_logs,
+)
 from molecular_qm_psi4.util.psi4_calculator import (
     Psi4Calculator,
     python_log_level_for_print_level,
@@ -135,3 +138,22 @@ def test_print_level_0_does_not_forward_driver_info(tmp_path):
     with redirect_psi4_logs(log_file, print_level=0, node_runner=node_runner):
         logging.getLogger("psi4.driver.driver").info("Return gradient(): -1.0")
         assert node_runner.info.call_count == 0
+
+
+def test_optimization_snapshotter_enter_does_not_unbind_psi4():
+    """``import psi4.driver`` in __enter__ must not make ``psi4`` a local name."""
+    snap = OptimizationSnapshotter(MagicMock(), {})
+    with snap:
+        pass
+
+
+def test_optimization_snapshotter_enter_when_psi4_is_present():
+    from molecular_qm_psi4.nodes import psi4_calculator as mod
+
+    fake_psi4 = MagicMock()
+    original_gradient = MagicMock(name="gradient")
+    fake_psi4.gradient = original_gradient
+    with patch.object(mod, "psi4", fake_psi4):
+        snap = OptimizationSnapshotter(MagicMock(), {})
+        with snap:
+            pass

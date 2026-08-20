@@ -444,7 +444,10 @@ class OptimizationSnapshotter:
         if psi4 is None:
             return self
         try:
-            import psi4.driver.driver  # noqa: F401
+            # Avoid ``import psi4.driver``: that binds a local ``psi4``.
+            import importlib
+
+            importlib.import_module("psi4.driver.driver")
         except Exception:
             pass
         original = getattr(psi4, "gradient", None)

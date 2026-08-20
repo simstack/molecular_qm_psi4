@@ -47,6 +47,13 @@ class PreOptimizerInput(Model):
         False,
         json_schema_extra={"title": "DFTB pre-optimization"},
     )
+    max_dftb_iterations: int = Field(
+        100,
+        json_schema_extra={
+            "title": "Max DFTB iterations",
+            "description": "Maximum DFTB geometry optimization steps",
+        },
+    )
     steps: List[OptimizationStepInput] = Field(default_factory=list)
 
     @model_validator(mode="before")
@@ -60,6 +67,19 @@ class PreOptimizerInput(Model):
     def json_schema(cls, recursive=True):
         schema = cleaned_json_schema(cls)
         schema["title"] = cls.__name__
+        props = schema["properties"]
+        max_dftb = props.pop("max_dftb_iterations", None)
+        schema.setdefault("dependencies", {})["dftb_opt"] = {
+            "oneOf": [
+                {"properties": {"dftb_opt": {"const": False}}},
+                {
+                    "properties": {
+                        "dftb_opt": {"const": True},
+                        "max_dftb_iterations": max_dftb,
+                    }
+                },
+            ]
+        }
         return schema
 
     @classmethod
@@ -70,16 +90,18 @@ class PreOptimizerInput(Model):
             "ui:widget": "checkbox",
             "ui:title": "DFTB pre-optimization",
         }
+        ui.setdefault("max_dftb_iterations", {})["ui:condition"] = {"dftb_opt": True}
         return ui
 
 
-def _dftb_preopt_input(qm_input: QMInput) -> DftbInput:
+def _dftb_preopt_input(qm_input: QMInput, max_dftb_iterations: int) -> DftbInput:
     """Build DftbInput for geometry pre-optimization."""
     return DftbInput(
         optimization=True,
         charge=qm_input.charge,
         multiplicity=qm_input.multiplicity,
         compute_gradients=True,
+        max_optimization_steps=max_dftb_iterations,
     )
 
 
@@ -164,7 +186,7 @@ async def multistep_optimizer(
 
     Parameters:
         qm_input (QMInput): Molecule and shared QM settings used as the copy template.
-        preopt (PreOptimizerInput): DFTB toggle and ordered Psi4 optimization steps.
+        preopt (PreOptimizerInput): DFTB toggle, max DFTB iterations, and ordered Psi4 steps.
 
     Called Nodes:
         dftb_calculator
@@ -192,8 +214,11 @@ async def multistep_optimizer(
     tolerate_failure = bool(getattr(qm_input, "tolerate_failure", False))
 
     if preopt.dftb_opt:
-        opts = _dftb_preopt_input(qm_input)
-        node_runner.info("Starting DFTB pre-optimization")
+        opts = _dftb_preopt_input(qm_input, preopt.max_dftb_iterations)
+        node_runner.info(
+            f"Starting DFTB pre-optimization "
+            f"(max_dftb_iterations={preopt.max_dftb_iterations})"
+        )
         try:
             calc_result = await dftb_calculator(molecule, opts, **kwargs)
         except Exception as exc:
