@@ -76,12 +76,24 @@ async def initialized_context():
     )
 
     # Initialize model and node tables for both real and mock databases
-    dirs = [Path(__file__).parents[1]]
-
-    await make_model_table(context.db, dirs=dirs, drops="src", clear=True,
-                           project_root=project_root, ignore_entrypoints=True)
-    await make_node_table(context.db, dirs=dirs, drops="src", clear=True,
-                          project_root=project_root, ignore_entrypoints=True)
+    psi4_dir = Path(__file__).parents[1]
+    project_root = Path(__file__).parents[2]
+    await make_model_table(
+        context.db,
+        dirs=[psi4_dir, project_root / "molecular_qm_models"],
+        drops="src",
+        clear=True,
+        project_root=project_root,
+        ignore_entrypoints=True,
+    )
+    await make_node_table(
+        context.db,
+        dirs=[psi4_dir],
+        drops="src",
+        clear=True,
+        project_root=project_root,
+        ignore_entrypoints=True,
+    )
 
     await context.refresh_mappings()
 

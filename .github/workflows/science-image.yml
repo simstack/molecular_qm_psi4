@@ -51,6 +51,14 @@ jobs:
             type=ref,event=branch
             type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
+      - name: Resolve uv git SHAs
+        id: uv_git
+        run: |
+          set -euo pipefail
+          shas=$(python3 resolve_uv_git_shas.py pyproject.docker)
+          echo "shas=${shas}" >> "$GITHUB_OUTPUT"
+          echo "uv git sources ${shas}"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -62,6 +70,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            UV_GIT_SHAS=${{ steps.uv_git.outputs.shas }}
 
   distribute:
     needs: build

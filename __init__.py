@@ -1,4 +1,10 @@
 from molecular_qm_psi4.nodes.psi4_calculator import psi4_calculator
+from molecular_qm_psi4.nodes.molecule_snapshot_inspector import molecule_snapshot_inspector
+from molecular_qm_psi4.nodes.multistep_optimizer import (
+    OptimizationStepInput,
+    PreOptimizerInput,
+    multistep_optimizer,
+)
 from molecular_qm_psi4.nodes.compare_conformers import (
     BasisSetList,
     CompareConformersModel,
@@ -43,6 +49,10 @@ from molecular_qm_psi4.testing import (
 
 __all__ = [
     "psi4_calculator",
+    "molecule_snapshot_inspector",
+    "OptimizationStepInput",
+    "PreOptimizerInput",
+    "multistep_optimizer",
     "CompareConformersModel",
     "CompareConformersResult",
     "CompareConformersResultList",

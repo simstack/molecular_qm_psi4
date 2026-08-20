@@ -14,7 +14,7 @@ Psi4 capabilities for molecular quantum mechanics within the Simstack framework.
 Installed from git during the Docker build (see `pyproject.docker`):
 
 - [`molecular_qm_models`](https://github.com/simstack/molecular_qm_models)
-- [`molecular_qm_util`](https://github.com/simstack/molecular_qm_util)
+- [`molecular_qm_util`](https://github.com/simstack/molecular_qm_util) (`develop-ww`)
 - [`simstack`](https://github.com/simstack/simstack) (`fix-git-pull`)
 
 ## Local Docker image
