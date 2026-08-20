@@ -6,14 +6,19 @@ from molecular_qm_models import BasisSet, Functional, Molecule, MoleculeSnapshot
 from molecular_qm_models.constants import BOHR_TO_ANGSTROM
 from simstack.models import FileStack
 
+import numpy as np
+from odmantic import ObjectId
+
 from molecular_qm_psi4.nodes.psi4_calculator import (
     OptimizationSnapshotter,
+    _energy_and_grad_norm,
     _molecule_from_psi4_molecule,
+    _persist_molecule_snapshot,
     _should_snapshot,
     _task_id_from_kwargs,
     _wavefunction_from_gradient_result,
-    _persist_molecule_snapshot,
 )
+from simstack.models.charts_artifact import ChartArtifactModel
 
 
 def test_should_snapshot_every_ten_iterations():
@@ -212,3 +217,94 @@ def test_persist_molecule_snapshot_saves_models(tmp_path, monkeypatch):
     assert snapshot.wavefunction.name == "snapshot_geom_0001_scf_0010.wfn.npy"
     assert db.save.await_count == 3
     node_runner.info.assert_called()
+
+
+class _FakeGrad:
+    def __init__(self, values):
+        self._values = np.array(values, dtype=float)
+
+    def to_array(self):
+        return self._values
+
+
+class _FakeDb:
+    def __init__(self):
+        self.saved = []
+
+    async def save(self, obj):
+        self.saved.append(obj)
+        return obj
+
+
+def test_energy_and_grad_norm_from_wfn():
+    wfn = SimpleNamespace(
+        molecule=lambda: None,
+        energy=lambda: -76.5,
+        gradient=lambda: _FakeGrad([[0.3, 0.0, 0.0], [-0.4, 0.0, 0.0]]),
+    )
+    energy, grad_norm = _energy_and_grad_norm((None, wfn))
+    assert energy == -76.5
+    assert abs(grad_norm - 0.5) < 1e-12
+
+
+def test_snapshotter_writes_opt_charts_every_ten_steps(tmp_path, monkeypatch):
+    task_id = ObjectId()
+    step = {"n": 0}
+    wfn = SimpleNamespace(
+        molecule=lambda: None,
+        energy=lambda: -76.0 - 0.01 * step["n"],
+        gradient=lambda: _FakeGrad([[0.1, 0.0, 0.0], [-0.1, 0.0, 0.0]]),
+    )
+
+    def fake_gradient(name, **kwargs):
+        step["n"] += 1
+        return (wfn.gradient(), wfn)
+
+    mock_psi4 = MagicMock()
+    mock_psi4.gradient = fake_gradient
+    mock_psi4.core.variable.side_effect = (
+        lambda name: step["n"] if name == "OPTIMIZATION ITERATIONS" else None
+    )
+    db = _FakeDb()
+
+    async def skip_snapshot(*args, **kwargs):
+        return None
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("molecular_qm_psi4.nodes.psi4_calculator.psi4", mock_psi4)
+    monkeypatch.setattr(
+        "molecular_qm_psi4.nodes.psi4_calculator._persist_molecule_snapshot",
+        skip_snapshot,
+    )
+    monkeypatch.setattr(
+        "molecular_qm_psi4.nodes.psi4_calculator._get_db",
+        lambda: db,
+    )
+
+    source = Molecule.from_sites(["H"], [[0.0, 0.0, 0.0]])
+    kwargs = {
+        "task_id": str(task_id),
+        "call_path": ".job.psi4_calculator",
+        "node_runner": MagicMock(),
+    }
+    fake_driver = SimpleNamespace(gradient=fake_gradient)
+
+    with patch.dict("sys.modules", {"psi4.driver.driver": fake_driver}):
+        with OptimizationSnapshotter(source, kwargs) as snapshotter:
+            wrapped = fake_driver.gradient
+            for _ in range(12):
+                wrapped("pbe")
+            assert [row["step"] for row in snapshotter.energy_history] == list(range(1, 13))
+            assert len(db.saved) == 2
+            assert {chart.series[0].yKey for chart in db.saved} == {"energy", "grad_norm"}
+
+    assert all(isinstance(chart, ChartArtifactModel) for chart in db.saved)
+    assert all(chart.parent_id == task_id for chart in db.saved)
+    energy_charts = [c for c in db.saved if c.series[0].yKey == "energy"]
+    grad_charts = [c for c in db.saved if c.series[0].yKey == "grad_norm"]
+    assert len(energy_charts) >= 2
+    assert energy_charts[-1].data[-1]["step"] == 12
+    assert energy_charts[0].id == energy_charts[-1].id
+    assert grad_charts[0].id == grad_charts[-1].id
+    assert energy_charts[-1].title.text == "Psi4 optimization energy"
+    assert grad_charts[-1].title.text == "Psi4 optimization gradient norm"

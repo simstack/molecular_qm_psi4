@@ -20,10 +20,18 @@ from molecular_qm_psi4.util.psi4_calculator import (
 )
 from molecular_qm_psi4.util.psi4_result import Psi4Result
 from molecular_qm_psi4.util.psi4_thermo import run_manual_thermo
+from odmantic import ObjectId
+
 from simstack.core.context import context
 from simstack.core.node_runner import NodeRunner
 from simstack.core.definitions import TaskStatus
 from simstack.models import FileStack, FloatData
+from simstack.models.charts_artifact import (
+    AGChartAxisConfig,
+    AGChartTitleConfig,
+    AGLineSeriesConfig,
+    ChartArtifactModel,
+)
 from simstack.models.simple_table import SimpleTable
 
 try:
@@ -355,6 +363,115 @@ def _task_id_from_kwargs(kwargs: dict) -> str:
     return "" if task_id is None else str(task_id)
 
 
+def _task_parent_id(kwargs: dict):
+    task_id = _task_id_from_kwargs(kwargs)
+    if not task_id:
+        return None
+    try:
+        return ObjectId(str(task_id))
+    except Exception:
+        return None
+
+
+def _get_db():
+    try:
+        return context.db
+    except RuntimeError:
+        return None
+
+
+def _energy_and_grad_norm(result):
+    if np is None:
+        return None, None
+    wfn = _wavefunction_from_gradient_result(result)
+    energy = _safe_call(wfn.energy) if wfn is not None else None
+    grads = _safe_array(wfn.gradient) if wfn is not None else None
+    if grads is None:
+        grad_obj = result[0] if isinstance(result, tuple) and result else result
+        if grad_obj is not None and grad_obj is not wfn:
+            grads = _safe_array(lambda: grad_obj)
+    if energy is None and psi4 is not None:
+        energy = _safe_call(lambda: psi4.core.variable("CURRENT ENERGY"))
+    if energy is None or grads is None:
+        return None, None
+    try:
+        return float(energy), float(np.linalg.norm(np.asarray(grads, dtype=float)))
+    except Exception:
+        return None, None
+
+
+def _opt_line_chart(data, y_key, title, y_label, parent_id, existing=None):
+    series = AGLineSeriesConfig(
+        type="line",
+        xKey="step",
+        yKey=y_key,
+        title=y_label,
+        data=data,
+        marker={"enabled": False},
+    )
+    axes = [
+        AGChartAxisConfig(type="number", position="bottom", title="Optimization step"),
+        AGChartAxisConfig(type="number", position="left", title=y_label),
+    ]
+    if existing is not None:
+        existing.data = data
+        existing.title = AGChartTitleConfig(text=title)
+        existing.series = [series]
+        existing.axes = axes
+        existing.parent_id = parent_id
+        return existing
+    return ChartArtifactModel(
+        parent_id=parent_id,
+        data=data,
+        title=AGChartTitleConfig(text=title),
+        series=[series],
+        axes=axes,
+    )
+
+
+async def _persist_opt_charts(energy_data, grad_data, kwargs, existing=(None, None)):
+    node_runner = None if not kwargs else kwargs.get("node_runner")
+    parent_id = _task_parent_id(kwargs)
+    if parent_id is None:
+        if node_runner is not None:
+            node_runner.warning("Skipping optimization charts: missing task_id")
+        return existing
+    db = _get_db()
+    if db is None:
+        return existing
+    energy_chart = _opt_line_chart(
+        list(energy_data),
+        "energy",
+        "Psi4 optimization energy",
+        "Energy (Ha)",
+        parent_id,
+        existing[0],
+    )
+    grad_chart = _opt_line_chart(
+        list(grad_data),
+        "grad_norm",
+        "Psi4 optimization gradient norm",
+        "|g| (Ha/Bohr)",
+        parent_id,
+        existing[1],
+    )
+    try:
+        await db.save(energy_chart)
+        await db.save(grad_chart)
+    except Exception as exc:
+        if node_runner is not None:
+            node_runner.warning(f"Failed to store optimization charts: {exc}")
+        else:
+            logger.warning("Failed to store optimization charts: %s", exc)
+        return existing
+    if node_runner is not None and energy_data:
+        node_runner.info(
+            f"Saved optimization charts at step {energy_data[-1]['step']} "
+            f"(task_id={parent_id})"
+        )
+    return energy_chart, grad_chart
+
+
 async def _persist_molecule_snapshot(
     wfn,
     source_molecule: Molecule,
@@ -421,7 +538,7 @@ async def _persist_molecule_snapshot(
 
 
 class OptimizationSnapshotter:
-    """Patch Psi4 ``gradient`` so a MoleculeSnapshot is stored every N opt steps."""
+    """Patch Psi4 ``gradient`` so snapshots and opt charts are stored every N steps."""
 
     def __init__(
         self,
@@ -437,6 +554,10 @@ class OptimizationSnapshotter:
         self.seen = set()
         self.geom_iter = 0
         self.scf_iter = 0
+        self.energy_history = []
+        self.grad_history = []
+        self.charts = (None, None)
+        self._chart_steps = set()
         self._original_gradient = None
         self._patched_modules = []
 
@@ -468,6 +589,14 @@ class OptimizationSnapshotter:
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        try:
+            self._flush_opt_charts()
+        except Exception as e:
+            node_runner = self.kwargs.get("node_runner")
+            if node_runner is not None:
+                node_runner.warning(f"Failed to store optimization charts: {e}")
+            else:
+                logger.warning("Failed to store optimization charts: %s", e)
         original = self._original_gradient
         if original is None:
             return False
@@ -484,6 +613,14 @@ class OptimizationSnapshotter:
         result = self._original_gradient(name, **gkwargs)
         self.scf_iter += 1
         try:
+            self._record_opt_charts(result)
+        except Exception as e:
+            node_runner = self.kwargs.get("node_runner")
+            if node_runner is not None:
+                node_runner.warning(f"Failed to store optimization charts: {e}")
+            else:
+                logger.warning("Failed to store optimization charts: %s", e)
+        try:
             self._maybe_snapshot(result)
         except Exception as e:
             node_runner = self.kwargs.get("node_runner")
@@ -492,6 +629,34 @@ class OptimizationSnapshotter:
             else:
                 logger.warning("Failed to store MoleculeSnapshot: %s", e)
         return result
+
+    def _record_opt_charts(self, result):
+        energy, grad_norm = _energy_and_grad_norm(result)
+        if energy is None or grad_norm is None:
+            return
+        iteration = _optimization_iteration()
+        step = int(iteration) if iteration else (len(self.energy_history) + 1)
+        if step in self._chart_steps:
+            return
+        self._chart_steps.add(step)
+        self.energy_history.append({"step": step, "energy": energy})
+        self.grad_history.append({"step": step, "grad_norm": grad_norm})
+        if step % self.interval == 0:
+            self._flush_opt_charts()
+
+    def _flush_opt_charts(self):
+        if not self.energy_history:
+            return
+        saved = _run_async(
+            _persist_opt_charts(
+                self.energy_history,
+                self.grad_history,
+                self.kwargs,
+                self.charts,
+            )
+        )
+        if saved is not None:
+            self.charts = saved
 
     def _maybe_snapshot(self, result):
         iteration = _optimization_iteration()

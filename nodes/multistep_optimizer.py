@@ -110,8 +110,13 @@ def _qm_input_for_step(
     step: OptimizationStepInput,
     molecule: Molecule,
 ) -> QMInput:
-    """Copy QMInput for one Psi4 optimization step, applying step overrides."""
-    copied = QMInput.from_model(qm_input)
+    """Copy QMInput for one Psi4 DFT optimization step, applying step overrides.
+
+    Geometry optimization is always enabled, even when the template ``qm_input``
+    has ``optimization=False``. Overrides are applied after the copy so they
+    work even if ``from_model`` ignores keyword arguments.
+    """
+    copied = QMInput.from_model(qm_input, optimization=True, frequencies=False)
     copied.optimization = True
     copied.frequencies = False
     copied.field_name = "QMInput"
@@ -203,6 +208,7 @@ async def multistep_optimizer(
             "PreOptimizerInput has no steps and dftb_opt is False"
         )
 
+    qm_input.optimization = True
     molecule = qm_input.molecule
     last_result: Optional[QMResult] = None
     step_table = SimpleTable(name="Multistep optimizer")
@@ -244,6 +250,7 @@ async def multistep_optimizer(
         functional_name = step.functional.functional.value
         node_runner.info(
             f"Starting {step_name}: basis={basis_name}, functional={functional_name}, "
+            f"optimization=True, "
             f"max_optimization_iterations={step.max_optimization_iterations}, "
             f"max_scf_iterations={step.max_scf_iterations}"
         )
