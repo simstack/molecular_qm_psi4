@@ -34,6 +34,19 @@ def test_set_options_forwards_qm_input_iteration_limits():
     assert options["geom_maxiter"] == 80
 
 
+def test_set_options_logs_qm_input_iteration_limits():
+    node_runner = MagicMock()
+    qm_input = _qm_input(max_scf_iterations=300, max_optimization_iterations=300)
+    qm_input.non_standard_parameters = True
+    mock_psi4 = MagicMock()
+    with patch.dict("sys.modules", {"psi4": mock_psi4}):
+        Psi4Calculator(qm_input, node_runner=node_runner).set_options()
+    msg = node_runner.info.call_args[0][0]
+    assert "max_scf_iterations=300" in msg
+    assert "max_optimization_iterations=300" in msg
+    assert "non_standard_parameters=True" in msg
+
+
 def test_set_options_uses_qm_input_defaults():
     options = _set_options_payload(_qm_input())
     assert options["maxiter"] == 100
@@ -89,10 +102,12 @@ def test_driver_info_is_forwarded_to_node_runner_during_context(tmp_path):
     with redirect_psi4_logs(log_file, print_level=1, node_runner=node_runner):
         logging.getLogger("psi4.driver.driver").info("Return gradient(): -2371.2098081339905")
         logging.getLogger("psi4.driver.driver").info(
-            "[[ 0.00022538 -0.00059888  0.00052777]]"
+            "[[-0.00055000 -0.04816946  0.01193482]\n"
+            "[-0.02165584  0.00538354  0.00000000]\n"
+            "[ 0.00055000  0.04816946  0.01193482]]"
         )
         assert any("Return gradient()" in msg for msg in seen)
-        assert any("0.00022538" in msg for msg in seen)
+        assert not any("0.00055000" in msg for msg in seen)
 
 
 def test_optking_step_summary_forwarded_hessian_filtered(tmp_path):

@@ -132,6 +132,15 @@ class Psi4Calculator:
         acc_val = self.qm_input.scf_accuracy.value if hasattr(self.qm_input.scf_accuracy, "value") else str(self.qm_input.scf_accuracy)
         psi4_options["e_convergence"] = accuracy_map.get(acc_val, 1e-6)
 
+        if self.node_runner is not None:
+            self.node_runner.info(
+                "QMInput limits for Psi4: "
+                f"max_scf_iterations={self.qm_input.max_scf_iterations} -> maxiter, "
+                f"max_optimization_iterations={self.qm_input.max_optimization_iterations} -> geom_maxiter, "
+                f"print_level={getattr(self.qm_input, 'print_level', 1)}, "
+                f"non_standard_parameters={getattr(self.qm_input, 'non_standard_parameters', None)}"
+            )
+
         psi4.set_options(psi4_options)
 
     def set_constraints(self):

@@ -147,21 +147,26 @@ def _qm_input_copy(
     qm_input: QMInput,
     basis_set: Optional[BasisSet] = None,
     functional: Optional[Functional] = None,
+    molecule: Optional[Molecule] = None,
 ) -> QMInput:
-    return QMInput(
-        molecule=qm_input.molecule,
-        charge=qm_input.charge,
-        multiplicity=qm_input.multiplicity,
-        open_shell_calculation=qm_input.open_shell_calculation,
-        basis_set=basis_set if basis_set is not None else qm_input.basis_set,
-        functional=functional if functional is not None else qm_input.functional,
-        method=qm_input.method,
-        optimization=True,
-        frequencies=True,
-        solvent=qm_input.solvent,
-        solvent_model=qm_input.solvent_model,
-        restart_files=qm_input.restart_files,
-    )
+    """Copy QMInput including non-standard SCF/opt settings.
+
+    Uses ``QMInput.from_model`` (simstack.util) so fields such as
+    ``max_scf_iterations`` are not reset to model defaults.
+    Overrides are applied after the copy so they work even if
+    ``from_model`` ignores keyword arguments.
+    """
+    copied = QMInput.from_model(qm_input)
+    copied.optimization = True
+    copied.frequencies = True
+    copied.field_name = "QMInput"
+    if molecule is not None:
+        copied.molecule = molecule
+    if basis_set is not None:
+        copied.basis_set = basis_set
+    if functional is not None:
+        copied.functional = functional
+    return copied
 
 
 def empty_compare_conformers_method_table(name: str) -> SimpleTable:
@@ -325,23 +330,7 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
     for i, molecule in enumerate(molecules):
         node_runner.info(f"Starting calculation for molecule {i+1}...")
         
-        # Create a new QMInput for this specific molecule
-        # We cannot reassign .id in Odmantic easily, so we build a new object
-        # or use model_copy if available, but a fresh init is safer for simple models
-        current_input = QMInput(
-            molecule=molecule,
-            charge=arg.qm_input.charge,
-            multiplicity=arg.qm_input.multiplicity,
-            open_shell_calculation=arg.qm_input.open_shell_calculation,
-            basis_set=arg.qm_input.basis_set,
-            functional=arg.qm_input.functional,
-            method=arg.qm_input.method,
-            optimization=True,
-            frequencies=True,
-            solvent=arg.qm_input.solvent,
-            solvent_model=arg.qm_input.solvent_model,
-            restart_files=arg.qm_input.restart_files
-        )
+        current_input = _qm_input_copy(arg.qm_input, molecule=molecule)
         
         calc_result = await psi4_calculator(current_input, **kwargs)
 

@@ -301,16 +301,22 @@ def _find_wavefunction_file(files):
 
 
 class OptKingSummaryFilter(logging.Filter):
-    """Keep driver output and short OptKing progress; drop Hessian / internals dumps."""
+    """Keep driver/opt summaries; drop numpy gradient dumps and Hessian/internals."""
 
     MAX_CHARS = 1500
     MAX_LINES = 25
     DENY = re.compile(r"hessian|B-matrix|G-matrix|internal coordinates", re.IGNORECASE)
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if record.name.startswith("psi4.driver"):
-            return True
         msg = record.getMessage()
+        stripped = msg.lstrip()
+        # Driver logs the Cartesian gradient/hessian as a separate numpy dump.
+        if stripped.startswith("[[") or (stripped.startswith("[") and "\n" in stripped):
+            return False
+        if record.name.startswith("psi4.driver"):
+            if len(msg) > self.MAX_CHARS or msg.count("\n") > self.MAX_LINES:
+                return False
+            return True
         if len(msg) > self.MAX_CHARS or msg.count("\n") > self.MAX_LINES:
             return False
         if self.DENY.search(msg):
