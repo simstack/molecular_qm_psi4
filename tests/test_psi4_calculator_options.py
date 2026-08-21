@@ -58,16 +58,20 @@ def test_set_options_uses_qm_input_defaults():
     assert options["print"] == 1
     assert options["debug"] == 0
     assert options["optking__print"] == 1
-    assert options["intrafrag_step_limit"] == 0.2
-    assert options["intrafrag_step_limit_max"] == 0.25
-    assert options["dynamic_level"] == 1
+    assert options["optking__intrafrag_step_limit"] == 0.2
+    assert options["optking__intrafrag_step_limit_max"] == 0.25
+    assert options["optking__dynamic_level"] == 1
+    assert options["optking__ensure_bt_convergence"] is True
+    assert "intrafrag_step_limit" not in options
+    assert "dynamic_level" not in options
 
 
 def test_set_options_omits_optking_limits_without_optimization():
     options = _set_options_payload(_qm_input(optimization=False))
-    assert "intrafrag_step_limit" not in options
-    assert "intrafrag_step_limit_max" not in options
-    assert "dynamic_level" not in options
+    assert "optking__intrafrag_step_limit" not in options
+    assert "optking__intrafrag_step_limit_max" not in options
+    assert "optking__dynamic_level" not in options
+    assert "optking__ensure_bt_convergence" not in options
 
 
 def test_set_options_maps_print_level():

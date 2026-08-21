@@ -107,12 +107,15 @@ class Psi4Calculator:
             **psi4_print_options(getattr(self.qm_input, "print_level", 1)),
         }
 
-        # Keep OptKing from inflating the trust radius until back-transformation fails.
+        # OptKing-native keys must use the optking__ prefix. Unprefixed names are
+        # dropped by the Psi4 task planner, so the trust radius still grows to 1.0
+        # and the first redundant-coordinate step can abort on back-transformation.
         if getattr(self.qm_input, "optimization", False):
             psi4_options.update({
-                "intrafrag_step_limit": 0.2,
-                "intrafrag_step_limit_max": 0.25,
-                "dynamic_level": 1,
+                "optking__intrafrag_step_limit": 0.2,
+                "optking__intrafrag_step_limit_max": 0.25,
+                "optking__dynamic_level": 1,
+                "optking__ensure_bt_convergence": True,
             })
 
         # Set thermochemistry options if provided
@@ -148,9 +151,10 @@ class Psi4Calculator:
                 f"print_level={getattr(self.qm_input, 'print_level', 1)}, "
                 f"non_standard_parameters={getattr(self.qm_input, 'non_standard_parameters', None)}, "
                 f"optimization={getattr(self.qm_input, 'optimization', None)}, "
-                f"intrafrag_step_limit={psi4_options.get('intrafrag_step_limit')}, "
-                f"intrafrag_step_limit_max={psi4_options.get('intrafrag_step_limit_max')}, "
-                f"dynamic_level={psi4_options.get('dynamic_level')}"
+                f"intrafrag_step_limit={psi4_options.get('optking__intrafrag_step_limit')}, "
+                f"intrafrag_step_limit_max={psi4_options.get('optking__intrafrag_step_limit_max')}, "
+                f"dynamic_level={psi4_options.get('optking__dynamic_level')}, "
+                f"ensure_bt_convergence={psi4_options.get('optking__ensure_bt_convergence')}"
             )
 
         psi4.set_options(psi4_options)
