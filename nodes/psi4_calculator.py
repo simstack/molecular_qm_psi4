@@ -13,6 +13,11 @@ try:
 except ImportError:
     np = None
 
+try:
+    import psi4
+except ImportError:
+    psi4 = None
+
 from molecular_qm_psi4.util.psi4_calculator import (
     Psi4Calculator,
     clamp_print_level,
@@ -333,27 +338,7 @@ def _wavefunction_from_gradient_result(result):
     return None
 
 
-def _molecule_from_psi4_molecule(
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    psi4_mol, smiles=None, formula=None) -> Molecule:
+def _molecule_from_psi4_molecule(psi4_mol, smiles=None, formula=None) -> Molecule:
     molecule = Molecule()
     for i in range(psi4_mol.natom()):
         molecule.add_atom(
