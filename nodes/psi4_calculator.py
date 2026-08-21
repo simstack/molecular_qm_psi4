@@ -34,10 +34,6 @@ from simstack.models.charts_artifact import (
 )
 from simstack.models.simple_table import SimpleTable
 
-try:
-    import psi4
-except ImportError:
-    psi4 = None
 
 from simstack.core.node import node
 from simstack.core.simstack_result import SimstackResult
@@ -337,7 +333,27 @@ def _wavefunction_from_gradient_result(result):
     return None
 
 
-def _molecule_from_psi4_molecule(psi4_mol, smiles=None, formula=None) -> Molecule:
+def _molecule_from_psi4_molecule(
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    psi4_mol, smiles=None, formula=None) -> Molecule:
     molecule = Molecule()
     for i in range(psi4_mol.natom()):
         molecule.add_atom(
@@ -1028,6 +1044,7 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     memory, num_threads, resource_log = resources_from_parent_parameters(kwargs)
     if node_runner is not None:
         node_runner.info(resource_log)
+    import psi4
 
     if psi4 is None:
         return node_runner.fail("Psi4 is not installed in the current environment.")
@@ -1233,7 +1250,7 @@ async def psi4_thermochemistry(qm_result: QMResult, temperature: FloatData, pres
         Exception: For any unexpected errors during thermochemical property computation.
     """
     node_runner: NodeRunner = kwargs.get("node_runner")
-    
+    import psi4
     if psi4 is None:
         return node_runner.fail("Psi4 is not installed in the current environment.")
 

@@ -108,10 +108,12 @@ class Psi4Calculator:
         }
 
         # OptKing-native keys must use the optking__ prefix. Unprefixed names are
-        # dropped by the Psi4 task planner, so the trust radius still grows to 1.0
-        # and the first redundant-coordinate step can abort on back-transformation.
+        # dropped by the Psi4 task planner. Redundant internals still abort on the
+        # first RFO step for floppy/large systems (AlgError in dq_to_dx before
+        # ensure_bt_convergence can shrink the step), so use cartesians.
         if getattr(self.qm_input, "optimization", False):
             psi4_options.update({
+                "optking__opt_coordinates": "cartesian",
                 "optking__intrafrag_step_limit": 0.2,
                 "optking__intrafrag_step_limit_max": 0.25,
                 "optking__dynamic_level": 1,
@@ -151,6 +153,7 @@ class Psi4Calculator:
                 f"print_level={getattr(self.qm_input, 'print_level', 1)}, "
                 f"non_standard_parameters={getattr(self.qm_input, 'non_standard_parameters', None)}, "
                 f"optimization={getattr(self.qm_input, 'optimization', None)}, "
+                f"opt_coordinates={psi4_options.get('optking__opt_coordinates')}, "
                 f"intrafrag_step_limit={psi4_options.get('optking__intrafrag_step_limit')}, "
                 f"intrafrag_step_limit_max={psi4_options.get('optking__intrafrag_step_limit_max')}, "
                 f"dynamic_level={psi4_options.get('optking__dynamic_level')}, "
