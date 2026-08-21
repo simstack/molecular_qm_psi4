@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 from odmantic import EmbeddedModel, Field, Model
 from pydantic import model_validator
 
-from molecular_qm_dftb.models.dftb_input import DftbInput
+from molecular_qm_dftb.models.dftb_input import DftbHamiltonian, DftbInput
 from molecular_qm_dftb.nodes.dftb_calculator import dftb_calculator
 from molecular_qm_models import Molecule, QMInput, QMResult
 from molecular_qm_models.basis_set import BasisSet
@@ -47,11 +47,11 @@ class PreOptimizerInput(Model):
         False,
         json_schema_extra={"title": "DFTB pre-optimization"},
     )
-    max_dftb_iterations: int = Field(
-        100,
+    dftb_input: Optional[DftbInput] = Field(
+        None,
         json_schema_extra={
-            "title": "Max DFTB iterations",
-            "description": "Maximum DFTB geometry optimization steps",
+            "title": "DFTB input",
+            "description": "Full DFTB+ settings used for the optional pre-optimization",
         },
     )
     steps: List[OptimizationStepInput] = Field(default_factory=list)
@@ -59,8 +59,26 @@ class PreOptimizerInput(Model):
     @model_validator(mode="before")
     @classmethod
     def ensure_fieldname(cls, data):
-        if isinstance(data, dict) and "field_name" not in data:
+        if not isinstance(data, dict):
+            return data
+        if "field_name" not in data:
             data["field_name"] = cls.__name__
+        max_steps = data.pop("max_dftb_iterations", None)
+        if "dftb_opt" not in data:
+            data["dftb_opt"] = data.get("dftb_input") is not None
+        if not data.get("dftb_opt"):
+            data["dftb_input"] = None
+            return data
+        dftb = data.get("dftb_input")
+        if dftb is None:
+            dftb = {"optimization": True, "compute_gradients": True}
+            if max_steps is not None:
+                dftb["max_optimization_steps"] = max_steps
+            data["dftb_input"] = dftb
+        elif isinstance(dftb, dict):
+            dftb.setdefault("optimization", True)
+            if max_steps is not None:
+                dftb.setdefault("max_optimization_steps", max_steps)
         return data
 
     @classmethod
@@ -68,14 +86,14 @@ class PreOptimizerInput(Model):
         schema = cleaned_json_schema(cls)
         schema["title"] = cls.__name__
         props = schema["properties"]
-        max_dftb = props.pop("max_dftb_iterations", None)
+        dftb_input = props.pop("dftb_input", None)
         schema.setdefault("dependencies", {})["dftb_opt"] = {
             "oneOf": [
                 {"properties": {"dftb_opt": {"const": False}}},
                 {
                     "properties": {
                         "dftb_opt": {"const": True},
-                        "max_dftb_iterations": max_dftb,
+                        "dftb_input": dftb_input,
                     }
                 },
             ]
@@ -90,19 +108,35 @@ class PreOptimizerInput(Model):
             "ui:widget": "checkbox",
             "ui:title": "DFTB pre-optimization",
         }
-        ui.setdefault("max_dftb_iterations", {})["ui:condition"] = {"dftb_opt": True}
+        ui.setdefault("dftb_input", {})["ui:condition"] = {"dftb_opt": True}
         return ui
 
 
-def _dftb_preopt_input(qm_input: QMInput, max_dftb_iterations: int) -> DftbInput:
-    """Build DftbInput for geometry pre-optimization."""
-    return DftbInput(
+def _dftb_method_label(opts: DftbInput) -> str:
+    if opts.hamiltonian == DftbHamiltonian.XTB:
+        return opts.xtb_method.value
+    return opts.skf_set.value
+
+
+def _dftb_preopt_input(qm_input: QMInput, dftb_input: DftbInput) -> DftbInput:
+    """Copy the full DftbInput for geometry pre-optimization.
+
+    Hamiltonian, SCC, and optimizer settings come from ``dftb_input``.
+    Geometry optimization is always enabled. Charge and multiplicity are taken
+    from ``qm_input`` so they match the molecule being optimized.
+    """
+    copied = DftbInput.from_model(
+        dftb_input,
         optimization=True,
+        compute_gradients=True,
         charge=qm_input.charge,
         multiplicity=qm_input.multiplicity,
-        compute_gradients=True,
-        max_optimization_steps=max_dftb_iterations,
     )
+    copied.optimization = True
+    copied.compute_gradients = True
+    copied.charge = qm_input.charge
+    copied.multiplicity = qm_input.multiplicity
+    return copied
 
 
 def _qm_input_for_step(
@@ -191,7 +225,7 @@ async def multistep_optimizer(
 
     Parameters:
         qm_input (QMInput): Molecule and shared QM settings used as the copy template.
-        preopt (PreOptimizerInput): DFTB toggle, max DFTB iterations, and ordered Psi4 steps.
+        preopt (PreOptimizerInput): DFTB toggle, full DftbInput, and ordered Psi4 steps.
 
     Called Nodes:
         dftb_calculator
@@ -220,10 +254,13 @@ async def multistep_optimizer(
     tolerate_failure = bool(getattr(qm_input, "tolerate_failure", False))
 
     if preopt.dftb_opt:
-        opts = _dftb_preopt_input(qm_input, preopt.max_dftb_iterations)
+        dftb_input = preopt.dftb_input or DftbInput(optimization=True)
+        opts = _dftb_preopt_input(qm_input, dftb_input)
+        method = _dftb_method_label(opts)
         node_runner.info(
             f"Starting DFTB pre-optimization "
-            f"(max_dftb_iterations={preopt.max_dftb_iterations})"
+            f"(hamiltonian={opts.hamiltonian}, method={method}, "
+            f"max_optimization_steps={opts.max_optimization_steps})"
         )
         try:
             calc_result = await dftb_calculator(molecule, opts, **kwargs)
@@ -241,7 +278,7 @@ async def multistep_optimizer(
             last_result = qm_result
             if qm_result.final_structure is not None:
                 molecule = qm_result.final_structure
-            _append_step_row(step_table, "dftb", "", "GFN2-xTB", qm_result, node_runner)
+            _append_step_row(step_table, "dftb", "", method, qm_result, node_runner)
             node_runner.info("DFTB pre-optimization finished")
 
     for index, step in enumerate(steps, start=1):
