@@ -1,6 +1,6 @@
 from typing import List, Optional, Tuple
 
-from odmantic import EmbeddedModel, Field, Model
+from odmantic import EmbeddedModel, Field, Model, ObjectId
 from pydantic import model_validator
 
 from molecular_qm_dftb.models.dftb_input import DftbHamiltonian, DftbInput
@@ -77,9 +77,10 @@ class PreOptimizerInput(Model):
                 dftb["max_optimization_steps"] = max_steps
             data["dftb_input"] = dftb
         elif isinstance(dftb, dict):
-            dftb.setdefault("optimization", True)
+            dftb["optimization"] = True
+            dftb["compute_gradients"] = True
             if max_steps is not None:
-                dftb.setdefault("max_optimization_steps", max_steps)
+                dftb["max_optimization_steps"] = max_steps
         return data
 
     @classmethod
@@ -88,6 +89,15 @@ class PreOptimizerInput(Model):
         schema["title"] = cls.__name__
         props = schema["properties"]
         dftb_input = props.pop("dftb_input", None)
+        if isinstance(dftb_input, dict):
+            dftb_input = {
+                **dftb_input,
+                "default": {
+                    "field_name": "DftbInput",
+                    "optimization": True,
+                    "compute_gradients": True,
+                },
+            }
         schema.setdefault("dependencies", {})["dftb_opt"] = {
             "oneOf": [
                 {"properties": {"dftb_opt": {"const": False}}},
@@ -125,18 +135,39 @@ def _dftb_preopt_input(qm_input: QMInput, dftb_input: DftbInput) -> DftbInput:
     Hamiltonian, SCC, and optimizer settings come from ``dftb_input``.
     Geometry optimization is always enabled. Charge and multiplicity are taken
     from ``qm_input`` so they match the molecule being optimized.
+
+    ``model_copy`` is used instead of ``from_model`` so odmantic marks every
+    field as modified. Nested docker reloads the child ``dftb_calculator``
+    input from Mongo; a partial upsert would restore default 100 steps.
     """
-    copied = DftbInput.from_model(
-        dftb_input,
-        optimization=True,
-        compute_gradients=True,
-        charge=qm_input.charge,
-        multiplicity=qm_input.multiplicity,
+    copied = dftb_input.model_copy(
+        deep=True,
+        update={
+            "id": ObjectId(),
+            "optimization": True,
+            "compute_gradients": True,
+            "charge": qm_input.charge,
+            "multiplicity": qm_input.multiplicity,
+        },
     )
+    copied.max_optimization_steps = dftb_input.max_optimization_steps
+    copied.force_tolerance = dftb_input.force_tolerance
+    copied.max_scc_iterations = dftb_input.max_scc_iterations
+    copied.scc_tolerance = dftb_input.scc_tolerance
+    copied.electronic_temperature = dftb_input.electronic_temperature
+    copied.hamiltonian = dftb_input.hamiltonian
+    copied.xtb_method = dftb_input.xtb_method
+    copied.skf_set = dftb_input.skf_set
+    copied.skf_prefix = dftb_input.skf_prefix
+    copied.scc = dftb_input.scc
+    copied.third_order = dftb_input.third_order
     copied.optimization = True
     copied.compute_gradients = True
     copied.charge = qm_input.charge
     copied.multiplicity = qm_input.multiplicity
+    post_copy = getattr(copied, "_post_copy_update", None)
+    if callable(post_copy):
+        post_copy()
     return copied
 
 
@@ -190,6 +221,25 @@ def _molecule_from_qm_result(
         f"{first.element}={first.x:.6f},{first.y:.6f},{first.z:.6f}"
     )
     return next_mol
+
+
+async def _persist_dftb_input(opts: DftbInput, node_runner, db=None) -> DftbInput:
+    """Save DFTB settings so nested docker can reload the child input."""
+    post_copy = getattr(opts, "_post_copy_update", None)
+    if callable(post_copy):
+        post_copy()
+    if db is None:
+        try:
+            db = context.db
+        except Exception as exc:
+            node_runner.warning(f"Could not persist DftbInput: {exc}")
+            return opts
+    try:
+        saved = await db.save(opts)
+    except Exception as exc:
+        node_runner.warning(f"Could not persist DftbInput: {exc}")
+        return opts
+    return saved if saved is not None else opts
 
 
 async def _persist_step_molecule(
@@ -303,6 +353,7 @@ async def multistep_optimizer(
     if preopt.dftb_opt:
         dftb_input = preopt.dftb_input or DftbInput(optimization=True)
         opts = _dftb_preopt_input(qm_input, dftb_input)
+        opts = await _persist_dftb_input(opts, node_runner)
         method = _dftb_method_label(opts)
         node_runner.info(
             f"Starting DFTB pre-optimization "
