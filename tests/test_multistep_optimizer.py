@@ -12,6 +12,7 @@ from molecular_qm_psi4.nodes.multistep_optimizer import (
     _dftb_method_label,
     _dftb_preopt_input,
     _molecule_from_qm_result,
+    _persist_dftb_input,
     _persist_step_molecule,
     _qm_input_for_step,
 )
@@ -36,6 +37,7 @@ def test_dftb_preopt_input_uses_full_dftb_input():
     )
     opts = _dftb_preopt_input(qm_input, source)
     assert opts is not source
+    assert opts.id != source.id
     assert opts.optimization is True
     assert opts.compute_gradients is True
     assert opts.charge == 1
@@ -45,6 +47,7 @@ def test_dftb_preopt_input_uses_full_dftb_input():
     assert opts.max_scc_iterations == 50
     assert opts.electronic_temperature == 500.0
     assert opts.xtb_method == XtbMethod.GFN1
+    assert "max_optimization_steps" in opts.__fields_modified__
 
 
 def test_dftb_method_label_uses_xtb_or_skf():
@@ -75,6 +78,26 @@ def test_preoptimizer_migrates_max_dftb_iterations():
     assert preopt.dftb_input is not None
     assert preopt.dftb_input.max_optimization_steps == 42
     assert preopt.dftb_input.optimization is True
+
+
+def test_preoptimizer_overrides_max_dftb_iterations_on_existing_dftb_input():
+    preopt = PreOptimizerInput.model_validate(
+        {
+            "dftb_opt": True,
+            "max_dftb_iterations": 5000,
+            "dftb_input": {"optimization": True, "max_optimization_steps": 100},
+        }
+    )
+    assert preopt.dftb_input is not None
+    assert preopt.dftb_input.max_optimization_steps == 5000
+    assert preopt.dftb_input.optimization is True
+
+
+def test_preoptimizer_schema_defaults_nested_dftb_optimization():
+    schema = PreOptimizerInput.json_schema()
+    dftb_schema = schema["dependencies"]["dftb_opt"]["oneOf"][1]["properties"]["dftb_input"]
+    assert dftb_schema["default"]["optimization"] is True
+    assert dftb_schema["default"]["compute_gradients"] is True
 
 
 def test_preoptimizer_schema_gates_dftb_input():
@@ -209,3 +232,19 @@ async def test_persist_step_molecule_saves_for_qm_input_reference():
     db.save.assert_awaited_once_with(mol)
     assert got is saved
     node_runner.warning.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_persist_dftb_input_saves_copied_settings():
+    opts = DftbInput(optimization=True, max_optimization_steps=5000)
+    node_runner = MagicMock()
+    saved = DftbInput(optimization=True, max_optimization_steps=5000)
+    db = MagicMock()
+    db.save = AsyncMock(return_value=saved)
+
+    got = await _persist_dftb_input(opts, node_runner, db=db)
+
+    db.save.assert_awaited_once_with(opts)
+    assert got is saved
+    node_runner.warning.assert_not_called()
+    assert "max_optimization_steps" in opts.__fields_modified__
