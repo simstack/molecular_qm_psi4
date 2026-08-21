@@ -31,6 +31,8 @@ async def delta_g_table(date_string: StringData, **kwargs) -> SimstackResult:
     Returns:
         SimstackResult: An object indicating the outcome of the node execution.
             This includes success or failure status and any associated result data.
+            result (SimpleTable): The result of the compare_conformers calculation.
+            pandas_table (PandasModel): The pandas table of the compare_conformers calculation.
 
     Raises:
         Exception: Logs the exception details if any error occurs during the

@@ -291,7 +291,7 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
     Returns:
         SimstackResult: An object representing the success or failure state of this node runner's
             execution, including the computed results when successful.
-
+        result (CompareConformersResult): The result of the compare_conformers calculation.
     Called Nodes:
         psi4_calculator
 
@@ -513,6 +513,10 @@ async def compare_conformers_over_temperature(
         molecule (Molecule): Conformer 2.
         temperatures (TemperatureList): List of temperatures in Kelvin.
 
+    Results:
+        SimstackResult: The result of the compare_conformers_over_temperature calculation.
+            table (SimpleTable): One row per temperature with smiles, formula, basis_set,
+                functional, temperature, pressure, DDG, and DDZ.
     Called Nodes:
         psi4_calculator
         psi4_thermochemistry

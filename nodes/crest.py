@@ -217,6 +217,15 @@ async def crest(crest_input: CrestInput, **kwargs) -> SimstackResult:
 async def xtb_optimize_molecule_list(xtb_input: XTBInput, **kwargs) -> SimstackResult:
     """
     Asynchronously performs geometry optimizations for a list of molecular structures using the xTB Python library.
+
+    Parameters:
+        xtb_input (XTBInput): The input parameters for the xTB optimization.
+        **kwargs: Additional arguments that can be passed to the node.
+
+    Returns:
+        SimstackResult: The result of the xTB optimization.
+            result (DataSet): The result of the xTB optimization.
+            molecule_list (MoleculeList): The list of molecules that were optimized.
     """
     node_runner = kwargs.get("node_runner")
     if Calculator is None:
@@ -344,11 +353,10 @@ async def xtb_molecule_list(xtb_input: XTBInput, **kwargs) -> SimstackResult:
         level of theory, and additional calculation needs.
         **kwargs: Optional arguments, including a `node_runner` instance used to manage the execution.
 
-    SimstackResult:
-        result: A DataSet containing the results of the computation, each row of the DatasetSection
-                results_section includes the molecule and its energy
-        molecule_list: A list of Molecule objects representing the input molecules. Their properties contain
-                the energy
+    Results:
+        SimstackResult: The result of the xTB optimization.
+            result: A DataSet containing the results of the computation, each row of the DatasetSection results_section includes the molecule and its energy
+            molecule_list: A list of Molecule objects representing the input molecules. Their properties contain the energy
 
     Raises:
         Exception: Any exceptions raised during xTB Python computations are logged and captured for

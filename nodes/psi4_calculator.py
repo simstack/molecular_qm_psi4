@@ -1222,6 +1222,9 @@ async def psi4_thermochemistry(qm_result: QMResult, temperature: FloatData, pres
         including enthalpy, Gibbs free energy, entropy, and internal energy. It also includes
         a reference to the original wavefunction file and the associated vibrational frequency
         table if available.
+            result (QMThermoResult): The result of the thermochemical calculation.
+            wavefunction_file (FileStack): The wavefunction file used for the thermochemical calculation.
+            vibrational_frequency_table (SimpleTable): The vibrational frequency table used for the thermochemical calculation.
 
     Raises:
         ValueError: If Psi4 is not installed in the current environment.
