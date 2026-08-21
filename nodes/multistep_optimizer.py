@@ -9,6 +9,7 @@ from molecular_qm_models import Molecule, QMInput, QMResult
 from molecular_qm_models.basis_set import BasisSet
 from molecular_qm_models.density_functional import Functional
 from molecular_qm_psi4.nodes.psi4_calculator import psi4_calculator
+from simstack.core.context import context
 from simstack.core.definitions import TaskStatus
 from simstack.core.node import node
 from simstack.core.simstack_result import SimstackResult
@@ -150,7 +151,12 @@ def _qm_input_for_step(
     has ``optimization=False``. Overrides are applied after the copy so they
     work even if ``from_model`` ignores keyword arguments.
     """
-    copied = QMInput.from_model(qm_input, optimization=True, frequencies=False)
+    copied = QMInput.from_model(
+        qm_input,
+        optimization=True,
+        frequencies=False,
+        molecule=molecule,
+    )
     copied.optimization = True
     copied.frequencies = False
     copied.field_name = "QMInput"
@@ -161,6 +167,47 @@ def _qm_input_for_step(
     copied.max_optimization_iterations = step.max_optimization_iterations
     copied.max_scf_iterations = step.max_scf_iterations
     return copied
+
+
+def _molecule_from_qm_result(
+    qm_result: Optional[QMResult],
+    fallback: Molecule,
+    node_runner,
+    step_name: str,
+) -> Molecule:
+    """Return the last step geometry, or ``fallback`` if none was stored."""
+    structure = None if qm_result is None else getattr(qm_result, "final_structure", None)
+    atoms = getattr(structure, "atoms", None) if structure is not None else None
+    if not atoms:
+        node_runner.warning(
+            f"{step_name} returned no final_structure; reusing previous geometry"
+        )
+        return fallback
+    next_mol = Molecule.from_molecule(structure)
+    first = next_mol.atoms[0]
+    node_runner.info(
+        f"{step_name} propagating final_structure: {len(next_mol.atoms)} atoms, "
+        f"{first.element}={first.x:.6f},{first.y:.6f},{first.z:.6f}"
+    )
+    return next_mol
+
+
+async def _persist_step_molecule(
+    molecule: Molecule, node_runner, step_name: str, db=None
+) -> Molecule:
+    """Save geometry so the next QMInput.molecule Reference() can be reloaded."""
+    if db is None:
+        try:
+            db = context.db
+        except Exception as exc:
+            node_runner.warning(f"Could not persist {step_name} geometry: {exc}")
+            return molecule
+    try:
+        saved = await db.save(molecule)
+    except Exception as exc:
+        node_runner.warning(f"Could not persist {step_name} geometry: {exc}")
+        return molecule
+    return saved if saved is not None else molecule
 
 
 def _child_qm_result(calc_result) -> Tuple[Optional[QMResult], Optional[str]]:
@@ -276,8 +323,9 @@ async def multistep_optimizer(
                 return node_runner.fail(f"DFTB pre-optimization failed: {error}")
         else:
             last_result = qm_result
-            if qm_result.final_structure is not None:
-                molecule = qm_result.final_structure
+            next_mol = _molecule_from_qm_result(qm_result, molecule, node_runner, "dftb")
+            if next_mol is not molecule:
+                molecule = await _persist_step_molecule(next_mol, node_runner, "dftb")
             _append_step_row(step_table, "dftb", "", method, qm_result, node_runner)
             node_runner.info("DFTB pre-optimization finished")
 
@@ -305,12 +353,9 @@ async def multistep_optimizer(
                 break
             return node_runner.fail(f"{step_name} failed: {error}")
         last_result = qm_result
-        if qm_result.final_structure is None:
-            node_runner.warning(
-                f"{step_name} returned no final_structure; reusing previous geometry"
-            )
-        else:
-            molecule = qm_result.final_structure
+        next_mol = _molecule_from_qm_result(qm_result, molecule, node_runner, step_name)
+        if next_mol is not molecule:
+            molecule = await _persist_step_molecule(next_mol, node_runner, step_name)
         _append_step_row(
             step_table, step_name, basis_name, functional_name, qm_result, node_runner
         )

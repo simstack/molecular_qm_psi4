@@ -12,7 +12,7 @@ from molecular_qm_psi4.util.psi4_calculator import (
 )
 
 
-def _qm_input(*, max_scf_iterations=100, max_optimization_iterations=100, print_level=1):
+def _qm_input(*, max_scf_iterations=100, max_optimization_iterations=100, print_level=1, optimization=True):
     qm_input = MagicMock()
     qm_input.basis_set.basis_set.value = "def2-SVP"
     qm_input.basis_set.aux_basis = None
@@ -21,6 +21,7 @@ def _qm_input(*, max_scf_iterations=100, max_optimization_iterations=100, print_
     qm_input.max_scf_iterations = max_scf_iterations
     qm_input.max_optimization_iterations = max_optimization_iterations
     qm_input.print_level = print_level
+    qm_input.optimization = optimization
     return qm_input
 
 
@@ -57,6 +58,16 @@ def test_set_options_uses_qm_input_defaults():
     assert options["print"] == 1
     assert options["debug"] == 0
     assert options["optking__print"] == 1
+    assert options["intrafrag_step_limit"] == 0.2
+    assert options["intrafrag_step_limit_max"] == 0.25
+    assert options["dynamic_level"] == 1
+
+
+def test_set_options_omits_optking_limits_without_optimization():
+    options = _set_options_payload(_qm_input(optimization=False))
+    assert "intrafrag_step_limit" not in options
+    assert "intrafrag_step_limit_max" not in options
+    assert "dynamic_level" not in options
 
 
 def test_set_options_maps_print_level():

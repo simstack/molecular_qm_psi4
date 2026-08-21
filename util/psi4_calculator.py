@@ -107,6 +107,14 @@ class Psi4Calculator:
             **psi4_print_options(getattr(self.qm_input, "print_level", 1)),
         }
 
+        # Keep OptKing from inflating the trust radius until back-transformation fails.
+        if getattr(self.qm_input, "optimization", False):
+            psi4_options.update({
+                "intrafrag_step_limit": 0.2,
+                "intrafrag_step_limit_max": 0.25,
+                "dynamic_level": 1,
+            })
+
         # Set thermochemistry options if provided
         # Use standard values if not in input (since they were removed from QMInput)
         # T and P are now handled by psi4_thermochemistry for restarts
@@ -138,7 +146,11 @@ class Psi4Calculator:
                 f"max_scf_iterations={self.qm_input.max_scf_iterations} -> maxiter, "
                 f"max_optimization_iterations={self.qm_input.max_optimization_iterations} -> geom_maxiter, "
                 f"print_level={getattr(self.qm_input, 'print_level', 1)}, "
-                f"non_standard_parameters={getattr(self.qm_input, 'non_standard_parameters', None)}"
+                f"non_standard_parameters={getattr(self.qm_input, 'non_standard_parameters', None)}, "
+                f"optimization={getattr(self.qm_input, 'optimization', None)}, "
+                f"intrafrag_step_limit={psi4_options.get('intrafrag_step_limit')}, "
+                f"intrafrag_step_limit_max={psi4_options.get('intrafrag_step_limit_max')}, "
+                f"dynamic_level={psi4_options.get('dynamic_level')}"
             )
 
         psi4.set_options(psi4_options)
