@@ -96,6 +96,10 @@ def test_preoptimizer_overrides_max_dftb_iterations_on_existing_dftb_input():
 def test_preoptimizer_schema_defaults_nested_dftb_optimization():
     schema = PreOptimizerInput.json_schema()
     dftb_schema = schema["dependencies"]["dftb_opt"]["oneOf"][1]["properties"]["dftb_input"]
+    assert "anyOf" not in dftb_schema
+    assert dftb_schema["type"] == "object"
+    assert "hamiltonian" in dftb_schema["properties"]
+    assert "max_optimization_steps" in dftb_schema["properties"]
     assert dftb_schema["default"]["optimization"] is True
     assert dftb_schema["default"]["compute_gradients"] is True
 
@@ -106,6 +110,9 @@ def test_preoptimizer_schema_gates_dftb_input():
     dep = schema["dependencies"]["dftb_opt"]["oneOf"]
     assert dep[0]["properties"]["dftb_opt"]["const"] is False
     assert "dftb_input" in dep[1]["properties"]
+    nested = dep[1]["properties"]["dftb_input"]
+    assert nested["title"] == "DFTB input"
+    assert "anyOf" not in nested
 
 
 def test_preoptimizer_ui_hides_dftb_input_unless_dftb_opt():

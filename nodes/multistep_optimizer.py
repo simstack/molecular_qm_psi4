@@ -87,24 +87,29 @@ class PreOptimizerInput(Model):
     def json_schema(cls, recursive=True):
         schema = cleaned_json_schema(cls)
         schema["title"] = cls.__name__
-        props = schema["properties"]
-        dftb_input = props.pop("dftb_input", None)
-        if isinstance(dftb_input, dict):
-            dftb_input = {
-                **dftb_input,
-                "default": {
-                    "field_name": "DftbInput",
-                    "optimization": True,
-                    "compute_gradients": True,
-                },
-            }
+        schema["properties"].pop("dftb_input", None)
+        # Use DftbInput.json_schema() instead of Optional[DftbInput]'s anyOf
+        # ($ref | null). RJSF otherwise shows an empty Option 1 / Option 2
+        # dropdown instead of the nested DFTB form.
+        dftb_schema = DftbInput.json_schema()
+        for name, definition in (dftb_schema.pop("$defs", None) or {}).items():
+            schema.setdefault("$defs", {}).setdefault(name, definition)
+        dftb_schema["title"] = "DFTB input"
+        dftb_schema["description"] = (
+            "Full DFTB+ settings used for the optional pre-optimization"
+        )
+        dftb_schema["default"] = {
+            "field_name": "DftbInput",
+            "optimization": True,
+            "compute_gradients": True,
+        }
         schema.setdefault("dependencies", {})["dftb_opt"] = {
             "oneOf": [
                 {"properties": {"dftb_opt": {"const": False}}},
                 {
                     "properties": {
                         "dftb_opt": {"const": True},
-                        "dftb_input": dftb_input,
+                        "dftb_input": dftb_schema,
                     }
                 },
             ]
