@@ -266,6 +266,73 @@ def extend_snapshot_dataset(
     return populate_snapshot_section(dataset, snapshots, section_name, rmsd_threshold)
 
 
+def _conformer_label_for_molecule(
+    molecule: Optional[Molecule],
+    representatives: List[Optional[Molecule]],
+    rmsd_threshold: float,
+) -> str:
+    if molecule is not None:
+        for conformer_number, reference in enumerate(representatives, start=1):
+            if aligned_rmsd(molecule, reference) <= rmsd_threshold:
+                return f"C{conformer_number}"
+    representatives.append(molecule)
+    return f"C{len(representatives)}"
+
+
+def append_snapshot_to_section(
+    dataset: DataSet,
+    snapshot: MoleculeSnapshot,
+    section_name: str = _PSI4_SECTION,
+    rmsd_threshold: float = 0.5,
+) -> DataSet:
+    """Add one snapshot row to ``section_name`` without dropping existing rows."""
+    section = dataset[section_name]
+    name = _snapshot_row_name(snapshot, len(section))
+    cache = section._get_cache()
+    if name in cache:
+        return dataset
+    representatives: List[Optional[Molecule]] = []
+    for row in cache.values():
+        molecule = row.get("molecule") if isinstance(row, dict) else None
+        molecule = molecule if isinstance(molecule, Molecule) else None
+        if molecule is None:
+            continue
+        already = any(
+            aligned_rmsd(molecule, reference) <= rmsd_threshold
+            for reference in representatives
+        )
+        if not already:
+            representatives.append(molecule)
+    snapshot_molecule = getattr(snapshot, "molecule", None)
+    snapshot_molecule = snapshot_molecule if isinstance(snapshot_molecule, Molecule) else None
+    label = _conformer_label_for_molecule(snapshot_molecule, representatives, rmsd_threshold)
+    section.add_row(_snapshot_row(snapshot, label), name=name)
+    return dataset
+
+
+async def append_snapshot_to_dataset(
+    snapshot: MoleculeSnapshot,
+    rmsd_threshold: float = 0.5,
+) -> Optional[DataSet]:
+    """Persist ``snapshot`` onto the live ``molecule_snapshots`` DataSet section."""
+    section_name = _method_from_snapshot(snapshot)
+    dataset = await _load_existing_snapshot_dataset()
+    if dataset is None:
+        dataset = _new_snapshot_dataset()
+    else:
+        await _ensure_section_cache(dataset)
+    append_snapshot_to_section(dataset, snapshot, section_name, rmsd_threshold)
+    db = None
+    try:
+        db = context.db
+    except RuntimeError:
+        db = None
+    if db is None:
+        return dataset
+    await db.save(dataset)
+    return dataset
+
+
 async def _load_existing_snapshot_dataset() -> Optional[DataSet]:
     db = None
     try:
@@ -275,6 +342,12 @@ async def _load_existing_snapshot_dataset() -> Optional[DataSet]:
     if db is None:
         return None
     found = await db.find(DataSet, DataSet.field_name == _DATASET_FIELD_NAME) or []
+    if not found:
+        return None
+    if hasattr(found, "__aiter__") and not isinstance(found, (list, tuple)):
+        found = [item async for item in found]
+    else:
+        found = list(found)
     if not found:
         return None
     return found[0]
@@ -326,7 +399,13 @@ async def molecule_snapshot_inspector(
     node_runner = kwargs.get("node_runner")
     section_name = _section_name(opts.method)
     rmsd_threshold = float(opts.rmsd_threshold)
-    snapshots: List[MoleculeSnapshot] = await context.db.find(MoleculeSnapshot) or []
+    snapshots: List[MoleculeSnapshot] = []
+    found = await context.db.find(MoleculeSnapshot)
+    if found:
+        if hasattr(found, "__aiter__") and not isinstance(found, (list, tuple)):
+            snapshots = [item async for item in found]
+        else:
+            snapshots = list(found)
     matching = [snapshot for snapshot in snapshots if _method_from_snapshot(snapshot) == section_name]
     if node_runner is not None:
         node_runner.info(

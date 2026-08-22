@@ -10,6 +10,7 @@ from molecular_qm_psi4.nodes.molecule_snapshot_inspector import (
     SnapshotMethod,
     _PSI4_SECTION,
     aligned_rmsd,
+    append_snapshot_to_section,
     assign_conformers,
     dataset_from_snapshots,
     extend_snapshot_dataset,
@@ -192,6 +193,17 @@ def test_dataset_from_snapshots_empty():
     dataset = extend_snapshot_dataset(_new_snapshot_dataset(), [], section_name=_PSI4_SECTION)
     assert _PSI4_SECTION in dataset
     assert len(dataset[_PSI4_SECTION]) == 0
+
+
+def test_append_snapshot_to_section_keeps_existing_rows():
+    first = _snapshot("task-a", "[H][H]")
+    second = _snapshot("task-b", "[H][H]")
+    dataset = extend_snapshot_dataset(_new_snapshot_dataset(), [first])
+    assert len(dataset[_PSI4_SECTION]) == 1
+    append_snapshot_to_section(dataset, second)
+    assert len(dataset[_PSI4_SECTION]) == 2
+    append_snapshot_to_section(dataset, second)
+    assert len(dataset[_PSI4_SECTION]) == 2
 
 
 def test_extend_snapshot_dataset_rebuilds_section():

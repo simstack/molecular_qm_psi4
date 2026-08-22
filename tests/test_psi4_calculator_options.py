@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 from molecular_qm_psi4.nodes.psi4_calculator import (
     OptimizationSnapshotter,
+    _should_snapshot,
     redirect_psi4_logs,
 )
 from molecular_qm_psi4.util.psi4_calculator import (
@@ -174,3 +175,83 @@ def test_optimization_snapshotter_enter_when_psi4_is_present():
         snap = OptimizationSnapshotter(MagicMock(), {})
         with snap:
             pass
+
+
+def test_should_snapshot_every_ten_steps():
+    assert _should_snapshot(None) is False
+    assert _should_snapshot(0) is False
+    assert _should_snapshot(1) is False
+    assert _should_snapshot(9) is False
+    assert _should_snapshot(10) is True
+    assert _should_snapshot(20) is True
+    assert _should_snapshot(10, seen={10}) is False
+
+
+def test_snapshotter_persists_every_ten_gradient_calls_and_on_failure():
+    from molecular_qm_psi4.nodes import psi4_calculator as mod
+
+    def fake_run_async(coro):
+        coro.close()
+
+    wfn = MagicMock(name="wfn")
+    original_gradient = MagicMock(return_value=(MagicMock(name="grad"), wfn))
+    snap = OptimizationSnapshotter(MagicMock(), {}, interval=10)
+    snap._original_gradient = original_gradient
+
+    with patch.object(mod, "_run_async", side_effect=fake_run_async), patch.object(
+        mod, "_optimization_iteration", return_value=None
+    ), patch.object(mod, "_energy_and_grad_norm", return_value=(None, None)):
+        for _ in range(25):
+            snap._wrapped_gradient("pbe", return_wfn=True)
+        assert snap.geom_iter == 25
+        assert snap.seen == {10, 20}
+
+        snap._persist_last_snapshot(final_structure=True)
+        assert 25 in snap.seen
+
+
+def test_snapshotter_ignores_stuck_psi4_iteration_variable():
+    from molecular_qm_psi4.nodes import psi4_calculator as mod
+
+    def fake_run_async(coro):
+        coro.close()
+
+    wfn = MagicMock(name="wfn")
+    original_gradient = MagicMock(return_value=(MagicMock(name="grad"), wfn))
+    snap = OptimizationSnapshotter(MagicMock(), {}, interval=10)
+    snap._original_gradient = original_gradient
+
+    with patch.object(mod, "_run_async", side_effect=fake_run_async), patch.object(
+        mod, "_optimization_iteration", return_value=1
+    ), patch.object(mod, "_energy_and_grad_norm", return_value=(None, None)):
+        for _ in range(200):
+            snap._wrapped_gradient("pbe", return_wfn=True)
+        assert snap.geom_iter == 200
+        assert snap.seen == set(range(10, 201, 10))
+
+
+def test_snapshotter_patches_optimize_globals_gradient():
+    from types import SimpleNamespace
+
+    from molecular_qm_psi4.nodes import psi4_calculator as mod
+
+    original_gradient = MagicMock(name="original_gradient")
+    fake_optimize = SimpleNamespace(__globals__={"gradient": original_gradient})
+
+    fake_driver = MagicMock()
+    fake_driver.gradient = original_gradient
+    fake_driver.optimize = fake_optimize
+
+    fake_psi4 = MagicMock()
+    fake_psi4.gradient = original_gradient
+
+    snap = OptimizationSnapshotter(MagicMock(), {})
+    with patch.object(mod, "psi4", fake_psi4), patch.dict(
+        "sys.modules", {"psi4.driver.driver": fake_driver}
+    ):
+            with snap:
+                assert fake_optimize.__globals__["gradient"] is not original_gradient
+                assert fake_driver.gradient is not original_gradient
+            assert fake_optimize.__globals__["gradient"] is original_gradient
+            assert fake_driver.gradient is original_gradient
+

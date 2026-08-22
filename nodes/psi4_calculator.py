@@ -71,6 +71,18 @@ def _safe_array(getter):
     return obj
 
 
+def _molecule_dict_from_wfn(wfn):
+    if wfn is None:
+        return None
+    mol = _safe_call(wfn.molecule)
+    if mol is None:
+        return None
+    mol_dict = _safe_call(lambda: mol.to_dict(quiet=True))
+    if mol_dict is None:
+        mol_dict = _safe_call(mol.to_dict)
+    return mol_dict
+
+
 def _serialize_frequency_analysis(vibinfo):
     if not vibinfo:
         return None
@@ -129,7 +141,7 @@ def _wavefunction_to_payload(wfn):
     if wfn is None:
         return None
 
-    molecule = _safe_call(lambda: wfn.molecule().to_dict(quiet=True))
+    molecule = _molecule_dict_from_wfn(wfn)
     if molecule is None:
         return None
 
@@ -301,29 +313,69 @@ def _load_wavefunction(path: Path):
 def _run_async(coro):
     """Run ``coro`` from a Psi4 callback that may already be inside an event loop."""
     try:
+        import nest_asyncio
+
+        nest_asyncio.apply()
+    except Exception:
+        pass
+    try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
-    return loop.run_until_complete(coro)
+    # nest_asyncio patches asyncio.run so this works inside the node loop.
+    try:
+        return asyncio.run(coro)
+    except RuntimeError:
+        return loop.run_until_complete(coro)
 
 
 def _optimization_iteration():
-    if psi4 is None:
-        return None
-    try:
-        value = psi4.core.variable("OPTIMIZATION ITERATIONS")
-    except Exception:
-        return None
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    psi4_mod = psi4
+    if psi4_mod is None:
+        try:
+            import psi4 as psi4_mod
+        except ImportError:
+            return None
+    names = (
+        "OPTIMIZATION ITERATIONS",
+        "OPTIMIZATION ITERATION",
+        "NITER",
+    )
+    core = getattr(psi4_mod, "core", None)
+    getters = []
+    if core is not None:
+        getters.extend(
+            [
+                getattr(core, "variable", None),
+                getattr(core, "get_variable", None),
+            ]
+        )
+    getters.append(getattr(psi4_mod, "variable", None))
+    for getter in getters:
+        if not callable(getter):
+            continue
+        for name in names:
+            try:
+                value = getter(name)
+            except Exception:
+                continue
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return None
 
 
 def _should_snapshot(iteration, interval=_SNAPSHOT_INTERVAL, seen=None) -> bool:
-    if not iteration or iteration % interval != 0:
+    if iteration is None:
+        return False
+    try:
+        iteration = int(iteration)
+    except (TypeError, ValueError):
+        return False
+    if interval < 1 or iteration < 1 or iteration % interval != 0:
         return False
     if seen is not None and iteration in seen:
         return False
@@ -485,6 +537,10 @@ async def _persist_molecule_snapshot(
     node_runner = kwargs.get("node_runner")
     payload = _payload_from_wfn_or_reference(wfn)
     if payload is None:
+        mol_dict = _molecule_dict_from_wfn(wfn)
+        if mol_dict is not None:
+            payload = {"molecule": mol_dict}
+    if payload is None:
         if node_runner is not None:
             node_runner.warning(
                 f"Skipping MoleculeSnapshot at geom_iter={geom_iter}, scf_iter={scf_iter}: "
@@ -503,11 +559,15 @@ async def _persist_molecule_snapshot(
         secure_source=True,
         task_id=task_id,
     )
-    snapshot_molecule = _molecule_from_psi4_molecule(
-        wfn.molecule(),
-        smiles=getattr(source_molecule, "smiles", None),
-        formula=getattr(source_molecule, "formula", None),
-    )
+    psi4_mol = _safe_call(wfn.molecule) if wfn is not None else None
+    if psi4_mol is not None:
+        snapshot_molecule = _molecule_from_psi4_molecule(
+            psi4_mol,
+            smiles=getattr(source_molecule, "smiles", None),
+            formula=getattr(source_molecule, "formula", None),
+        )
+    else:
+        snapshot_molecule = Molecule.from_molecule(source_molecule)
     snapshot = MoleculeSnapshot(
         date_created=datetime.now(),
         task_id=task_id,
@@ -521,15 +581,34 @@ async def _persist_molecule_snapshot(
         molecule=snapshot_molecule,
         wavefunction=wfn_fs,
     )
-    db = None
+    db = _get_db()
+    if db is None:
+        if node_runner is not None:
+            node_runner.warning(
+                f"Skipping MoleculeSnapshot persist at geom_iter={geom_iter}: context.db is unavailable"
+            )
+        else:
+            logger.warning(
+                "Skipping MoleculeSnapshot persist at geom_iter=%s: context.db is unavailable",
+                geom_iter,
+            )
+        return snapshot
+    await db.save(wfn_fs)
+    await db.save(snapshot_molecule)
+    await db.save(snapshot)
     try:
-        db = context.db
-    except RuntimeError:
-        db = None
-    if db is not None:
-        await db.save(wfn_fs)
-        await db.save(snapshot_molecule)
-        await db.save(snapshot)
+        from molecular_qm_psi4.nodes.molecule_snapshot_inspector import (
+            append_snapshot_to_dataset,
+        )
+
+        await append_snapshot_to_dataset(snapshot)
+    except Exception as exc:
+        if node_runner is not None:
+            node_runner.warning(
+                f"Saved MoleculeSnapshot but failed to update psi4 table: {exc}"
+            )
+        else:
+            logger.warning("Saved MoleculeSnapshot but failed to update psi4 table: %s", exc)
     if node_runner is not None:
         node_runner.info(
             f"Saved MoleculeSnapshot geom_iter={geom_iter} scf_iter={scf_iter} "
@@ -555,15 +634,29 @@ class OptimizationSnapshotter:
         self.seen = set()
         self.geom_iter = 0
         self.scf_iter = 0
+        self.last_wfn = None
+        self.pending = []
         self.energy_history = []
         self.grad_history = []
         self.charts = (None, None)
         self._chart_steps = set()
         self._original_gradient = None
         self._patched_modules = []
+        self._optimize_globals = None
+
+    def _resolve_psi4(self):
+        psi4_mod = psi4
+        if psi4_mod is not None:
+            return psi4_mod
+        try:
+            import psi4 as imported
+        except ImportError:
+            return None
+        return imported
 
     def __enter__(self):
-        if psi4 is None:
+        psi4_mod = self._resolve_psi4()
+        if psi4_mod is None:
             return self
         try:
             # Avoid ``import psi4.driver``: that binds a local ``psi4``.
@@ -572,8 +665,11 @@ class OptimizationSnapshotter:
             importlib.import_module("psi4.driver.driver")
         except Exception:
             pass
-        original = getattr(psi4, "gradient", None)
-        if original is None:
+        driver = sys.modules.get("psi4.driver.driver")
+        original = getattr(driver, "gradient", None) if driver is not None else None
+        if original is None or not callable(original):
+            original = getattr(psi4_mod, "gradient", None)
+        if original is None or not callable(original):
             return self
         self._original_gradient = original
         wrapped = self._wrapped_gradient
@@ -587,6 +683,20 @@ class OptimizationSnapshotter:
             if current is original:
                 setattr(mod, "gradient", wrapped)
                 self._patched_modules.append(mod)
+        try:
+            if getattr(psi4_mod, "gradient", None) is original:
+                psi4_mod.gradient = wrapped
+                if psi4_mod not in self._patched_modules:
+                    self._patched_modules.append(psi4_mod)
+        except Exception:
+            pass
+        # ``optimize()`` looks up ``gradient`` in its own globals, which can
+        # stay bound to the original even after module attribute patching.
+        opt = getattr(driver, "optimize", None) if driver is not None else None
+        gdict = getattr(opt, "__globals__", None)
+        if isinstance(gdict, dict) and gdict.get("gradient") is original:
+            gdict["gradient"] = wrapped
+            self._optimize_globals = gdict
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -598,9 +708,30 @@ class OptimizationSnapshotter:
                 node_runner.warning(f"Failed to store optimization charts: {e}")
             else:
                 logger.warning("Failed to store optimization charts: %s", e)
+        if exc_type is not None:
+            try:
+                self._persist_last_snapshot(final_structure=True)
+            except Exception as e:
+                node_runner = self.kwargs.get("node_runner")
+                if node_runner is not None:
+                    node_runner.warning(f"Failed to store MoleculeSnapshot: {e}")
+                else:
+                    logger.warning("Failed to store MoleculeSnapshot: %s", e)
+        if self.pending:
+            try:
+                _run_async(self.flush_pending())
+            except Exception as e:
+                node_runner = self.kwargs.get("node_runner")
+                if node_runner is not None:
+                    node_runner.warning(f"Failed to flush pending MoleculeSnapshots: {e}")
+                else:
+                    logger.warning("Failed to flush pending MoleculeSnapshots: %s", e)
         original = self._original_gradient
         if original is None:
             return False
+        if self._optimize_globals is not None:
+            self._optimize_globals["gradient"] = original
+            self._optimize_globals = None
         for mod in self._patched_modules:
             try:
                 setattr(mod, "gradient", original)
@@ -610,9 +741,13 @@ class OptimizationSnapshotter:
         self._original_gradient = None
         return False
 
-    def _wrapped_gradient(self, name, **gkwargs):
-        result = self._original_gradient(name, **gkwargs)
-        self.scf_iter += 1
+    def _wrapped_gradient(self, *args, **gkwargs):
+        result = self._original_gradient(*args, **gkwargs)
+        self.geom_iter += 1
+        self.scf_iter = self.geom_iter
+        wfn = _wavefunction_from_gradient_result(result)
+        if wfn is not None:
+            self.last_wfn = wfn
         try:
             self._record_opt_charts(result)
         except Exception as e:
@@ -635,8 +770,8 @@ class OptimizationSnapshotter:
         energy, grad_norm = _energy_and_grad_norm(result)
         if energy is None or grad_norm is None:
             return
-        iteration = _optimization_iteration()
-        step = int(iteration) if iteration else (len(self.energy_history) + 1)
+        iteration = self.geom_iter
+        step = int(iteration)
         if step in self._chart_steps:
             return
         self._chart_steps.add(step)
@@ -659,26 +794,70 @@ class OptimizationSnapshotter:
         if saved is not None:
             self.charts = saved
 
+    def _geometry_iteration(self):
+        return self.geom_iter
+
     def _maybe_snapshot(self, result):
-        iteration = _optimization_iteration()
+        iteration = self.geom_iter
         if not _should_snapshot(iteration, self.interval, self.seen):
             return
+        self._persist_snapshot(result, iteration, final_structure=False)
+
+    def _persist_last_snapshot(self, final_structure: bool = False):
+        if self.last_wfn is None:
+            return
+        iteration = self.geom_iter
+        if not iteration:
+            return
+        if iteration in self.seen and not final_structure:
+            return
+        self._persist_snapshot(self.last_wfn, iteration, final_structure=final_structure)
+
+    async def flush_pending(self):
+        pending = list(self.pending)
+        self.pending = []
+        errors = []
+        for wfn, iteration, final_structure in pending:
+            try:
+                await _persist_molecule_snapshot(
+                    wfn,
+                    self.source_molecule,
+                    self.kwargs,
+                    geom_iter=int(iteration),
+                    scf_iter=self.scf_iter,
+                    final_structure=final_structure,
+                    qm_input=self.qm_input,
+                )
+            except Exception as exc:
+                self.pending.append((wfn, iteration, final_structure))
+                errors.append(exc)
+        if errors:
+            raise errors[-1]
+
+    def _persist_snapshot(self, result, iteration, final_structure: bool = False):
         wfn = _wavefunction_from_gradient_result(result)
+        if wfn is None:
+            wfn = self.last_wfn
         if wfn is None:
             return
         self.seen.add(iteration)
-        self.geom_iter += 1
-        _run_async(
-            _persist_molecule_snapshot(
-                wfn,
-                self.source_molecule,
-                self.kwargs,
-                geom_iter=self.geom_iter,
-                scf_iter=self.scf_iter,
-                final_structure=False,
-                qm_input=self.qm_input,
+        try:
+            saved = _run_async(
+                _persist_molecule_snapshot(
+                    wfn,
+                    self.source_molecule,
+                    self.kwargs,
+                    geom_iter=int(iteration),
+                    scf_iter=self.scf_iter,
+                    final_structure=final_structure,
+                    qm_input=self.qm_input,
+                )
             )
-        )
+            if saved is None:
+                self.pending.append((wfn, int(iteration), final_structure))
+        except Exception:
+            self.pending.append((wfn, int(iteration), final_structure))
+            raise
 
 
 def _find_wavefunction_file(files):
@@ -1100,6 +1279,8 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 snapshotter = OptimizationSnapshotter(molecule, kwargs, qm_input=qm_input)
                 with snapshotter:
                     energy, wfn = psi4.optimize(method, return_wfn=True, ref_wfn=restart_wfn)
+                if snapshotter.pending:
+                    await snapshotter.flush_pending()
                 orbital_payload = _payload_from_wfn_or_reference(wfn)
                 if qm_input.frequencies:
                     node_runner.log("Optimization finished, starting frequency calculation...")
@@ -1121,12 +1302,20 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 orbital_payload = _payload_from_wfn_or_reference(wfn)
 
             try:
+                snap_wfn = wfn
+                geom_iter = 1
+                scf_iter = 1
+                if snapshotter is not None:
+                    geom_iter = snapshotter.geom_iter or 1
+                    scf_iter = snapshotter.scf_iter or 1
+                    if snap_wfn is None:
+                        snap_wfn = snapshotter.last_wfn
                 await _persist_molecule_snapshot(
-                    wfn,
+                    snap_wfn,
                     molecule,
                     kwargs,
-                    geom_iter=(snapshotter.geom_iter + 1) if snapshotter is not None else 1,
-                    scf_iter=snapshotter.scf_iter if snapshotter is not None else 1,
+                    geom_iter=geom_iter,
+                    scf_iter=scf_iter,
                     final_structure=True,
                     qm_input=qm_input,
                 )
