@@ -184,14 +184,27 @@ def _qm_input_for_step(
     """Copy QMInput for one Psi4 DFT optimization step, applying step overrides.
 
     Geometry optimization is always enabled, even when the template ``qm_input``
-    has ``optimization=False``. Overrides are applied after the copy so they
-    work even if ``from_model`` ignores keyword arguments.
+    has ``optimization=False``.
+
+    ``model_copy`` is used instead of ``from_model`` so odmantic marks every
+    field as modified. Nested docker reloads the child ``psi4_calculator``
+    input from Mongo; a partial upsert would restore default 100 SCF and
+    geometry-optimization iterations.
     """
-    copied = QMInput.from_model(
-        qm_input,
-        optimization=True,
-        frequencies=False,
-        molecule=molecule,
+    copied = qm_input.model_copy(
+        deep=True,
+        update={
+            "id": ObjectId(),
+            "optimization": True,
+            "frequencies": False,
+            "molecule": molecule,
+            "basis_set": step.basis_set,
+            "functional": step.functional,
+            "max_optimization_iterations": step.max_optimization_iterations,
+            "max_scf_iterations": step.max_scf_iterations,
+            "non_standard_parameters": True,
+            "field_name": "QMInput",
+        },
     )
     copied.optimization = True
     copied.frequencies = False
@@ -202,6 +215,9 @@ def _qm_input_for_step(
     copied.functional = step.functional
     copied.max_optimization_iterations = step.max_optimization_iterations
     copied.max_scf_iterations = step.max_scf_iterations
+    post_copy = getattr(copied, "_post_copy_update", None)
+    if callable(post_copy):
+        post_copy()
     return copied
 
 
@@ -226,6 +242,25 @@ def _molecule_from_qm_result(
         f"{first.element}={first.x:.6f},{first.y:.6f},{first.z:.6f}"
     )
     return next_mol
+
+
+async def _persist_qm_input(opts: QMInput, node_runner, db=None) -> QMInput:
+    """Save step QMInput so nested docker can reload psi4_calculator input."""
+    post_copy = getattr(opts, "_post_copy_update", None)
+    if callable(post_copy):
+        post_copy()
+    if db is None:
+        try:
+            db = context.db
+        except Exception as exc:
+            node_runner.warning(f"Could not persist QMInput: {exc}")
+            return opts
+    try:
+        saved = await db.save(opts)
+    except Exception as exc:
+        node_runner.warning(f"Could not persist QMInput: {exc}")
+        return opts
+    return saved if saved is not None else opts
 
 
 async def _persist_dftb_input(opts: DftbInput, node_runner, db=None) -> DftbInput:
@@ -396,6 +431,13 @@ async def multistep_optimizer(
             f"max_scf_iterations={step.max_scf_iterations}"
         )
         current_input = _qm_input_for_step(qm_input, step, molecule)
+        current_input = await _persist_qm_input(current_input, node_runner)
+        node_runner.info(
+            f"{step_name} QMInput for psi4_calculator: "
+            f"max_scf_iterations={current_input.max_scf_iterations}, "
+            f"max_optimization_iterations={current_input.max_optimization_iterations}, "
+            f"non_standard_parameters={current_input.non_standard_parameters}"
+        )
         try:
             calc_result = await psi4_calculator(current_input, **kwargs)
         except Exception as exc:

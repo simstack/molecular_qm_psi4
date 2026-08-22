@@ -13,6 +13,7 @@ from molecular_qm_psi4.nodes.multistep_optimizer import (
     _dftb_preopt_input,
     _molecule_from_qm_result,
     _persist_dftb_input,
+    _persist_qm_input,
     _persist_step_molecule,
     _qm_input_for_step,
 )
@@ -156,6 +157,10 @@ def test_qm_input_for_step_forces_optimization_true():
     assert copied.max_optimization_iterations == 80
     assert copied.max_scf_iterations == 250
     assert copied.non_standard_parameters is True
+    assert copied.id != source.id
+    assert "max_scf_iterations" in copied.__fields_modified__
+    assert "max_optimization_iterations" in copied.__fields_modified__
+    assert "non_standard_parameters" in copied.__fields_modified__
 
 
 def _sto3g_step():
@@ -239,6 +244,25 @@ async def test_persist_step_molecule_saves_for_qm_input_reference():
     db.save.assert_awaited_once_with(mol)
     assert got is saved
     node_runner.warning.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_persist_qm_input_saves_copied_iteration_limits():
+    molecule = _water()
+    copied = _qm_input_for_step(_source_qm_input(molecule), _sto3g_step(), molecule)
+    node_runner = MagicMock()
+    db = MagicMock()
+    db.save = AsyncMock(return_value=copied)
+
+    got = await _persist_qm_input(copied, node_runner, db=db)
+
+    db.save.assert_awaited_once_with(copied)
+    assert got is copied
+    node_runner.warning.assert_not_called()
+    assert copied.max_scf_iterations == 250
+    assert copied.max_optimization_iterations == 80
+    assert "max_scf_iterations" in copied.__fields_modified__
+    assert "max_optimization_iterations" in copied.__fields_modified__
 
 
 @pytest.mark.asyncio
