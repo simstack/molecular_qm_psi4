@@ -7,12 +7,12 @@ from molecular_qm_models import Molecule, QMInput
 from molecular_qm_models.basis_set import BasisSet
 from molecular_qm_models.density_functional import Functional
 from molecular_qm_models.energy_units import MolecularEnergyUnitEnum, convert_energy_unit
-from molecular_qm_psi4.nodes.psi4_calculator import psi4_calculator, psi4_thermochemistry
+from molecular_qm_psi4.nodes.psi4_calculator import psi4_calculator
 from simstack.core.context import context
 from simstack.core.definitions import TaskStatus
 from simstack.core.node import node
 from simstack.core.simstack_result import SimstackResult
-from simstack.models import simstack_model, FloatData
+from simstack.models import simstack_model
 from simstack.models.base_lists import GenericListMixin, ObjectListMixin
 from simstack.models.simple_table import SimpleTable
 
@@ -496,138 +496,3 @@ async def compare_conformers_over_functionals(
         return node_runner.fail(str(e))
 
 
-@node
-async def compare_conformers_over_temperature(
-    qm_input: QMInput,
-    molecule: Molecule,
-    temperatures: TemperatureList,
-    **kwargs,
-) -> SimstackResult:
-    """
-    Run compare_conformers over a list of temperatures.
-    Uses optimization+frequencies for the first temperature, then reuses wavefunctions
-    for the others.
-
-    Parameters:
-        qm_input (QMInput): Conformer 1 and shared QM settings.
-        molecule (Molecule): Conformer 2.
-        temperatures (TemperatureList): List of temperatures in Kelvin.
-
-    Results:
-        SimstackResult: The result of the compare_conformers_over_temperature calculation.
-            table (SimpleTable): One row per temperature with smiles, formula, basis_set,
-                functional, temperature, pressure, DDG, and DDZ.
-    Called Nodes:
-        psi4_calculator
-        psi4_thermochemistry
-
-    """
-    node_runner = kwargs.get("node_runner")
-    table = empty_compare_conformers_table("Compare Conformers by Temperature")
-
-    if not temperatures or len(temperatures.elements) == 0:
-        node_runner.warning("No temperatures provided")
-        node_runner.table = table
-        return node_runner.succeed()
-
-    try:
-        # Ensure optimization and frequencies are enabled for the base run
-        qm_input.optimization = True
-        qm_input.frequencies = True
-
-        mols = [qm_input.molecule, molecule]
-        qm_results = []
-
-        # 1. Run full calculation for both molecules to get base wavefunctions
-        # Note: We use the first temperature for the initial calculation if possible,
-        # but psi4_calculator doesn't explicitly take temperature (it uses Psi4 default 298.15).
-        # However, we can recompute for all temperatures including the first one using psi4_thermochemistry.
-
-        for i, mol in enumerate(mols):
-            node_runner.info(f"Starting base calculation for molecule {i+1}...")
-            current_input = _qm_input_copy(qm_input)
-            current_input.molecule = mol
-
-
-            calc_result = await psi4_calculator(current_input, **kwargs)
-            qm_res = _completed_node_output(calc_result, "psi4_result")
-            if not qm_res:
-                status = getattr(calc_result, "status", None)
-                error_message = getattr(calc_result, "error_message", None)
-                return node_runner.fail(
-                    f"No psi4_result found for molecule {i+1}"
-                    + (f" (status={status}, error={error_message})" if status or error_message else "")
-                )
-
-            qm_results.append(qm_res)
-
-        # 2. Iterate over all temperatures and recompute thermo using psi4_thermochemistry node
-        pressure = 101325.0
-
-        for temp in temperatures.elements:
-            node_runner.info(f"Computing thermochemistry at T={temp} K")
-            g_values = []
-            zpe_values = []
-
-            for i in range(len(mols)):
-                # Call the psi4_thermochemistry node
-                kwargs["custom_name"] = f"{temp}mol{i}"
-                thermo_calc_result = await psi4_thermochemistry(
-                    qm_result=qm_results[i],
-                    temperature=FloatData(value=temp),
-                    pressure=FloatData(value=pressure),
-                    **kwargs
-                )
-
-                if (
-                    isinstance(thermo_calc_result, SimstackResult)
-                    and thermo_calc_result.status != TaskStatus.COMPLETED
-                ):
-                    node_runner.error(
-                        f"Failed to compute thermo for molecule {i+1} at T={temp}: "
-                        f"{thermo_calc_result.error_message}"
-                    )
-                    continue
-
-                thermo_result = _completed_node_output(thermo_calc_result, "result")
-                if thermo_result is not None and getattr(thermo_result, "G_tot", None) is not None:
-                    g_values.append(thermo_result.G_tot)
-                    zpe_values.append(getattr(thermo_result, "ZPE_tot", None))
-                else:
-                    node_runner.error(
-                        f"G_tot not found in thermo_result for molecule {i+1} at T={temp} "
-                        f"(got {type(thermo_calc_result).__name__})"
-                    )
-
-            if len(g_values) == 2:
-                delta_delta_g_hartree = g_values[1] - g_values[0]
-                delta_delta_g = convert_energy_unit(
-                    MolecularEnergyUnitEnum.HARTREE,
-                    delta_delta_g_hartree,
-                    MolecularEnergyUnitEnum.KCAL_PER_MOL,
-                )
-                delta_delta_zpe_tot = None
-                if len(zpe_values) == 2:
-                    delta_delta_zpe_tot_hartree = zpe_values[1] - zpe_values[0]
-                    delta_delta_zpe_tot = convert_energy_unit(
-                        MolecularEnergyUnitEnum.HARTREE,
-                        delta_delta_zpe_tot_hartree,
-                        MolecularEnergyUnitEnum.KCAL_PER_MOL,
-                    )
-
-                table.add_row({
-                    "smiles": mols[1].smiles if mols[1] else None,
-                    "formula": mols[1].formula if mols[1] else None,
-                    "basis_set": _basis_set_name(qm_input.basis_set),
-                    "functional": _functional_name(qm_input.functional),
-                    "temperature": temp,
-                    "pressure": pressure,
-                    "DDG": delta_delta_g,
-                    "DDZ": delta_delta_zpe_tot
-                })
-
-        node_runner.table = table
-        return node_runner.succeed()
-    except Exception as e:
-        node_runner.error(f"compare_conformers_over_temperature failed: {str(e)}")
-        return node_runner.fail(str(e))

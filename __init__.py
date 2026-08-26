@@ -15,8 +15,8 @@ from molecular_qm_psi4.nodes.compare_conformers import (
     compare_conformers,
     compare_conformers_over_basis_sets,
     compare_conformers_over_functionals,
-    compare_conformers_over_temperature,
 )
+from molecular_qm_psi4.nodes.temperature_analysis import temperature_analysis
 from molecular_qm_psi4.nodes.compare_conformers_table import (
 
     delta_g_table,
