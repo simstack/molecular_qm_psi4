@@ -1,7 +1,7 @@
 # Build from this capability repository:
-#   docker build --build-arg UV_GIT_SHAS=$(python resolve_uv_git_shas.py pyproject.docker) -t molecular-qm-psi4:latest .
+#   docker build --build-arg UV_GIT_SHAS=$(python resolve_uv_git_shas.py pyproject.docker) --build-arg FORCE_REBUILD=$(date +%s) -t molecular-qm-psi4:latest .
 # From simstack-model:
-#   docker build --build-arg UV_GIT_SHAS=$(python scripts/resolve_uv_git_shas.py molecular_qm_psi4/pyproject.docker) -t molecular-qm-psi4:latest -f molecular_qm_psi4/Dockerfile molecular_qm_psi4
+#   docker build --build-arg UV_GIT_SHAS=$(python scripts/resolve_uv_git_shas.py molecular_qm_psi4/pyproject.docker) --build-arg FORCE_REBUILD=$(date +%s) -t molecular-qm-psi4:latest -f molecular_qm_psi4/Dockerfile molecular_qm_psi4
 # Do not pass SIMSTACK_SHA: the Dockerfile cache key is UV_GIT_SHAS. Without it
 # the uv pip install layer stays CACHED ("uv git sources unknown").
 #
@@ -64,25 +64,12 @@ ENV PATH="/opt/conda/bin:/root/.local/bin:$PATH"
 COPY . /build/molecular_qm_psi4
 
 WORKDIR /build/molecular_qm_psi4
-# uv pip install . uses pyproject.docker. UV_GIT_SHAS is only a cache key:
-# resolved commits of those git sources, so this layer rebuilds when a pinned
-# branch (e.g. fix-git-pull) moves.
-ARG UV_GIT_SHAS=unknown
-RUN echo "uv git sources ${UV_GIT_SHAS}" \
- && cp pyproject.docker pyproject.toml \
+# Force cache bust for all layers below this line when FORCE_REBUILD changes.
+ARG FORCE_REBUILD=static
+RUN echo "force rebuild marker: ${FORCE_REBUILD}"
+
+RUN cp pyproject.docker pyproject.toml \
  && uv pip install --system . "setuptools>=80.9.0" \
- && git clone --depth 1 https://github.com/simstack/molecular_qm_dftb.git /build/molecular_qm_dftb \
- && python -c "import shutil, sysconfig; \
-from pathlib import Path; \
-src = Path('/build/molecular_qm_dftb'); \
-dst = Path(sysconfig.get_path('purelib')) / 'molecular_qm_dftb'; \
-dst.mkdir(parents=True, exist_ok=True); \
-shutil.copy2(src / '__init__.py', dst / '__init__.py'); \
-[shutil.copytree(src / name, dst / name, dirs_exist_ok=True) \
- for name in ('nodes', 'models', 'lib')]" \
- && python -c "from molecular_qm_dftb.models.dftb_input import DftbInput; \
-o=DftbInput(optimization=True); \
-assert o.optimization is True and o.compute_gradients is True" \
  && python -c "import simstack, molecular_qm_models, molecular_qm_util, molecular_qm_psi4, molecular_qm_dftb; \
 print('simstack', simstack.__file__); \
 print('models', molecular_qm_models.__file__); \

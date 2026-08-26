@@ -300,6 +300,7 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
         node's state management logic.
     """
     node_runner = kwargs.get("node_runner")
+    await context.initialize()
 
     # Ensure optimization and frequencies are enabled
     arg.qm_input.optimization = True
@@ -325,7 +326,7 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
 
     custom_name = kwargs.get("custom_name", None)
     if custom_name is None:
-        node_runner.custom_name = f"{molecules[0].formule}"
+        node_runner.custom_name = f"{molecules[0].formula}"
 
     for i, molecule in enumerate(molecules):
         node_runner.info(f"Starting calculation for molecule {i+1}...")
@@ -411,6 +412,7 @@ async def compare_conformers_over_basis_sets(
             functional, DDG, and DDZ.
     """
     node_runner = kwargs.get("node_runner")
+    await context.initialize()
     table = empty_compare_conformers_method_table("Compare Conformers by Basis Set")
     try:
         if len(basis_sets) == 0:
@@ -436,7 +438,7 @@ async def compare_conformers_over_basis_sets(
         node_runner.table = table
         node_runner.info(f"Built basis-set compare-conformers table with {len(table.row)} row(s)")
         smiles=molecule.smiles if molecule is not None else "NA"
-        node_runner["custom_name"] = f"{smiles}.{str(qm_input.fuctional)}"
+        node_runner["custom_name"] = f"{smiles}.{str(qm_input.functional)}"
         return node_runner.succeed()
     except Exception as e:
         node_runner.error(str(e))
@@ -465,7 +467,8 @@ async def compare_conformers_over_functionals(
         table (SimpleTable): One row per functional with smiles, formula, basis_set,
             functional, DDG, and DDZ.
     """
-    node_runner = kwargs.get("node_runner")
+    node_runner = kwargs["node_runner"]
+    await context.initialize()
     table = empty_compare_conformers_method_table("Compare Conformers by Functional")
     try:
         if len(functionals) == 0:
