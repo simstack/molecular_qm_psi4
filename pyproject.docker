@@ -13,8 +13,8 @@ authors = [
   { name = "Wolfgang Wenzel", email = "wolfgang.wenzel@kit.edu" }
 ]
 dependencies = [
-    "molecular_qm_models",
-    "molecular_qm_util",
+    "molecular-qm-models",
+    "molecular-qm-util",
     "simstack",
 ]
 
@@ -42,13 +42,13 @@ bypass-selection = true
 "data" = "molecular_qm_psi4/data"
 
 [tool.uv.sources]
-molecular_qm_models = { git = "https://github.com/simstack/molecular_qm_models.git", rev= "feature-psi4" }
-molecular_qm_util = { git = "https://github.com/simstack/molecular_qm_util.git", rev = "develop-ww" }
+molecular-qm-models = { git = "https://github.com/simstack/molecular_qm_models.git", rev= "feature-psi4" }
+molecular-qm-util = { git = "https://github.com/simstack/molecular_qm_util.git", rev = "develop-ww" }
 simstack = { git = "https://github.com/simstack/simstack.git", rev = "fix-git-pull" }
 
 [tool.uv]
 override-dependencies = [
-    "molecular_qm_models @ git+https://github.com/simstack/molecular_qm_models.git@feature-psi4",
-    "molecular_qm_util @ git+https://github.com/simstack/molecular_qm_util.git@develop-ww",
+    "molecular-qm-models @ git+https://github.com/simstack/molecular_qm_models.git@feature-psi4",
+    "molecular-qm-util @ git+https://github.com/simstack/molecular_qm_util.git@develop-ww",
     "simstack @ git+https://github.com/simstack/simstack.git@fix-git-pull",
 ]

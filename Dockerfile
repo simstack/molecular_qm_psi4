@@ -68,8 +68,11 @@ WORKDIR /build/molecular_qm_psi4
 ARG FORCE_REBUILD=static
 RUN echo "force rebuild marker: ${FORCE_REBUILD}"
 
-RUN cp pyproject.docker pyproject.toml \
- && uv pip install --system . "setuptools>=80.9.0" \
+RUN if [ -f pyproject.docker ]; then PROJECT_DIR=.; \
+    elif [ -f molecular_qm_psi4/pyproject.docker ]; then PROJECT_DIR=molecular_qm_psi4; \
+    else echo "pyproject.docker not found in expected locations"; exit 1; fi \
+ && cp "${PROJECT_DIR}/pyproject.docker" "${PROJECT_DIR}/pyproject.toml" \
+ && uv pip install --system "./${PROJECT_DIR}" "setuptools>=80.9.0" \
  && python -c "import simstack, molecular_qm_models, molecular_qm_util, molecular_qm_psi4, molecular_qm_dftb; \
 print('simstack', simstack.__file__); \
 print('models', molecular_qm_models.__file__); \
