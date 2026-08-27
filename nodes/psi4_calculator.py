@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 _WFN_NPY_NAME = "result.wfn.npy"
 _FREQ_ANALYSIS_KEY = "frequency_analysis"
 _SNAPSHOT_INTERVAL = 10
+_SNAPSHOT_WFN_NAME = "snapshot.wfn.npy"
 
 
 def _safe_call(fn, default=None):
@@ -260,6 +261,17 @@ def _write_wavefunction_payload(payload, path: Path) -> Path:
     npy_path = path if str(path).endswith(".npy") else Path(str(path) + ".npy")
     np.save(npy_path, payload, allow_pickle=True)
     return npy_path
+
+
+def _cleanup_snapshot_files(directory: Path | None = None):
+    base_dir = Path(".") if directory is None else Path(directory)
+    for file_path in base_dir.glob("snapshot*.wfn.npy"):
+        try:
+            file_path.unlink()
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            logger.warning("Failed to delete snapshot file %s: %s", file_path, exc)
 
 
 def _is_wavefunction_artifact(name: str) -> bool:
@@ -549,7 +561,7 @@ async def _persist_molecule_snapshot(
         return None
 
     saved_path = _write_wavefunction_payload(
-        payload, Path(f"snapshot_geom_{geom_iter:04d}_scf_{scf_iter:04d}.wfn.npy")
+        payload, Path(_SNAPSHOT_WFN_NAME)
     )
     task_id = _task_id_from_kwargs(kwargs)
     wfn_fs = FileStack.from_local_file(
@@ -1341,6 +1353,7 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                         )
                         node_runner.files.append(wfn_fs)
                         qm_result.files.append(wfn_fs)
+                        _cleanup_snapshot_files()
                         has_ca = payload.get("matrix", {}).get("Ca") is not None
                         has_freq = payload.get(_FREQ_ANALYSIS_KEY) is not None
                         node_runner.info(

@@ -1,5 +1,6 @@
 import logging
 
+from odmantic import ObjectId
 from simstack.core.context import context
 from simstack.core.definitions import TaskStatus
 from simstack.core.node import node
@@ -17,13 +18,14 @@ from molecular_qm_psi4.nodes.compare_conformers import (
     _functional_name,
 )
 from molecular_qm_psi4.nodes.psi4_calculator import psi4_thermochemistry, _find_wavefunction_file
+from simstack.core.node_runner import NodeRunner
 
 logger = logging.getLogger(__name__)
 
 
 @node
 async def temperature_analysis(
-    parent_id: StringData,
+    compare_energy_parent_id: StringData,
     temperatures: TemperatureList,
     **kwargs,
 ) -> SimstackResult:
@@ -39,9 +41,9 @@ async def temperature_analysis(
     in *temperatures*.  Delta-delta-G and delta-delta-ZPE are computed and
     collected into a results table.
 
-    :param parent_id: UUID of the parent NodeRegistry entry whose call_path
+    :param compare_energy_parent_id: UUID of the parent NodeRegistry entry whose call_path
         ends with ``.compare_energy``.
-    :type parent_id: StringData
+    :type compare_energy_parent_id: StringData
 
     :param temperatures: Temperatures (in Kelvin) at which to evaluate
         thermochemistry.
@@ -58,7 +60,7 @@ async def temperature_analysis(
     Called Nodes:
         psi4_thermochemistry
     """
-    node_runner = kwargs.get("node_runner")
+    node_runner: NodeRunner = kwargs["node_runner"]
     await context.initialize()
     table = empty_compare_conformers_table("Compare Conformers by Temperature")
 
@@ -69,19 +71,23 @@ async def temperature_analysis(
 
     try:
         db = context.db
-        pid = parent_id.value if hasattr(parent_id, "value") else str(parent_id)
+        pid = compare_energy_parent_id.value if hasattr(compare_energy_parent_id, "value") else str(compare_energy_parent_id)
 
         # 1. Load parent NodeRegistry entry
         parent_entry = await db.load_task_by_id(pid)
         if parent_entry is None:
             return node_runner.fail(f"Parent node {pid} not found")
-        if not parent_entry.call_path or not parent_entry.call_path.endswith(".compare_energy"):
+        valid_parent_suffixes = (".compare_conformers", ".compare_energy")
+        if not parent_entry.call_path or not parent_entry.call_path.endswith(valid_parent_suffixes):
             return node_runner.fail(
-                f"Parent call_path '{parent_entry.call_path}' does not end with .compare_energy"
+                f"Parent call_path '{parent_entry.call_path}' must end with one of {valid_parent_suffixes}"
             )
+        node_runner.info(
+            f"Parent call_path '{parent_entry.call_path}' accepted for temperature analysis"
+        )
 
         # 2. Find children whose call_path ends with .psi4_calculator
-        children = await find_child_nodes(str(parent_entry.id))
+        children = await find_child_nodes(ObjectId(parent_entry.id))
         calc_children = [
             c for c in children
             if c.call_path and c.call_path.endswith(".psi4_calculator")
@@ -91,9 +97,12 @@ async def temperature_analysis(
                 f"Expected 2 psi4_calculator children, found {len(calc_children)}"
             )
 
+        node_runner.info(
+            f"Found children {calc_children[0].id} {calc_children[1].id} psi4_calculator children"
+        )
         # 3. Verify both COMPLETED, load QMResult with wavefunction + energy
         qm_results = []
-        qm_input_ref = None  # will hold a QMInput for table metadata
+        qm_input_ref = None  # will hold a QMInput-like object for table metadata
         for i, child in enumerate(calc_children):
             if child.status != TaskStatus.COMPLETED:
                 return node_runner.fail(
@@ -119,20 +128,33 @@ async def temperature_analysis(
 
             qm_results.append(qm_result)
 
-            # Load QMInput from input_references for table metadata (once)
+            # Load QMInput-like data from input_references for table metadata (once)
             if qm_input_ref is None:
                 for ref in child.input_references:
-                    if ref.variable_name == "QMInput":
-                        model_cls = await import_class(ref.variable_mapping, db)
-                        qm_input_ref = await db.find_one(model_cls, model_cls.id == ref.reference)
+                    model_cls = await import_class(ref.variable_mapping, db)
+                    input_ref = await db.find_one(model_cls, model_cls.id == ref.reference)
+                    if input_ref is None:
+                        continue
+                    if any(hasattr(input_ref, attr) for attr in ("basis_set", "functional", "molecule")):
+                        qm_input_ref = input_ref
                         break
 
-        # Extract molecule metadata from the second child's QMResult
+        # Extract molecule metadata from the second child's QMResult with fallback to input molecule
         mol_structure = qm_results[1].final_structure if len(qm_results) == 2 else None
+        input_molecule = getattr(qm_input_ref, "molecule", None) if qm_input_ref else None
+
         mol_smiles = getattr(mol_structure, "smiles", None) if mol_structure else None
+        if mol_smiles is None and input_molecule is not None:
+            mol_smiles = getattr(input_molecule, "smiles", None)
+
         mol_formula = getattr(mol_structure, "formula", None) if mol_structure else None
+        if mol_formula is None and input_molecule is not None:
+            mol_formula = getattr(input_molecule, "formula", None)
+
         basis_name = _basis_set_name(getattr(qm_input_ref, "basis_set", None)) if qm_input_ref else None
         functional_name = _functional_name(getattr(qm_input_ref, "functional", None)) if qm_input_ref else None
+
+        node_runner.info(f"qm_input_ref: {mol_formula}{mol_smiles} {basis_name} {functional_name}")
 
         # 4. Loop over temperatures, call psi4_thermochemistry for both
         pressure = 101325.0
@@ -198,6 +220,10 @@ async def temperature_analysis(
                 })
 
         node_runner.table = table
+        if len(table.row) == 0:
+            return node_runner.fail(
+                "No output rows were produced. Thermochemistry did not complete for both molecules at any requested temperature."
+            )
         return node_runner.succeed()
     except Exception as e:
         node_runner.error(f"temperature_analysis failed: {str(e)}")

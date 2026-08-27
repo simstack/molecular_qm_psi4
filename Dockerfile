@@ -72,7 +72,13 @@ RUN if [ -f pyproject.docker ]; then PROJECT_DIR=.; \
     elif [ -f molecular_qm_psi4/pyproject.docker ]; then PROJECT_DIR=molecular_qm_psi4; \
     else echo "pyproject.docker not found in expected locations"; exit 1; fi \
  && cp "${PROJECT_DIR}/pyproject.docker" "${PROJECT_DIR}/pyproject.toml" \
- && uv pip install --system "./${PROJECT_DIR}" "setuptools>=80.9.0" \
+ && uv pip install --system "setuptools>=80.9.0" \
+ && uv pip install --system "molecular-qm-models @ git+https://github.com/simstack/molecular_qm_models.git@feature-psi4" \
+ && uv pip install --system --no-deps "molecular-qm-dftb @ git+https://github.com/simstack/molecular_qm_dftb.git" \
+ && uv pip install --system --no-deps "molecular-qm-util @ git+https://github.com/simstack/molecular_qm_util.git@develop-ww" \
+ && uv pip install --system "pubchempy" "cirpy" "beautifulsoup4" \
+ && uv pip install --system "simstack @ git+https://github.com/simstack/simstack.git@fix-git-pull" \
+ && uv pip install --system --no-deps "./${PROJECT_DIR}" \
  && python -c "import simstack, molecular_qm_models, molecular_qm_util, molecular_qm_psi4, molecular_qm_dftb; \
 print('simstack', simstack.__file__); \
 print('models', molecular_qm_models.__file__); \

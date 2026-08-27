@@ -37,6 +37,10 @@ class CompareConformersResult(Model):
     temperature: float = 298.15
     pressure: float = 101325.0
     qm_input: QMInput = Reference()
+    fallback_smiles: Optional[str] = None
+    fallback_formula: Optional[str] = None
+    fallback_basis_set: Optional[str] = None
+    fallback_functional: Optional[str] = None
     delta_delta_g: float = Field(None, description="Delta Delta G of the conformers in kcal/mol")
     delta_delta_zpe_tot: float = Field(None, description="Delta Delta ZPE Total of the conformers in kcal/mol")
 
@@ -47,11 +51,27 @@ class CompareConformersResult(Model):
 
     def make_table_entries(self, **kwargs) -> Dict[str, Any]:
         molecule = self.molecule_for_table()
+        smiles = molecule.smiles if molecule is not None else None
+        if smiles is None:
+            smiles = self.fallback_smiles
+
+        formula = molecule.formula if molecule is not None else None
+        if formula is None:
+            formula = self.fallback_formula
+
+        basis_set = _basis_set_name(self.qm_input.basis_set) if self.qm_input else None
+        if basis_set is None:
+            basis_set = self.fallback_basis_set
+
+        functional = _functional_name(self.qm_input.functional) if self.qm_input else None
+        if functional is None:
+            functional = self.fallback_functional
+
         return {
-            "smiles": molecule.smiles if molecule is not None else None,
-            "formula": molecule.formula if molecule is not None else None,
-            "basis_set": _basis_set_name(self.qm_input.basis_set) if self.qm_input else None,
-            "functional": _functional_name(self.qm_input.functional) if self.qm_input else None,
+            "smiles": smiles,
+            "formula": formula,
+            "basis_set": basis_set,
+            "functional": functional,
             "pressure": self.pressure,
             "temperature": self.temperature,
             "DDG": self.delta_delta_g,
@@ -377,11 +397,17 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
         )
         node_runner.info(f"Computed Delta Delta ZPE Total: {delta_delta_zpe_tot} kcal/mol")
 
+    row_molecule = arg.qm_input.molecule if getattr(arg.qm_input, "molecule", None) is not None else arg.molecule
+
     result = CompareConformersResult(
         molecule2=arg.molecule,
         temperature=arg.temperature,
         pressure=arg.pressure,
         qm_input=arg.qm_input,
+        fallback_smiles=row_molecule.smiles if row_molecule is not None else None,
+        fallback_formula=row_molecule.formula if row_molecule is not None else None,
+        fallback_basis_set=_basis_set_name(arg.qm_input.basis_set),
+        fallback_functional=_functional_name(arg.qm_input.functional),
         delta_delta_g=delta_delta_g,
         delta_delta_zpe_tot=delta_delta_zpe_tot
     )
@@ -497,5 +523,4 @@ async def compare_conformers_over_functionals(
     except Exception as e:
         node_runner.error(str(e))
         return node_runner.fail(str(e))
-
 
