@@ -1,7 +1,6 @@
-# Container-only install manifest (dual-use capability package).
-# Host: no pyproject.toml — flat tree under simstack-model for create_*_table.
+# Container-only install manifest.
 # Image: Dockerfile copies this to pyproject.toml, then `uv pip install .`
-# (hatch force-include + deps from git via [tool.uv.sources]).
+# so dependency packages are resolved from git via [tool.uv.sources].
 [project]
 name = "molecular_qm_psi4"
 version = "0.1.0"
@@ -13,14 +12,10 @@ authors = [
   { name = "Wolfgang Wenzel", email = "wolfgang.wenzel@kit.edu" }
 ]
 dependencies = [
-    "molecular-qm-models",
-    "molecular-qm-dftb",
-    "molecular-qm-util",
+    "molecular_qm_models",
+    "molecular_qm_util",
     "simstack",
 ]
-
-[project.entry-points."simstack.modules"]
-molecular_qm_psi4 = "molecular_qm_psi4"
 
 [build-system]
 requires = ["hatchling"]
@@ -29,7 +24,7 @@ build-backend = "hatchling.build"
 [tool.hatch.metadata]
 allow-direct-references = true
 
-# Flat checkout root → nested import package in the wheel.
+# Repo root is the package when checked out as the molecular_qm_psi4 submodule.
 [tool.hatch.build.targets.wheel]
 bypass-selection = true
 
@@ -37,21 +32,22 @@ bypass-selection = true
 "__init__.py" = "molecular_qm_psi4/__init__.py"
 "nodes" = "molecular_qm_psi4/nodes"
 "models" = "molecular_qm_psi4/models"
-"util" = "molecular_qm_psi4/util"
 "scripts" = "molecular_qm_psi4/scripts"
 "testing" = "molecular_qm_psi4/testing"
 "data" = "molecular_qm_psi4/data"
 
 [tool.uv.sources]
-molecular-qm-models = { git = "https://github.com/simstack/molecular_qm_models.git", rev= "feature-psi4" }
-molecular-qm-dftb = { git = "https://github.com/simstack/molecular_qm_dftb.git" }
-molecular-qm-util = { git = "https://github.com/simstack/molecular_qm_util.git", rev = "develop-ww" }
-simstack = { git = "https://github.com/simstack/simstack.git", rev = "fix-git-pull" }
+molecular_qm_models = { git = "https://github.com/simstack/molecular_qm_models.git" }
+molecular_qm_util = { git = "https://github.com/simstack/molecular_qm_util.git" }
+simstack = { git = "https://github.com/simstack/simstack.git", rev = "fix-node-submission-logic" }
 
 [tool.uv]
 override-dependencies = [
-    "molecular-qm-models @ git+https://github.com/simstack/molecular_qm_models.git@feature-psi4",
-    "molecular-qm-dftb @ git+https://github.com/simstack/molecular_qm_dftb.git",
-    "molecular-qm-util @ git+https://github.com/simstack/molecular_qm_util.git@develop-ww",
-    "simstack @ git+https://github.com/simstack/simstack.git@fix-git-pull",
+    "molecular_qm_models @ git+https://github.com/simstack/molecular_qm_models.git",
+    "molecular_qm_util @ git+https://github.com/simstack/molecular_qm_util.git",
+    "simstack @ git+https://github.com/simstack/simstack.git@fix-node-submission-logic",
 ]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
