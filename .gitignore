@@ -73,3 +73,8 @@ Thumbs.db
 *.log
 *.tmp
 .output.txt
+
+# Nested clones for local editing — the image installs these from git
+molecular_qm_models/
+molecular_qm_util/
+simstack/

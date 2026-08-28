@@ -17,6 +17,9 @@ dependencies = [
     "simstack",
 ]
 
+[project.entry-points."simstack.modules"]
+molecular_qm_psi4 = "molecular_qm_psi4"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -32,20 +35,24 @@ bypass-selection = true
 "__init__.py" = "molecular_qm_psi4/__init__.py"
 "nodes" = "molecular_qm_psi4/nodes"
 "models" = "molecular_qm_psi4/models"
+"util" = "molecular_qm_psi4/util"
 "scripts" = "molecular_qm_psi4/scripts"
 "testing" = "molecular_qm_psi4/testing"
 "data" = "molecular_qm_psi4/data"
 
 [tool.uv.sources]
-molecular_qm_models = { git = "https://github.com/simstack/molecular_qm_models.git" }
+molecular_qm_models = { git = "https://github.com/simstack/molecular_qm_models.git", rev = "feature-psi4" }
 molecular_qm_util = { git = "https://github.com/simstack/molecular_qm_util.git" }
 simstack = { git = "https://github.com/simstack/simstack.git", rev = "fix-node-submission-logic" }
 
 [tool.uv]
 override-dependencies = [
-    "molecular_qm_models @ git+https://github.com/simstack/molecular_qm_models.git",
+    "molecular_qm_models @ git+https://github.com/simstack/molecular_qm_models.git@feature-psi4",
     "molecular_qm_util @ git+https://github.com/simstack/molecular_qm_util.git",
     "simstack @ git+https://github.com/simstack/simstack.git@fix-node-submission-logic",
+    # conda-forge openbabel provides the Python module; pip's openbabel-wheel
+    # overlays it and breaks `from openbabel import pybel` in this image.
+    "openbabel-wheel; sys_platform == 'never'",
 ]
 
 [tool.pytest.ini_options]

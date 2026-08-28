@@ -1,10 +1,16 @@
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from odmantic import EmbeddedModel, Field, Model, ObjectId
 from pydantic import model_validator
 
-from molecular_qm_dftb.models.dftb_input import DftbHamiltonian, DftbInput
-from molecular_qm_dftb.nodes.dftb_calculator import dftb_calculator
+try:
+    from molecular_qm_dftb.models.dftb_input import DftbHamiltonian, DftbInput
+    from molecular_qm_dftb.nodes.dftb_calculator import dftb_calculator
+except ImportError:
+    # DFTB binaries and the capability package live in molecular-qm-dftb.
+    DftbHamiltonian = Any
+    DftbInput = Any
+    dftb_calculator = None
 from molecular_qm_models import Molecule, QMInput, QMResult
 from molecular_qm_models.basis_set import BasisSet
 from molecular_qm_models.density_functional import Functional
@@ -91,7 +97,10 @@ class PreOptimizerInput(Model):
         # Use DftbInput.json_schema() instead of Optional[DftbInput]'s anyOf
         # ($ref | null). RJSF otherwise shows an empty Option 1 / Option 2
         # dropdown instead of the nested DFTB form.
-        dftb_schema = DftbInput.json_schema()
+        if dftb_calculator is None or not hasattr(DftbInput, "json_schema"):
+            dftb_schema = {"type": "object", "title": "DftbInput"}
+        else:
+            dftb_schema = DftbInput.json_schema()
         for name, definition in (dftb_schema.pop("$defs", None) or {}).items():
             schema.setdefault("$defs", {}).setdefault(name, definition)
         dftb_schema["title"] = "DFTB input"
@@ -391,6 +400,11 @@ async def multistep_optimizer(
     tolerate_failure = bool(getattr(qm_input, "tolerate_failure", False))
 
     if preopt.dftb_opt:
+        if dftb_calculator is None:
+            return node_runner.fail(
+                "DFTB pre-optimization is not available in this image; "
+                "run it in molecular-qm-dftb"
+            )
         dftb_input = preopt.dftb_input or DftbInput(optimization=True)
         opts = _dftb_preopt_input(qm_input, dftb_input)
         opts = await _persist_dftb_input(opts, node_runner)

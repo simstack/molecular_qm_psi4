@@ -13,17 +13,32 @@ Psi4 capabilities for molecular quantum mechanics within the Simstack framework.
 
 Installed from git during the Docker build (see `pyproject.docker`):
 
-- [`molecular_qm_models`](https://github.com/simstack/molecular_qm_models)
-- [`molecular_qm_util`](https://github.com/simstack/molecular_qm_util) (`develop-ww`)
-- [`simstack`](https://github.com/simstack/simstack) (`fix-git-pull`)
+- [`molecular_qm_models`](https://github.com/simstack/molecular_qm_models) (`feature-psi4`)
+- [`molecular_qm_util`](https://github.com/simstack/molecular_qm_util)
+- [`simstack`](https://github.com/simstack/simstack) (`fix-node-submission-logic`)
+
+Local nested checkouts of those repos are not copied into the image.
 
 ## Local Docker image
 
-Build from the **simstack-model repository root**:
+Build context must be this capability package so models/util/simstack are fetched
+from git rather than from whatever is checked out locally.
+
+From this repository:
 
 ```bash
-docker build -t molecular-qm-psi4:latest -f molecular_qm_psi4/Dockerfile .
+docker build \
+  --build-arg UV_GIT_SHAS="$(python resolve_uv_git_shas.py pyproject.docker)" \
+  --build-arg PACKAGE_VERSION=0.1.0 \
+  -t molecular-qm-psi4:latest .
 ```
 
-Only `molecular_qm_psi4/` must be present in the build context; models/util/simstack
-are fetched from git.
+From a simstack-model checkout, pass the subdirectory as context (not `.`):
+
+```bash
+docker build \
+  --build-arg UV_GIT_SHAS="$(python molecular_qm_psi4/resolve_uv_git_shas.py molecular_qm_psi4/pyproject.docker)" \
+  --build-arg PACKAGE_VERSION=0.1.0 \
+  -t molecular-qm-psi4:latest \
+  -f molecular_qm_psi4/Dockerfile molecular_qm_psi4
+```
