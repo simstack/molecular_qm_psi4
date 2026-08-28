@@ -6,7 +6,11 @@
 """
 from pathlib import Path
 
-import psi4
+try:
+    import psi4
+except ImportError:
+    pass
+
 
 from molecular_qm_models import BasisSet, Functional, Molecule, QMInput
 from molecular_qm_psi4.nodes.psi4_calculator import redirect_psi4_logs

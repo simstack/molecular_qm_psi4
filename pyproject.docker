@@ -45,13 +45,13 @@ bypass-selection = true
 [tool.uv.sources]
 molecular-qm-models = { git = "https://github.com/simstack/molecular_qm_models.git", rev= "feature-psi4" }
 molecular-qm-dftb = { git = "https://github.com/simstack/molecular_qm_dftb.git" }
-molecular-qm-util = { git = "https://github.com/simstack/molecular_qm_util.git", rev = "develop-ww" }
-simstack = { git = "https://github.com/simstack/simstack.git", rev = "fix-git-pull" }
+molecular-qm-util = { git = "https://github.com/simstack/molecular_qm_util.git" }
+simstack = { git = "https://github.com/simstack/simstack.git", rev = "fix-node-submission-logic" }
 
 [tool.uv]
 override-dependencies = [
     "molecular-qm-models @ git+https://github.com/simstack/molecular_qm_models.git@feature-psi4",
     "molecular-qm-dftb @ git+https://github.com/simstack/molecular_qm_dftb.git",
-    "molecular-qm-util @ git+https://github.com/simstack/molecular_qm_util.git@develop-ww",
-    "simstack @ git+https://github.com/simstack/simstack.git@fix-git-pull",
+    "molecular-qm-util @ git+https://github.com/simstack/molecular_qm_util.git,
+    "simstack @ git+https://github.com/simstack/simstack.git@fix-node-submission-logic",
 ]
