@@ -3,14 +3,9 @@ from typing import Any, List, Optional, Tuple
 from odmantic import EmbeddedModel, Field, Model, ObjectId
 from pydantic import model_validator
 
-try:
-    from molecular_qm_dftb.models.dftb_input import DftbHamiltonian, DftbInput
-    from molecular_qm_dftb.nodes.dftb_calculator import dftb_calculator
-except ImportError:
-    # DFTB binaries and the capability package live in molecular-qm-dftb.
-    DftbHamiltonian = Any
-    DftbInput = Any
-    dftb_calculator = None
+from molecular_qm_dftb.models.dftb_input import DftbHamiltonian, DftbInput
+from molecular_qm_dftb.nodes.dftb_calculator import dftb_calculator
+
 from molecular_qm_models import Molecule, QMInput, QMResult
 from molecular_qm_models.basis_set import BasisSet
 from molecular_qm_models.density_functional import Functional
@@ -164,21 +159,6 @@ def _dftb_preopt_input(qm_input: QMInput, dftb_input: DftbInput) -> DftbInput:
             "multiplicity": qm_input.multiplicity,
         },
     )
-    copied.max_optimization_steps = dftb_input.max_optimization_steps
-    copied.force_tolerance = dftb_input.force_tolerance
-    copied.max_scc_iterations = dftb_input.max_scc_iterations
-    copied.scc_tolerance = dftb_input.scc_tolerance
-    copied.electronic_temperature = dftb_input.electronic_temperature
-    copied.hamiltonian = dftb_input.hamiltonian
-    copied.xtb_method = dftb_input.xtb_method
-    copied.skf_set = dftb_input.skf_set
-    copied.skf_prefix = dftb_input.skf_prefix
-    copied.scc = dftb_input.scc
-    copied.third_order = dftb_input.third_order
-    copied.optimization = True
-    copied.compute_gradients = True
-    copied.charge = qm_input.charge
-    copied.multiplicity = qm_input.multiplicity
     post_copy = getattr(copied, "_post_copy_update", None)
     if callable(post_copy):
         post_copy()
@@ -405,7 +385,7 @@ async def multistep_optimizer(
                 "DFTB pre-optimization is not available in this image; "
                 "run it in molecular-qm-dftb"
             )
-        dftb_input = preopt.dftb_input or DftbInput(optimization=True)
+        dftb_input = preopt.dftb_input
         opts = _dftb_preopt_input(qm_input, dftb_input)
         opts = await _persist_dftb_input(opts, node_runner)
         method = _dftb_method_label(opts)
