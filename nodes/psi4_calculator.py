@@ -20,7 +20,6 @@ except ImportError:
 
 from molecular_qm_psi4.util.psi4_calculator import (
     Psi4Calculator,
-    clamp_print_level,
     python_log_level_for_print_level,
 )
 from molecular_qm_psi4.util.psi4_result import Psi4Result
@@ -887,32 +886,8 @@ def _find_wavefunction_file(files):
     return None
 
 
-class OptKingSummaryFilter(logging.Filter):
-    """Keep driver/opt summaries; drop numpy gradient dumps and Hessian/internals."""
-
-    MAX_CHARS = 1500
-    MAX_LINES = 25
-    DENY = re.compile(r"hessian|B-matrix|G-matrix|internal coordinates", re.IGNORECASE)
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        stripped = msg.lstrip()
-        # Driver logs the Cartesian gradient/hessian as a separate numpy dump.
-        if stripped.startswith("[[") or (stripped.startswith("[") and "\n" in stripped):
-            return False
-        if record.name.startswith("psi4.driver"):
-            if len(msg) > self.MAX_CHARS or msg.count("\n") > self.MAX_LINES:
-                return False
-            return True
-        if len(msg) > self.MAX_CHARS or msg.count("\n") > self.MAX_LINES:
-            return False
-        if self.DENY.search(msg):
-            return False
-        return True
-
-
 class NodeRunnerLogHandler(logging.Handler):
-    """Forward Psi4 Python log records to NodeRunner as they are emitted."""
+    """Forward Python logging records to the active Simstack node runner."""
 
     def __init__(self, node_runner):
         super().__init__()
@@ -936,12 +911,12 @@ class NodeRunnerLogHandler(logging.Handler):
 @contextmanager
 def redirect_psi4_logs(output_file: Path, print_level: int = 1, node_runner=None):
     """
-    Redirect Psi4/OptKing Python logging to a file, and stream driver/opt
-    summaries to NodeRunner as they are emitted.
+    Redirect Psi4/OptKing Python logging to the Simstack logger when available,
+    otherwise to a file.
 
     Psi4's native output is handled separately via psi4.core.set_output_file().
-    File verbosity follows QMInput.print_level (0-4). Default 1 is WARNING, which
-    keeps OptKing from dumping Hessians and internals into psi4.log.
+    Verbosity follows QMInput.print_level (0-4). Default 1 is WARNING, which keeps
+    OptKing from dumping Hessians and internals at normal runtime logging levels.
     """
     logger_names = [
         "psi4",
@@ -952,29 +927,22 @@ def redirect_psi4_logs(output_file: Path, print_level: int = 1, node_runner=None
         "optking.optwrapper",
         "qcoptking",
     ]
-    live_logger_names = {
-        "psi4.driver",
-        "psi4.optking",
-        "psi4.optking.optwrapper",
-        "optking",
-        "optking.optwrapper",
-        "qcoptking",
-    }
     file_level = python_log_level_for_print_level(print_level)
-    live_enabled = clamp_print_level(print_level) >= 1 and node_runner is not None
 
-    file_handler = logging.FileHandler(output_file, mode="a", encoding="utf-8")
-    file_handler.setLevel(file_level)
-    file_handler.setFormatter(
-        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(filename)s : %(lineno)d - %(message)s")
-    )
-
-    live_handler = None
-    if live_enabled:
+    handlers = []
+    file_handler = None
+    if node_runner is not None:
         live_handler = NodeRunnerLogHandler(node_runner)
-        live_handler.setLevel(logging.INFO)
-        live_handler.setFormatter(logging.Formatter("%(name)s - %(message)s"))
-        live_handler.addFilter(OptKingSummaryFilter())
+        live_handler.setLevel(file_level)
+        live_handler.setFormatter(logging.Formatter("%(name)s - %(levelname)s - %(message)s"))
+        handlers.append(live_handler)
+    else:
+        file_handler = logging.FileHandler(output_file, mode="a", encoding="utf-8")
+        file_handler.setLevel(file_level)
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(filename)s : %(lineno)d - %(message)s")
+        )
+        handlers.append(file_handler)
 
     previous_states = []
     try:
@@ -990,13 +958,8 @@ def redirect_psi4_logs(output_file: Path, print_level: int = 1, node_runner=None
                 )
             )
 
-            handlers = [file_handler]
-            if live_handler is not None and name in live_logger_names:
-                handlers.append(live_handler)
-                psi_logger.setLevel(logging.INFO)
-            else:
-                psi_logger.setLevel(file_level)
             psi_logger.handlers = handlers
+            psi_logger.setLevel(file_level)
             psi_logger.propagate = False
             psi_logger.disabled = False
 
@@ -1008,7 +971,8 @@ def redirect_psi4_logs(output_file: Path, print_level: int = 1, node_runner=None
             psi_logger.propagate = propagate
             psi_logger.disabled = disabled
 
-        file_handler.close()
+        if file_handler is not None:
+            file_handler.close()
 
 def qminput_to_psi4_molecule(molecule: Molecule, charge: int, multiplicity: int, symmetry_c1: bool = False) -> str:
     """Converts a Simstack Molecule to a Psi4 molecule string."""

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Resolve current commits for ``[tool.uv.sources]`` git deps.
+"""Resolve cache keys for ``[tool.uv.sources]`` git deps.
 
-Install is still ``uv pip install .`` from pyproject.docker. Docker caches that
-RUN even when a branch pin (``rev = "fix-git-pull"``) moves, so builds pass the
-resolved SHAs as ``--build-arg UV_GIT_SHAS=...`` to invalidate the layer.
+For each git source this resolves:
+- the commit used by the configured ref (``rev`` / ``branch`` / ``tag`` / ``HEAD``)
+- the repository ``HEAD`` commit (always)
+
+Including repository ``HEAD`` lets Docker rebuild even when a dependency is pinned
+to a fixed ref, but the upstream repository changed.
 """
 
 from __future__ import annotations
@@ -32,16 +35,28 @@ def _ls_remote(url: str, rev: str) -> str:
     raise SystemExit(f"Could not resolve {url}@{rev}")
 
 
+def _normalized_sources(data: dict) -> dict[str, dict]:
+    sources = data.get("tool", {}).get("uv", {}).get("sources", {})
+    if not isinstance(sources, dict):
+        return {}
+    return {str(name): spec for name, spec in sources.items() if isinstance(spec, dict)}
+
+
 def resolve(pyproject: Path) -> str:
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    sources = data.get("tool", {}).get("uv", {}).get("sources", {})
+    sources = _normalized_sources(data)
     parts: list[str] = []
-    for name, spec in sources.items():
-        if not isinstance(spec, dict) or "git" not in spec:
+    for name in sorted(sources):
+        spec = sources[name]
+        if "git" not in spec:
             continue
         url = str(spec["git"])
         rev = str(spec.get("rev") or spec.get("branch") or spec.get("tag") or "HEAD")
-        parts.append(f"{name}={_ls_remote(url, rev)}")
+        source_sha = _ls_remote(url, rev)
+        head_sha = _ls_remote(url, "HEAD")
+        parts.append(f"{name}={source_sha}")
+        if head_sha != source_sha:
+            parts.append(f"{name}_HEAD={head_sha}")
     if not parts:
         raise SystemExit(f"No git sources in {pyproject}")
     return ",".join(parts)

@@ -7,3 +7,8 @@
 **/.ruff_cache
 **/.mypy_cache
 **/.venv
+uv.lock
+# Nested clones — image installs these from git via pyproject.docker
+molecular_qm_models
+molecular_qm_util
+simstack
