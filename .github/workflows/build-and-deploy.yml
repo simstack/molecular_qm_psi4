@@ -28,6 +28,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve uv git SHAs
+        id: uv_git
+        run: |
+          set -euo pipefail
+          shas=$(python3 resolve_uv_git_shas.py pyproject.docker)
+          echo "shas=${shas}" >> "$GITHUB_OUTPUT"
+          echo "uv git sources ${shas}"
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -35,6 +43,8 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          build-args: |
+            UV_GIT_SHAS=${{ steps.uv_git.outputs.shas }}
 
   push-to-simstack:
     needs: build-and-push-docker
