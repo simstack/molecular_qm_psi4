@@ -1,0 +1,19 @@
+[project]
+name = "molecular_qm_orca"
+version = "0.1.0"
+description = "ORCA capabilities for molecular quantum mechanics within the Simstack framework"
+readme = "README.md"
+requires-python = ">=3.12, <3.13"
+license = { text = "MIT" }
+authors = [
+  { name = "Wolfgang Wenzel", email = "wolfgang.wenzel@kit.edu" }
+]
+dependencies = [
+    "molecular_qm_models",
+    "simstack",
+]
+
+[project.entry-points."simstack.modules"]
+nodes = "nodes"
+models = "models"
+
