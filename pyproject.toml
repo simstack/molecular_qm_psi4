@@ -1,18 +1,58 @@
 [project]
-name = "molecular_qm_orca"
+name = "molecular_qm_psi4"
 version = "0.1.0"
-description = "ORCA capabilities for molecular quantum mechanics within the Simstack framework"
+description = "Psi4 capabilities for molecular quantum mechanics within the Simstack framework"
 readme = "README.md"
-requires-python = ">=3.12, <3.13"
+requires-python = ">=3.12"
+license = { text = "MIT" }
 authors = [
   { name = "Wolfgang Wenzel", email = "wolfgang.wenzel@kit.edu" }
 ]
 dependencies = [
     "molecular_qm_models",
+    "molecular_qm_util",
+    "molecular_qm_dftb",
     "simstack",
 ]
 
 [project.entry-points."simstack.modules"]
-nodes = "nodes"
-models = "models"
+molecular_qm_psi4 = "molecular_qm_psi4"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+# Repo root is the package when checked out as the molecular_qm_psi4 submodule.
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+[tool.hatch.build.targets.wheel.force-include]
+"__init__.py" = "molecular_qm_psi4/__init__.py"
+"nodes" = "molecular_qm_psi4/nodes"
+"models" = "molecular_qm_psi4/models"
+"util" = "molecular_qm_psi4/util"
+"scripts" = "molecular_qm_psi4/scripts"
+"testing" = "molecular_qm_psi4/testing"
+"data" = "molecular_qm_psi4/data"
+
+[tool.uv.sources]
+molecular_qm_models = { git = "https://github.com/simstack/molecular_qm_models.git" }
+molecular_qm_util = { git = "https://github.com/simstack/molecular_qm_util.git" }
+molecular_qm_dftb = { git = "https://github.com/simstack/molecular_qm_dftb.git" }
+
+simstack = { git = "https://github.com/simstack/simstack.git", rev = "fix-node-submission-logic" }
+
+[tool.uv]
+override-dependencies = [
+    "molecular_qm_models @ git+https://github.com/simstack/molecular_qm_models.git",
+    "molecular_qm_util @ git+https://github.com/simstack/molecular_qm_util.git",
+    "simstack @ git+https://github.com/simstack/simstack.git@fix-node-submission-logic",
+   ]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 
