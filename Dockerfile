@@ -93,4 +93,7 @@ RUN echo "uv git sources ${UV_GIT_SHAS}" \
  && python -c "from dftd3.library import get_api_version as d3v; from dftd4.library import get_api_version as d4v; import qcengine as qcng; print('dftd3 C-API', d3v()); print('dftd4 C-API', d4v()); print('s-dftd3', qcng.get_program('s-dftd3')); print('dftd4', qcng.get_program('dftd4'))"
 
 WORKDIR /app
+# Host simstack bind-mounts the task workdir at /tmp/simstack (CONTAINER_WORKDIR).
+# Older in-image simstack still uses /root/simstack under --in-docker.
+RUN mkdir -p /tmp/simstack && ln -sfn /tmp/simstack /root/simstack
 ENTRYPOINT ["/opt/conda/bin/python", "-m", "simstack.core.run_node"]
