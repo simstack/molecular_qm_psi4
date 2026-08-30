@@ -43,6 +43,8 @@ RUN micromamba install -y -n base -c conda-forge \
     dftd4-python \
     gcp-correction \
     openbabel \
+    crest \
+    xtb-python \
     && micromamba clean --all --yes \
     && datadir=$(ls -d /opt/conda/share/openbabel/[0-9]* 2>/dev/null | tail -1) \
     && ln -sfn "${datadir:-/opt/conda/share/openbabel}" /opt/conda/share/openbabel-data
@@ -93,4 +95,7 @@ RUN echo "uv git sources ${UV_GIT_SHAS}" \
  && python -c "from dftd3.library import get_api_version as d3v; from dftd4.library import get_api_version as d4v; import qcengine as qcng; print('dftd3 C-API', d3v()); print('dftd4 C-API', d4v()); print('s-dftd3', qcng.get_program('s-dftd3')); print('dftd4', qcng.get_program('dftd4'))"
 
 WORKDIR /app
+# Host simstack bind-mounts the task workdir at /tmp/simstack (CONTAINER_WORKDIR).
+# Older in-image simstack still uses /root/simstack under --in-docker.
+RUN mkdir -p /tmp/simstack && ln -sfn /tmp/simstack /root/simstack
 ENTRYPOINT ["/opt/conda/bin/python", "-m", "simstack.core.run_node"]
