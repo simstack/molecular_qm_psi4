@@ -72,6 +72,9 @@ class CompareConformersResult(Model):
             "formula": formula,
             "basis_set": basis_set,
             "functional": functional,
+            "scf_accuracy": _qm_setting_name(self.qm_input, "scf_accuracy"),
+            "optimization_accuracy": _qm_setting_name(self.qm_input, "optimization_accuracy"),
+            "grid_type": _qm_setting_name(self.qm_input, "grid_type"),
             "pressure": self.pressure,
             "temperature": self.temperature,
             "DDG": self.delta_delta_g,
@@ -160,6 +163,15 @@ def _functional_name(functional) -> Optional[str]:
     if functional is None:
         return None
     value = getattr(functional, "functional", functional)
+    return getattr(value, "value", value)
+
+
+def _qm_setting_name(qm_input: Optional[QMInput], attr: str) -> Optional[str]:
+    if qm_input is None:
+        return None
+    value = getattr(qm_input, attr, None)
+    if value is None:
+        return None
     return getattr(value, "value", value)
 
 
@@ -275,6 +287,9 @@ def empty_compare_conformers_table(name: str = "Compare Conformers") -> SimpleTa
     table.add_column("formula", "string")
     table.add_column("basis_set", "string")
     table.add_column("functional", "string")
+    table.add_column("scf_accuracy", "string")
+    table.add_column("optimization_accuracy", "string")
+    table.add_column("grid_type", "string")
     table.add_column("pressure", "number")
     table.add_column("temperature", "number")
     table.add_column("DDG", "number")

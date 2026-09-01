@@ -16,6 +16,7 @@ from molecular_qm_psi4.nodes.compare_conformers import (
     _completed_node_output,
     _basis_set_name,
     _functional_name,
+    _qm_setting_name,
 )
 from molecular_qm_psi4.nodes.psi4_calculator import psi4_thermochemistry, _find_wavefunction_file
 from simstack.core.node_runner import NodeRunner
@@ -153,6 +154,9 @@ async def temperature_analysis(
 
         basis_name = _basis_set_name(getattr(qm_input_ref, "basis_set", None)) if qm_input_ref else None
         functional_name = _functional_name(getattr(qm_input_ref, "functional", None)) if qm_input_ref else None
+        scf_accuracy = _qm_setting_name(qm_input_ref, "scf_accuracy")
+        optimization_accuracy = _qm_setting_name(qm_input_ref, "optimization_accuracy")
+        grid_type = _qm_setting_name(qm_input_ref, "grid_type")
 
         node_runner.info(f"qm_input_ref: {mol_formula}{mol_smiles} {basis_name} {functional_name}")
 
@@ -213,6 +217,9 @@ async def temperature_analysis(
                     "formula": mol_formula,
                     "basis_set": basis_name,
                     "functional": functional_name,
+                    "scf_accuracy": scf_accuracy,
+                    "optimization_accuracy": optimization_accuracy,
+                    "grid_type": grid_type,
                     "temperature": temp,
                     "pressure": pressure,
                     "DDG": delta_delta_g,
