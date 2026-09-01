@@ -1,13 +1,13 @@
 from odmantic import ObjectId
 
 from molecular_qm_models import MoleculeList, QMInput, QMResult, BOHR_TO_ANGSTROM
-from molecular_qm_psi4 import psi4_calculator
+from molecular_qm_psi4.util.qm_engine import QMEngineInput, run_qm_calculator
 from simstack.core.node import node
 from simstack.models import FloatData
 
 
 @node
-async def relax_harmonic(molecules: MoleculeList, qm_input:QMInput, spring_constant: FloatData, **kwargs):
+async def relax_harmonic(molecules: MoleculeList, qm_input:QMInput, spring_constant: FloatData, engine: QMEngineInput, **kwargs):
     """
     Executes a harmonic relaxation of interpolated molecules by applying harmonic constraints
     to the atomic positions in a molecule. The function makes adjustments to internal configurations
@@ -22,10 +22,10 @@ async def relax_harmonic(molecules: MoleculeList, qm_input:QMInput, spring_const
             relaxation calculations.
         spring_constant (FloatData): The spring constant used to define the harmonic constraints.
         **kwargs: Additional optional keyword arguments passed into the function. Notably includes
-            'node_runner' for logging and 'psi4_calculator' for executing the relaxation.
+            'node_runner' for logging and the selected QM calculator for executing the relaxation.
 
     Called Nodes:
-        psi4_calculator: Executes the relaxation calculations using Psi4.
+        psi4_calculator or pyscf_calculator: Executes the relaxation using the same QMInput.
 
     Raises:
         Does not explicitly raise exceptions within this implementation.
@@ -57,7 +57,7 @@ async def relax_harmonic(molecules: MoleculeList, qm_input:QMInput, spring_const
             })
         mol.properties["constraints"] = constraints
 
-        relax_result: QMResult = await psi4_calculator(relax_input, **kwargs)
+        relax_result: QMResult = await run_qm_calculator(relax_input, engine, **kwargs)
         if relax_result.normal_termination:
             relaxed_molecules.append(relax_result.final_structure)
         else:

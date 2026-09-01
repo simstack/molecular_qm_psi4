@@ -18,7 +18,9 @@ from molecular_qm_psi4.nodes.compare_conformers import (
     _functional_name,
     _qm_setting_name,
 )
-from molecular_qm_psi4.nodes.psi4_calculator import psi4_thermochemistry, _find_wavefunction_file
+from molecular_qm_psi4.nodes.psi4_calculator import psi4_thermochemistry, _find_wavefunction_file as _find_psi4_wfn
+from molecular_qm_psi4.nodes.pyscf_calculator import pyscf_thermochemistry, _find_wavefunction_file as _find_pyscf_wfn
+from molecular_qm_psi4.util.qm_engine import QMEngine
 from simstack.core.node_runner import NodeRunner
 
 logger = logging.getLogger(__name__)
@@ -87,19 +89,27 @@ async def temperature_analysis(
             f"Parent call_path '{parent_entry.call_path}' accepted for temperature analysis"
         )
 
-        # 2. Find children whose call_path ends with .psi4_calculator
+        # 2. Find children whose call_path ends with a QM calculator
         children = await find_child_nodes(ObjectId(parent_entry.id))
         calc_children = [
             c for c in children
-            if c.call_path and c.call_path.endswith(".psi4_calculator")
+            if c.call_path and c.call_path.endswith((".psi4_calculator", ".pyscf_calculator"))
         ]
         if len(calc_children) != 2:
             return node_runner.fail(
-                f"Expected 2 psi4_calculator children, found {len(calc_children)}"
+                f"Expected 2 psi4_calculator or pyscf_calculator children, found {len(calc_children)}"
             )
 
+        engine = QMEngine.PYSCF if all(
+            c.call_path.endswith(".pyscf_calculator") for c in calc_children
+        ) else QMEngine.PSI4
+        thermo_node = pyscf_thermochemistry if engine == QMEngine.PYSCF else psi4_thermochemistry
+        find_wfn = _find_pyscf_wfn if engine == QMEngine.PYSCF else _find_psi4_wfn
+        result_names = ("pyscf_result", "psi4_result", "qm_result")
+
         node_runner.info(
-            f"Found children {calc_children[0].id} {calc_children[1].id} psi4_calculator children"
+            f"Found children {calc_children[0].id} {calc_children[1].id} "
+            f"{engine.value}_calculator children"
         )
         # 3. Verify both COMPLETED, load QMResult with wavefunction + energy
         qm_results = []
@@ -110,18 +120,16 @@ async def temperature_analysis(
                     f"Child {i+1} is not COMPLETED (status={child.status})"
                 )
 
-            # Load the psi4_result from results_references
             qm_result = None
             for ref in child.results_references:
-                if ref.variable_name == "psi4_result":
+                if ref.variable_name in result_names:
                     model_cls = await import_class(ref.variable_mapping, db)
                     qm_result = await db.find_one(model_cls, model_cls.id == ref.reference)
                     break
             if qm_result is None:
-                return node_runner.fail(f"No psi4_result found for child {i+1}")
+                return node_runner.fail(f"No QM result found for child {i+1}")
 
-            # Verify wavefunction files exist and energy is present
-            wfn_file = _find_wavefunction_file(qm_result.files)
+            wfn_file = find_wfn(qm_result.files)
             if not wfn_file:
                 return node_runner.fail(f"No wavefunction file for child {i+1}")
             if qm_result.final_energy is None:
@@ -170,7 +178,7 @@ async def temperature_analysis(
 
             for i, qm_result in enumerate(qm_results):
                 kwargs["custom_name"] = f"{temp}mol{i}"
-                thermo_calc_result = await psi4_thermochemistry(
+                thermo_calc_result = await thermo_node(
                     qm_result=qm_result,
                     temperature=FloatData(value=temp),
                     pressure=FloatData(value=pressure),

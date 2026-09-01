@@ -68,6 +68,11 @@ ENV UV_PYTHON=/opt/conda/bin/python
 ENV UV_PROJECT_ENVIRONMENT=/opt/conda
 ENV PATH="/opt/conda/bin:/root/.local/bin:$PATH"
 
+# PySCF on pip so it does not fight Psi4's conda libxc. geometric is already
+# installed from conda-forge for geometry optimization.
+RUN uv pip install --system pyscf pyscf-dispersion \
+ && python -c "import pyscf; from pyscf.geomopt.geometric_solver import optimize; print('pyscf', pyscf.__version__)"
+
 # Capability package only. Build context must be this repo (or the
 # molecular_qm_psi4 subdirectory). simstack / molecular_qm_models /
 # molecular_qm_util install from git via pyproject.docker — do not COPY them.
@@ -92,6 +97,7 @@ RUN echo "uv git sources ${UV_GIT_SHAS}" \
     simple-dftd3 dftd3-python dftd4 dftd4-python gcp-correction \
  && python -c "from openbabel import openbabel, pybel; print('openbabel', openbabel.__file__)" \
  && python -c "import simstack, molecular_qm_models, molecular_qm_util, molecular_qm_psi4; print(simstack.__file__); print(molecular_qm_models.__file__); print(molecular_qm_util.__file__); print(molecular_qm_psi4.__file__)" \
+ && python -c "from molecular_qm_psi4.nodes.pyscf_calculator import pyscf_calculator; import pyscf; print('pyscf node ok', pyscf.__version__)" \
  && python -c "from dftd3.library import get_api_version as d3v; from dftd4.library import get_api_version as d4v; import qcengine as qcng; print('dftd3 C-API', d3v()); print('dftd4 C-API', d4v()); print('s-dftd3', qcng.get_program('s-dftd3')); print('dftd4', qcng.get_program('dftd4'))"
 
 WORKDIR /app

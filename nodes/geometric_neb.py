@@ -10,16 +10,19 @@ from simstack.core.node import node
 from simstack.core.simstack_result import SimstackResult
 from simstack.models import FileStack, DataSet, DataSetSection, DataSetMetadata, FloatData
 from simstack.core.context import context
+from molecular_qm_psi4.util.qm_engine import QMEngine, QMEngineInput, resolve_engine
+from molecular_qm_psi4.util.pyscf_calculator import pyscf_basis_name, pyscf_functional_name
 
 
 @node
-async def geometric_neb(molecules: MoleculeList, qm_input: QMInput, **kwargs) -> SimstackResult:
+async def geometric_neb(molecules: MoleculeList, qm_input: QMInput, engine: QMEngineInput, **kwargs) -> SimstackResult:
     """
-    Run geomeTRIC-NEB calculation using Psi4 as the engine.
+    Run geomeTRIC-NEB using Psi4 or PySCF as the engine.
 
     Parameters:
         molecules (MoleculeList): List of initial images for the NEB path.
         qm_input (QMInput): QM parameters (basis, functional, charge, multiplicity).
+        engine (QMEngineInput): ``psi4`` or ``pyscf``.
 
     SimstackResult:
         result (QMResult): Parsed QM result. with the final structure
@@ -29,26 +32,30 @@ async def geometric_neb(molecules: MoleculeList, qm_input: QMInput, **kwargs) ->
     if not molecules or len(molecules) < 2:
         return node_runner.fail("At least two molecules (start and end) are required for NEB.")
 
-    # Extract QM parameters
+    selected = resolve_engine(engine)
     charge = qm_input.charge
     multiplicity = qm_input.multiplicity
+    spin = max(int(multiplicity) - 1, 0)
 
-    if hasattr(qm_input.basis_set, "basis_set"):
-        basis_name = qm_input.basis_set.basis_set.value if hasattr(qm_input.basis_set.basis_set, "value") else str(qm_input.basis_set.basis_set)
+    if selected == QMEngine.PYSCF:
+        basis_name = pyscf_basis_name(qm_input)
+        method = pyscf_functional_name(qm_input)
     else:
-        basis_name = qm_input.basis_set.value if hasattr(qm_input.basis_set, "value") else str(qm_input.basis_set)
+        if hasattr(qm_input.basis_set, "basis_set"):
+            basis_name = qm_input.basis_set.basis_set.value if hasattr(qm_input.basis_set.basis_set, "value") else str(qm_input.basis_set.basis_set)
+        else:
+            basis_name = qm_input.basis_set.value if hasattr(qm_input.basis_set, "value") else str(qm_input.basis_set)
 
-    if hasattr(qm_input.functional, "functional"):
-        method = qm_input.functional.functional.value if hasattr(qm_input.functional.functional, "value") else str(qm_input.functional.functional)
-    else:
-        method = qm_input.functional.value if hasattr(qm_input.functional, "value") else str(qm_input.functional)
+        if hasattr(qm_input.functional, "functional"):
+            method = qm_input.functional.functional.value if hasattr(qm_input.functional.functional, "value") else str(qm_input.functional.functional)
+        else:
+            method = qm_input.functional.value if hasattr(qm_input.functional, "value") else str(qm_input.functional)
 
-    # Mapping for Psi4 basis sets if they differ from SimStack enums
-    basis_mapping = {
-        "STO3G": "sto-3g",
-        "STO6G": "sto-6g",
-    }
-    basis_name = basis_mapping.get(basis_name, basis_name)
+        basis_mapping = {
+            "STO3G": "sto-3g",
+            "STO6G": "sto-6g",
+        }
+        basis_name = basis_mapping.get(basis_name, basis_name)
 
     # 1. Create the input XYZ file containing all images
     input_xyz =  Path("input_path.xyz")
@@ -63,29 +70,52 @@ async def geometric_neb(molecules: MoleculeList, qm_input: QMInput, **kwargs) ->
     input_path_filestack = FileStack.from_local_file(str(input_xyz), in_memory=True, is_hashable=True, secure_source=True)
     node_runner.info_files.append(input_path_filestack)
 
-    # 2. Create the psi4.template
-    template_file =  "psi4.template"
-    with open(template_file, "w") as f:
-        f.write("set_memory('8 GB')\n")
-        f.write("set_num_threads(4)\n")
-        f.write("molecule mol {\n")
-        f.write(f"  {charge} {multiplicity}\n")
-        f.write("    symmetry c1 \n")
-        f.write("  no_com\n")
-        f.write("  no_reorient\n\n")
+    # 2. Create the engine template
+    if selected == QMEngine.PYSCF:
+        template_file = "pyscf.template"
         mol1 = molecules[0]
-        for atom in mol1.atoms:
-            f.write(f"{atom.element} {atom.x:12.4f} {atom.y:12.4f} {atom.z:12.4f}\n")
-        f.write("}\n\n")
-        f.write("set {\n")
-        f.write(f"  basis {basis_name}\n")
-        f.write("  scf_type df\n")
-        f.write("  maxiter 300\n")
-        f.write("  guess sad\n")
-        f.write("  damping_percentage 20\n")
-        f.write("  soscf true\n")
-        f.write("}\n\n")
-        f.write(f"gradient('{method}')\n")
+        atom_block = "\n".join(
+            f"{atom.element} {atom.x:12.4f} {atom.y:12.4f} {atom.z:12.4f}" for atom in mol1.atoms
+        )
+        with open(template_file, "w") as f:
+            f.write("from pyscf import gto, dft\n")
+            f.write("mol = gto.M(\n")
+            f.write(f"    atom='''\n{atom_block}\n''',\n")
+            f.write(f"    basis='{basis_name}',\n")
+            f.write(f"    charge={charge},\n")
+            f.write(f"    spin={spin},\n")
+            f.write("    unit='Angstrom',\n")
+            f.write("    verbose=3,\n")
+            f.write(")\n")
+            f.write("mf = dft.RKS(mol)\n" if spin == 0 else "mf = dft.UKS(mol)\n")
+            f.write(f"mf.xc = '{method}'\n")
+            f.write("mf.kernel()\n")
+            f.write("mf.nuc_grad_method().kernel()\n")
+        engine_name = "pyscf"
+    else:
+        template_file = "psi4.template"
+        with open(template_file, "w") as f:
+            f.write("set_memory('8 GB')\n")
+            f.write("set_num_threads(4)\n")
+            f.write("molecule mol {\n")
+            f.write(f"  {charge} {multiplicity}\n")
+            f.write("    symmetry c1 \n")
+            f.write("  no_com\n")
+            f.write("  no_reorient\n\n")
+            mol1 = molecules[0]
+            for atom in mol1.atoms:
+                f.write(f"{atom.element} {atom.x:12.4f} {atom.y:12.4f} {atom.z:12.4f}\n")
+            f.write("}\n\n")
+            f.write("set {\n")
+            f.write(f"  basis {basis_name}\n")
+            f.write("  scf_type df\n")
+            f.write("  maxiter 300\n")
+            f.write("  guess sad\n")
+            f.write("  damping_percentage 20\n")
+            f.write("  soscf true\n")
+            f.write("}\n\n")
+            f.write(f"gradient('{method}')\n")
+        engine_name = "psi4"
 
     template_filestack = FileStack.from_local_file(str(template_file), in_memory=True, is_hashable=True, secure_source=True)
     node_runner.info_files.append(template_filestack)
@@ -93,7 +123,7 @@ async def geometric_neb(molecules: MoleculeList, qm_input: QMInput, **kwargs) ->
     # 3. Build the geometric-neb command
     cmd = [
         "geometric-neb",
-        "--engine", "psi4",
+        "--engine", engine_name,
         "--images", str(len(molecules)),
         str(template_file),
         str(input_xyz),

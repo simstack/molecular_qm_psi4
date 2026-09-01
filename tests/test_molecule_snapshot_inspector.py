@@ -69,7 +69,7 @@ def test_inspector_input_method_dropdown():
     assert opts.method == SnapshotMethod.PSI4
     assert opts.rmsd_threshold == 0.5
     schema = MoleculeSnapshotInspectorInput.model_json_schema()
-    assert schema["$defs"]["SnapshotMethod"]["enum"] == ["psi4", "orca", "dftb"]
+    assert schema["$defs"]["SnapshotMethod"]["enum"] == ["psi4", "pyscf", "orca", "dftb"]
     ui = MoleculeSnapshotInspectorInput.ui_schema()
     assert ui["field_name"]["ui:widget"] == "hidden"
     assert ui["method"]["ui:widget"] == "select"

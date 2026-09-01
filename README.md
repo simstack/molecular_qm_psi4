@@ -17,6 +17,12 @@ Installed from git during the Docker build (see `pyproject.docker`):
 - [`molecular_qm_util`](https://github.com/simstack/molecular_qm_util)
 - [`simstack`](https://github.com/simstack/simstack) (`fix-node-submission-logic`)
 
+The image also installs **Psi4** (conda-forge) and **PySCF** (pip). Both calculators
+take the same [`QMInput`](https://github.com/simstack/molecular_qm_models) model.
+Use `psi4_calculator`, `pyscf_calculator`, or `qm_calculator` with `QMEngineInput`
+to pick the engine. Workflow nodes such as `compare_conformers`, `compute_energy`,
+`multistep_optimizer`, `relax_harmonic`, and `geometric_neb` expose the same switch.
+
 Local nested checkouts of those repos are not copied into the image.
 
 ## Local Docker image

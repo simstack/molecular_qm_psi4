@@ -9,7 +9,7 @@ from molecular_qm_dftb.nodes.dftb_calculator import dftb_calculator
 from molecular_qm_models import Molecule, QMInput, QMResult
 from molecular_qm_models.basis_set import BasisSet
 from molecular_qm_models.density_functional import Functional
-from molecular_qm_psi4.nodes.psi4_calculator import psi4_calculator
+from molecular_qm_psi4.util.qm_engine import QMEngine, engine_field_schema_extra, run_qm_calculator
 from simstack.core.context import context
 from simstack.core.definitions import TaskStatus
 from simstack.core.node import node
@@ -57,6 +57,12 @@ class PreOptimizerInput(Model):
         },
     )
     steps: List[OptimizationStepInput] = Field(default_factory=list)
+    engine: QMEngine = Field(
+        QMEngine.PSI4,
+        json_schema_extra=engine_field_schema_extra(
+            "Psi4 or PySCF for the DFT optimization steps (same QMInput)"
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -129,6 +135,10 @@ class PreOptimizerInput(Model):
             "ui:title": "DFTB pre-optimization",
         }
         ui.setdefault("dftb_input", {})["ui:condition"] = {"dftb_opt": True}
+        ui["engine"] = {
+            "ui:widget": "select",
+            "ui:title": "QM engine",
+        }
         return ui
 
 
@@ -296,14 +306,14 @@ def _child_qm_result(calc_result) -> Tuple[Optional[QMResult], Optional[str]]:
     if isinstance(calc_result, SimstackResult):
         if calc_result.status != TaskStatus.COMPLETED:
             return None, calc_result.error_message or "child node failed"
-        for name in ("qm_result", "psi4_result"):
+        for name in ("qm_result", "psi4_result", "pyscf_result"):
             value = getattr(calc_result, name, None)
             if isinstance(value, QMResult):
                 return value, None
         return None, "child node returned no QMResult"
     if isinstance(calc_result, QMResult):
         return calc_result, None
-    for name in ("qm_result", "psi4_result"):
+    for name in ("qm_result", "psi4_result", "pyscf_result"):
         value = getattr(calc_result, name, None)
         if isinstance(value, QMResult):
             return value, None
@@ -343,19 +353,21 @@ def _append_step_row(
 async def multistep_optimizer(
     qm_input: QMInput, preopt: PreOptimizerInput, **kwargs
 ) -> SimstackResult:
-    """Run an optional DFTB pre-optimization followed by sequential Psi4 optimizations.
+    """Run an optional DFTB pre-optimization followed by sequential QM optimizations.
 
-    Each Psi4 step uses the previous step's final geometry. Charge, solvent, and
+    Each DFT step uses the previous step's final geometry. Charge, solvent, and
     other QMInput settings are copied from ``qm_input``; each step overrides
-    basis set, functional, and iteration limits.
+    basis set, functional, and iteration limits. ``preopt.engine`` selects
+    Psi4 or PySCF.
 
     Parameters:
         qm_input (QMInput): Molecule and shared QM settings used as the copy template.
-        preopt (PreOptimizerInput): DFTB toggle, full DftbInput, and ordered Psi4 steps.
+        preopt (PreOptimizerInput): DFTB toggle, full DftbInput, ordered DFT steps, and engine.
 
     Called Nodes:
         dftb_calculator
         psi4_calculator
+        pyscf_calculator
 
     SimstackResult:
         qm_result (QMResult): Result of the last successful step.
@@ -414,8 +426,9 @@ async def multistep_optimizer(
             _append_step_row(step_table, "dftb", "", method, qm_result, node_runner)
             node_runner.info("DFTB pre-optimization finished")
 
+    engine = getattr(preopt, "engine", QMEngine.PSI4)
     for index, step in enumerate(steps, start=1):
-        step_name = f"psi4-{index}"
+        step_name = f"{getattr(engine, 'value', engine)}-{index}"
         basis_name = step.basis_set.basis_set.value
         functional_name = step.functional.functional.value
         node_runner.info(
@@ -427,13 +440,13 @@ async def multistep_optimizer(
         current_input = _qm_input_for_step(qm_input, step, molecule)
         current_input = await _persist_qm_input(current_input, node_runner)
         node_runner.info(
-            f"{step_name} QMInput for psi4_calculator: "
+            f"{step_name} QMInput: "
             f"max_scf_iterations={current_input.max_scf_iterations}, "
             f"max_optimization_iterations={current_input.max_optimization_iterations}, "
             f"non_standard_parameters={current_input.non_standard_parameters}"
         )
         try:
-            calc_result = await psi4_calculator(current_input, **kwargs)
+            calc_result = await run_qm_calculator(current_input, engine, **kwargs)
         except Exception as exc:
             error = str(exc)
             qm_result = None

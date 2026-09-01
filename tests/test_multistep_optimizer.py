@@ -62,6 +62,7 @@ def test_preoptimizer_input_defaults_hide_dftb_input():
     preopt = PreOptimizerInput()
     assert preopt.dftb_opt is False
     assert preopt.dftb_input is None
+    assert preopt.engine.value == "psi4"
 
 
 def test_preoptimizer_input_defaults_dftb_input_when_enabled():

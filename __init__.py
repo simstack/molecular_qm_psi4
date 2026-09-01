@@ -1,4 +1,7 @@
 from molecular_qm_psi4.nodes.psi4_calculator import psi4_calculator
+from molecular_qm_psi4.nodes.pyscf_calculator import pyscf_calculator, pyscf_thermochemistry
+from molecular_qm_psi4.nodes.qm_calculator import qm_calculator
+from molecular_qm_psi4.util.qm_engine import QMEngine, QMEngineInput
 from molecular_qm_psi4.nodes.molecule_snapshot_inspector import molecule_snapshot_inspector
 from molecular_qm_psi4.nodes.multistep_optimizer import (
     OptimizationStepInput,
@@ -49,6 +52,11 @@ from molecular_qm_psi4.testing import (
 
 __all__ = [
     "psi4_calculator",
+    "pyscf_calculator",
+    "pyscf_thermochemistry",
+    "qm_calculator",
+    "QMEngine",
+    "QMEngineInput",
     "molecule_snapshot_inspector",
     "OptimizationStepInput",
     "PreOptimizerInput",

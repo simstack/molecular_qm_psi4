@@ -1,22 +1,24 @@
 from molecular_qm_models import MoleculeList, QMInput
 from simstack.core.node import node
 from simstack.methods.mass_runner import MassRunner
+from molecular_qm_psi4.util.qm_engine import QMEngineInput, calculator_node_for
 
 
 @node
-async def compute_energy(molecules: MoleculeList, qm_input: QMInput, **kwargs):
-    from molecular_qm_psi4.nodes.psi4_calculator import psi4_calculator
+async def compute_energy(molecules: MoleculeList, qm_input: QMInput, engine: QMEngineInput, **kwargs):
     node_runner = kwargs.get('node_runner')
+    calculator = calculator_node_for(engine)
     energymethod = {
         "method": qm_input.method.value if qm_input.method else None,
         "basis": qm_input.basis_set.basis_set.value if qm_input.basis_set else None,
-        "functional": qm_input.functional.functional.value if qm_input.functional else None
+        "functional": qm_input.functional.functional.value if qm_input.functional else None,
+        "engine": getattr(getattr(engine, "engine", None), "value", None) or str(getattr(engine, "engine", "psi4")),
     }
 
     node_runner.log(f"Computing energy for {len(molecules)} molecules")
     node_runner.log(f"Energy method: {energymethod}")
 
-    async with MassRunner(psi4_calculator, **kwargs) as mass_result:
+    async with MassRunner(calculator, **kwargs) as mass_result:
         for mol in molecules:
             # Create a new QMInput for each molecule
             mol_input = qm_input.model_copy()

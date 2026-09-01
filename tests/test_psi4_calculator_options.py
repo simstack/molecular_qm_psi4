@@ -6,7 +6,9 @@ from unittest.mock import MagicMock, patch
 
 from molecular_qm_psi4.nodes.psi4_calculator import (
     OptimizationSnapshotter,
+    OptKingStepReporter,
     _should_snapshot,
+    parse_optking_step_line,
     redirect_psi4_logs,
 )
 from molecular_qm_psi4.util.psi4_calculator import (
@@ -166,6 +168,58 @@ def test_optking_step_summary_forwarded_hessian_filtered(tmp_path):
     text = log_file.read_text(encoding="utf-8")
     assert "hessian" not in text
     assert "STEP 2" not in text
+
+
+_OPTKING_TABLE = """
+    Criteria marked as inactive (o), active & met (*), and active & unmet ( ).
+
+        ----------------------------------------------------------------------------------------------
+           Step    Total Energy     Delta E     Max Force     RMS Force      Max Disp      RMS Disp
+        ----------------------------------------------------------------------------------------------
+          Convergence Criteria     1.00e-06 *    3.00e-04 *             o    1.20e-03 *             o
+        ----------------------------------------------------------------------------------------------
+            31    -957.52537247   -1.27e-05      4.53e-04      1.45e-04 o    5.02e-03      1.29e-03 o  ~
+        ----------------------------------------------------------------------------------------------
+"""
+
+
+def test_parse_optking_step_line():
+    line = "            31    -957.52537247   -1.27e-05      4.53e-04      1.45e-04 o    5.02e-03      1.29e-03 o  ~"
+    match = parse_optking_step_line(line)
+    assert match is not None
+    assert match.group(1) == "31"
+    assert match.group(2) == "-957.52537247"
+    assert match.group(3) == "-1.27e-05"
+    assert match.group(4) == "4.53e-04"
+    assert match.group(5) == "1.45e-04"
+    assert match.group(6) == "5.02e-03"
+    assert match.group(7) == "1.29e-03"
+    assert parse_optking_step_line("          Convergence Criteria     1.00e-06 *    3.00e-04 *") is None
+
+
+def test_optking_step_reporter_logs_compact_iteration_line():
+    node_runner = MagicMock()
+    seen = []
+    node_runner.info.side_effect = lambda msg: seen.append(msg)
+    reporter = OptKingStepReporter(node_runner)
+    reporter.consume(_OPTKING_TABLE)
+    compact = [msg for msg in seen if "E=" in msg and "MaxF=" in msg]
+    assert len(compact) == 1
+    assert " 31 E=-957.52537247 DE=-1.27e-05 MaxF=4.53e-04 RMSF=1.45e-04 MaxD=5.02e-03 RMSD=1.29e-03" in compact[0]
+    reporter.consume(_OPTKING_TABLE)
+    assert len([msg for msg in seen if "E=" in msg and "MaxF=" in msg]) == 1
+
+
+def test_redirect_psi4_logs_forwards_optking_table_at_default_print_level(tmp_path):
+    node_runner = MagicMock()
+    seen = []
+    node_runner.info.side_effect = lambda msg: seen.append(msg)
+    with redirect_psi4_logs(tmp_path / "psi4.log", print_level=1, node_runner=node_runner):
+        logging.getLogger("optking").info(_OPTKING_TABLE)
+    compact = [msg for msg in seen if "E=" in msg and "DE=" in msg]
+    assert len(compact) == 1
+    assert "31 E=-957.52537247" in compact[0]
+    assert "MaxF=4.53e-04" in compact[0]
 
 
 def test_print_level_0_does_not_forward_driver_info(tmp_path):

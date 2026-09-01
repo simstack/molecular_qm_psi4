@@ -16,11 +16,12 @@ from simstack.util.generate_ui_schema import generate_ui_schema
 
 _DATASET_FIELD_NAME = "molecule_snapshots"
 _PSI4_SECTION = "psi4"
-_METHODS = ("psi4", "orca", "dftb")
+_METHODS = ("psi4", "pyscf", "orca", "dftb")
 
 
 class SnapshotMethod(str, Enum):
     PSI4 = "psi4"
+    PYSCF = "pyscf"
     ORCA = "orca"
     DFTB = "dftb"
 

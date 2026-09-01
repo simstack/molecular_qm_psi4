@@ -7,7 +7,7 @@ from molecular_qm_models import Molecule, QMInput
 from molecular_qm_models.basis_set import BasisSet
 from molecular_qm_models.density_functional import Functional
 from molecular_qm_models.energy_units import MolecularEnergyUnitEnum, convert_energy_unit
-from molecular_qm_psi4.nodes.psi4_calculator import psi4_calculator
+from molecular_qm_psi4.util.qm_engine import QMEngine, QMEngineInput, engine_field_schema_extra, run_qm_calculator
 from simstack.core.context import context
 from simstack.core.definitions import TaskStatus
 from simstack.core.node import node
@@ -28,6 +28,10 @@ class CompareConformersModel(Model):
     molecule: Molecule = Reference()
     temperature: float = 298.15
     pressure: float = 101325.0
+    engine: QMEngine = Field(
+        QMEngine.PSI4,
+        json_schema_extra=engine_field_schema_extra(),
+    )
 
 
 @simstack_model
@@ -218,6 +222,7 @@ async def _fill_compare_conformers_method_table(
     table: SimpleTable,
     node_runner,
     kwargs,
+    engine: QMEngine = QMEngine.PSI4,
 ) -> Optional[str]:
     for current_input in qm_inputs:
         basis_name = _basis_set_name(current_input.basis_set)
@@ -229,6 +234,7 @@ async def _fill_compare_conformers_method_table(
         arg = CompareConformersModel(
             qm_input=current_input,
             molecule=molecule,
+            engine=engine,
         )
         kwargs["custom_name"] = f"{basis_name}"
         calc_result = await compare_conformers(arg, **kwargs)
@@ -312,10 +318,8 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
     Compares the delta delta G of conformers of two molecules and evaluates their
     thermodynamic properties.
 
-    This function uses the specified `psi4_calculator` to perform quantum mechanical calculations on
-    a given input and evaluates both optimization and frequency calculations to determine the
-    conformers' properties. The results of the calculations are stored in the associated `node_runner`
-    object, which maintains the state of the operations.
+    This function uses ``psi4_calculator`` or ``pyscf_calculator`` (same ``QMInput``)
+    depending on ``arg.engine``.
 
     Parameters:
         arg (CompareConformersModel): The model containing the molecule data and quantum mechanical
@@ -329,6 +333,7 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
         result (CompareConformersResult): The result of the compare_conformers calculation.
     Called Nodes:
         psi4_calculator
+        pyscf_calculator
 
     Raises:
         The function does not raise exceptions directly but delegates error handling to the
@@ -368,7 +373,7 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
         
         current_input = _qm_input_copy(arg.qm_input, molecule=molecule)
         
-        calc_result = await psi4_calculator(current_input, **kwargs)
+        calc_result = await run_qm_calculator(current_input, arg.engine, **kwargs)
 
         if calc_result.status == TaskStatus.COMPLETED:
             thermo_result = getattr(calc_result, "thermo_result", None)
@@ -435,6 +440,7 @@ async def compare_conformers_over_basis_sets(
     qm_input: QMInput,
     molecule: Molecule,
     basis_sets: BasisSetList,
+    engine: QMEngineInput,
     **kwargs,
 ) -> SimstackResult:
     """
@@ -471,6 +477,7 @@ async def compare_conformers_over_basis_sets(
             table,
             node_runner,
             kwargs,
+            engine=engine.engine if engine is not None else QMEngine.PSI4,
         )
         if error_message:
             node_runner.error(error_message)
@@ -491,6 +498,7 @@ async def compare_conformers_over_functionals(
     qm_input: QMInput,
     molecule: Molecule,
     functionals: FunctionalList,
+    engine: QMEngineInput,
     **kwargs,
 ) -> SimstackResult:
     """
@@ -527,6 +535,7 @@ async def compare_conformers_over_functionals(
             table,
             node_runner,
             kwargs,
+            engine=engine.engine if engine is not None else QMEngine.PSI4,
         )
         if error_message:
             node_runner.error(error_message)

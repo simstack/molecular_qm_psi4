@@ -34,6 +34,7 @@ from molecular_qm_psi4.util.psi4_calculator import (
 )
 from molecular_qm_psi4.util.psi4_result import Psi4Result
 from molecular_qm_psi4.util.psi4_thermo import run_manual_thermo
+from molecular_qm_psi4.util.qm_engine import resources_from_parent_parameters
 from odmantic import ObjectId
 
 from simstack.core.context import context
@@ -1030,17 +1031,82 @@ def _find_wavefunction_file(files):
     return None
 
 
+_OPTKING_STEP_RE = re.compile(
+    r"^\s*(\d+)\s+"
+    r"([-+]?\d+\.\d+)\s+"
+    r"([-+]?\d+\.\d+(?:[eE][-+]?\d+)?)\s+"
+    r"([-+]?\d+\.\d+(?:[eE][-+]?\d+)?)\s*[o*]?\s+"
+    r"([-+]?\d+\.\d+(?:[eE][-+]?\d+)?)\s*[o*]?\s+"
+    r"([-+]?\d+\.\d+(?:[eE][-+]?\d+)?)\s*[o*]?\s+"
+    r"([-+]?\d+\.\d+(?:[eE][-+]?\d+)?)"
+)
+
+
+def format_optking_step_line(match: re.Match) -> str:
+    step, energy, delta_e, max_f, rms_f, max_d, rms_d = match.groups()
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return (
+        f"{stamp} {step} E={energy} DE={delta_e} MaxF={max_f} RMSF={rms_f} "
+        f"MaxD={max_d} RMSD={rms_d}"
+    )
+
+
+def parse_optking_step_line(line: str):
+    if not line or "Convergence Criteria" in line:
+        return None
+    return _OPTKING_STEP_RE.search(line.rstrip("~\n\r ").rstrip())
+
+
+class OptKingStepReporter:
+    """Emit one compact E/DE/MaxF line per OptKing convergence row."""
+
+    def __init__(self, node_runner):
+        self.node_runner = node_runner
+        self._buffer = ""
+        self._seen_steps = set()
+
+    def consume(self, text):
+        if not text or self.node_runner is None:
+            return
+        self._buffer += text if isinstance(text, str) else str(text)
+        lines = self._buffer.split("\n")
+        self._buffer = lines[-1]
+        for line in lines[:-1]:
+            self._emit_line(line)
+        if self._buffer and parse_optking_step_line(self._buffer):
+            self._emit_line(self._buffer)
+            self._buffer = ""
+
+    def _emit_line(self, line: str):
+        match = parse_optking_step_line(line)
+        if match is None:
+            return
+        step = int(match.group(1))
+        if step in self._seen_steps:
+            return
+        self._seen_steps.add(step)
+        msg = format_optking_step_line(match)
+        try:
+            self.node_runner.info(msg)
+        except Exception:
+            logger.info(msg)
+
+
 class NodeRunnerLogHandler(logging.Handler):
     """Forward Python logging records to the active Simstack node runner."""
 
-    def __init__(self, node_runner):
+    def __init__(self, node_runner, step_reporter=None):
         super().__init__()
         self.node_runner = node_runner
+        self.step_reporter = step_reporter
 
     def emit(self, record: logging.LogRecord) -> None:
         if self.node_runner is None:
             return
         try:
+            raw = record.getMessage()
+            if self.step_reporter is not None:
+                self.step_reporter.consume(raw if raw.endswith("\n") else raw + "\n")
             msg = self.format(record)
             if record.levelno >= logging.ERROR:
                 self.node_runner.error(msg)
@@ -1072,11 +1138,12 @@ def redirect_psi4_logs(output_file: Path, print_level: int = 1, node_runner=None
         "qcoptking",
     ]
     file_level = python_log_level_for_print_level(print_level)
+    step_reporter = OptKingStepReporter(node_runner) if node_runner is not None else None
 
     handlers = []
     file_handler = None
     if node_runner is not None:
-        live_handler = NodeRunnerLogHandler(node_runner)
+        live_handler = NodeRunnerLogHandler(node_runner, step_reporter=step_reporter)
         live_handler.setLevel(file_level)
         live_handler.setFormatter(logging.Formatter("%(name)s - %(levelname)s - %(message)s"))
         handlers.append(live_handler)
@@ -1089,6 +1156,8 @@ def redirect_psi4_logs(output_file: Path, print_level: int = 1, node_runner=None
         handlers.append(file_handler)
 
     previous_states = []
+    print_out_original = None
+    psi4_core = None
     try:
         for name in logger_names:
             psi_logger = logging.getLogger(name)
@@ -1103,14 +1172,50 @@ def redirect_psi4_logs(output_file: Path, print_level: int = 1, node_runner=None
             )
 
             psi_logger.handlers = handlers
-            psi_logger.setLevel(file_level)
+            # Keep INFO so OptKing convergence rows can be parsed even at print_level 1.
+            psi_logger.setLevel(min(file_level, logging.INFO) if step_reporter is not None else file_level)
             psi_logger.propagate = False
             psi_logger.disabled = False
 
+        if step_reporter is not None:
+            consume_handler = logging.Handler()
+            consume_handler.setLevel(logging.INFO)
+
+            def _consume_emit(record, reporter=step_reporter):
+                try:
+                    raw = record.getMessage()
+                    reporter.consume(raw if raw.endswith("\n") else raw + "\n")
+                except Exception:
+                    consume_handler.handleError(record)
+
+            consume_handler.emit = _consume_emit
+            for name in logger_names:
+                logging.getLogger(name).addHandler(consume_handler)
+
+            psi4_mod = psi4
+            if psi4_mod is None:
+                try:
+                    import psi4 as psi4_mod
+                except ImportError:
+                    psi4_mod = None
+            psi4_core = getattr(psi4_mod, "core", None) if psi4_mod is not None else None
+            print_out_original = getattr(psi4_core, "print_out", None) if psi4_core is not None else None
+            if callable(print_out_original):
+                def _tee_print_out(text=""):
+                    print_out_original(text)
+                    step_reporter.consume(text)
+
+                psi4_core.print_out = _tee_print_out
+
         yield
     finally:
-        for psi_logger, handlers, level, propagate, disabled in previous_states:
-            psi_logger.handlers = handlers
+        if psi4_core is not None and print_out_original is not None:
+            try:
+                psi4_core.print_out = print_out_original
+            except Exception:
+                pass
+        for psi_logger, old_handlers, level, propagate, disabled in previous_states:
+            psi_logger.handlers = old_handlers
             psi_logger.setLevel(level)
             psi_logger.propagate = propagate
             psi_logger.disabled = disabled
@@ -1238,80 +1343,6 @@ def parse_psi4_thermo_output(output_content: str) -> SimpleTable:
     return table
 
 
-_SLURM_MEMORY_PATTERN = re.compile(r"^(\d+(?:\.\d+)?)\s*([MGmg])B?$")
-_DEFAULT_PSI4_MEMORY = "8 GB"
-_DEFAULT_PSI4_THREADS = 4
-
-
-def _positive_int(value) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value if value >= 1 else None
-
-
-def _slurm_cpu_count(slurm) -> int | None:
-    """Match docker: cpus_per_task * tasks (or tasks_per_node)."""
-    cpus_per_task = _positive_int(getattr(slurm, "cpus_per_task", None))
-    tasks = _positive_int(getattr(slurm, "tasks", None))
-    tasks_per_node = _positive_int(getattr(slurm, "tasks_per_node", None))
-    if cpus_per_task is None and tasks is None and tasks_per_node is None:
-        return None
-    return (cpus_per_task or 1) * (tasks or tasks_per_node or 1)
-
-
-def _parse_slurm_memory(value) -> tuple[float, str] | None:
-    if not isinstance(value, str):
-        return None
-    match = _SLURM_MEMORY_PATTERN.fullmatch(value.strip())
-    if match is None:
-        return None
-    return float(match.group(1)), match.group(2).lower()
-
-
-def _format_psi4_memory(amount: float, unit: str) -> str:
-    label = "GB" if unit == "g" else "MB"
-    if amount == int(amount):
-        return f"{int(amount)} {label}"
-    return f"{amount} {label}"
-
-
-def resources_from_parent_parameters(kwargs: dict) -> tuple[str, int, str]:
-    """Resolve Psi4 memory/threads from ``parent_parameters.slurm_parameters``."""
-    params = kwargs.get("parent_parameters") or kwargs.get("parameters")
-    slurm = getattr(params, "slurm_parameters", None) if params is not None else None
-    if slurm is None:
-        return (
-            _DEFAULT_PSI4_MEMORY,
-            _DEFAULT_PSI4_THREADS,
-            "Psi4 resources: memory="
-            f"{_DEFAULT_PSI4_MEMORY}, threads={_DEFAULT_PSI4_THREADS} "
-            "(no SlurmParameters on parent_parameters; using defaults)",
-        )
-
-    threads = _slurm_cpu_count(slurm) or _DEFAULT_PSI4_THREADS
-    mem = _parse_slurm_memory(getattr(slurm, "mem", None))
-    mem_per_cpu = _parse_slurm_memory(getattr(slurm, "mem_per_cpu", None))
-    if mem is not None:
-        memory = _format_psi4_memory(*mem)
-    elif mem_per_cpu is not None:
-        amount, unit = mem_per_cpu
-        memory = _format_psi4_memory(amount * (_slurm_cpu_count(slurm) or 1), unit)
-    else:
-        memory = _DEFAULT_PSI4_MEMORY
-
-    return (
-        memory,
-        threads,
-        "Psi4 resources from parent SlurmParameters: "
-        f"memory={memory}, threads={threads} "
-        f"(cpus_per_task={getattr(slurm, 'cpus_per_task', None)}, "
-        f"tasks={getattr(slurm, 'tasks', None)}, "
-        f"tasks_per_node={getattr(slurm, 'tasks_per_node', None)}, "
-        f"mem={getattr(slurm, 'mem', None)}, "
-        f"mem_per_cpu={getattr(slurm, 'mem_per_cpu', None)})",
-    )
-
-
 @node
 async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     """
@@ -1325,7 +1356,7 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     """
     node_runner = kwargs.get("node_runner")
 
-    memory, num_threads, resource_log = resources_from_parent_parameters(kwargs)
+    memory, num_threads, resource_log = resources_from_parent_parameters(kwargs, label="Psi4")
     if node_runner is not None:
         node_runner.info(resource_log)
     import psi4
@@ -1475,6 +1506,7 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 node_runner.warning(f"Failed to save wavefunction for reuse: {e_save}")
 
             node_runner.info("Psi4 calculation finished successfully")
+            node_runner.qm_result = qm_result
             node_runner.psi4_result = qm_result
 
             current_name = kwargs.get("custom_name", None)
