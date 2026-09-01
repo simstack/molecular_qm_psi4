@@ -1,4 +1,7 @@
 import logging
+import re
+import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from molecular_qm_psi4.nodes.psi4_calculator import (
@@ -7,9 +10,17 @@ from molecular_qm_psi4.nodes.psi4_calculator import (
     redirect_psi4_logs,
 )
 from molecular_qm_psi4.util.psi4_calculator import (
+    OptimizationOscillationError,
+    OptimizationTimeoutError,
     Psi4Calculator,
+    basis_weight,
+    energy_is_oscillating,
+    energy_oscillation_stats,
+    iteration_timeout_seconds,
+    psi4_dft_grid,
     python_log_level_for_print_level,
     psi4_print_options,
+    scf_convergence_threshold,
 )
 
 
@@ -19,6 +30,7 @@ def _qm_input(*, max_scf_iterations=100, max_optimization_iterations=100, print_
     qm_input.basis_set.aux_basis = None
     qm_input.open_shell_calculation = False
     qm_input.scf_accuracy.value = "Medium"
+    qm_input.grid_type.value = "Grid2"
     qm_input.max_scf_iterations = max_scf_iterations
     qm_input.max_optimization_iterations = max_optimization_iterations
     qm_input.print_level = print_level
@@ -50,6 +62,8 @@ def test_set_options_logs_qm_input_iteration_limits():
     assert "max_scf_iterations=300" in msg
     assert "max_optimization_iterations=300" in msg
     assert "non_standard_parameters=True" in msg
+    assert "grid_type=Grid2" in msg
+    assert "scf_accuracy=Medium" in msg
 
 
 def test_set_options_uses_qm_input_defaults():
@@ -64,6 +78,11 @@ def test_set_options_uses_qm_input_defaults():
     assert options["optking__intrafrag_step_limit_max"] == 0.25
     assert options["optking__dynamic_level"] == 1
     assert options["optking__ensure_bt_convergence"] is True
+    assert options["dft_spherical_points"] == 302
+    assert options["dft_radial_points"] == 75
+    assert options["e_convergence"] == 1e-6
+    assert options["d_convergence"] == 1e-6
+    assert "grid_spacing" not in options
     assert "intrafrag_step_limit" not in options
     assert "dynamic_level" not in options
 
@@ -210,6 +229,33 @@ def test_snapshotter_persists_every_ten_gradient_calls_and_on_failure():
         assert 25 in snap.seen
 
 
+def test_snapshotter_logs_energy_and_gradient_every_step():
+    from molecular_qm_psi4.nodes import psi4_calculator as mod
+
+    def fake_run_async(coro):
+        coro.close()
+
+    node_runner = MagicMock()
+    original_gradient = MagicMock(return_value=(MagicMock(name="grad"), MagicMock(name="wfn")))
+    snap = OptimizationSnapshotter(MagicMock(), {"node_runner": node_runner}, interval=10)
+    snap._original_gradient = original_gradient
+    values = [(-76.5, 0.12), (-76.51, 0.08), (-76.52, 0.03)]
+
+    with patch.object(mod, "_run_async", side_effect=fake_run_async), patch.object(
+        mod, "_energy_and_grad_norm", side_effect=values
+    ):
+        for _ in values:
+            snap._wrapped_gradient("pbe", return_wfn=True)
+
+    messages = [call.args[0] for call in node_runner.info.call_args_list]
+    step_logs = [msg for msg in messages if "Optimization step " in msg]
+    assert len(step_logs) == 3
+    assert re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} ", step_logs[0])
+    assert "Optimization step 1: energy=-76.500000000000 Ha, |g|=1.200000e-01 Ha/Bohr" in step_logs[0]
+    assert "Optimization step 2: energy=-76.510000000000 Ha, |g|=8.000000e-02 Ha/Bohr" in step_logs[1]
+    assert "Optimization step 3: energy=-76.520000000000 Ha, |g|=3.000000e-02 Ha/Bohr" in step_logs[2]
+
+
 def test_snapshotter_ignores_stuck_psi4_iteration_variable():
     from molecular_qm_psi4.nodes import psi4_calculator as mod
 
@@ -254,4 +300,155 @@ def test_snapshotter_patches_optimize_globals_gradient():
                 assert fake_driver.gradient is not original_gradient
             assert fake_optimize.__globals__["gradient"] is original_gradient
             assert fake_driver.gradient is original_gradient
+
+
+def test_set_options_maps_grid_type_and_scf_accuracy():
+    qm_input = _qm_input()
+    qm_input.scf_accuracy.value = "Tight"
+    qm_input.grid_type.value = "Grid5"
+    options = _set_options_payload(qm_input)
+    assert options["e_convergence"] == 1e-8
+    assert options["d_convergence"] == 1e-8
+    assert options["dft_spherical_points"] == 770
+    assert options["dft_radial_points"] == 100
+    assert "grid_spacing" not in options
+
+    coarse = _qm_input()
+    coarse.scf_accuracy.value = "Sloppy"
+    coarse.grid_type.value = "Grid1"
+    coarse_opts = _set_options_payload(coarse)
+    assert coarse_opts["e_convergence"] == 1e-3
+    assert coarse_opts["d_convergence"] == 1e-3
+    assert coarse_opts["dft_spherical_points"] == 74
+    assert coarse_opts["dft_radial_points"] == 50
+
+    extreme = _qm_input()
+    extreme.scf_accuracy.value = "Extreme"
+    extreme.grid_type.value = "Grid3"
+    extreme_opts = _set_options_payload(extreme)
+    assert extreme_opts["e_convergence"] == 1e-12
+    assert extreme_opts["dft_spherical_points"] == 434
+    assert extreme_opts["dft_radial_points"] == 85
+
+
+def test_psi4_dft_grid_and_scf_threshold_helpers():
+    assert psi4_dft_grid("Grid2") == (302, 75)
+    assert psi4_dft_grid("unknown") == (302, 75)
+    assert scf_convergence_threshold("Loose") == 1e-4
+    assert scf_convergence_threshold("Strong") == 1e-7
+    assert scf_convergence_threshold("VeryTight") == 1e-10
+
+
+def test_iteration_timeout_floor_scale_and_cap():
+    assert basis_weight("STO3G") == 1.0
+    assert basis_weight("sto-3g") == 1.0
+    assert basis_weight("def2-SVP") == 2.0
+    assert basis_weight("def2-TZVP") == 4.0
+    assert basis_weight("def2-QZVP") == 8.0
+    assert basis_weight("cc-pV5Z") == 10.0
+    assert iteration_timeout_seconds(5, "def2-SVP") == 600
+    assert iteration_timeout_seconds(30, "def2-SVP") == 1200
+    assert iteration_timeout_seconds(50, "def2-TZVP") == 3600
+
+
+def _oscillating_energies():
+    return [
+        -76.0200,
+        -76.0000,
+        -75.9995,
+        -76.0005,
+        -75.9995,
+        -76.0005,
+        -75.9995,
+        -76.0005,
+        -75.9995,
+        -76.0005,
+        -76.0000,
+    ]
+
+
+def test_energy_oscillation_warmup_descending_and_converged():
+    oscillating = _oscillating_energies()
+    assert energy_is_oscillating(oscillating[:10], 0.05) is False
+    assert energy_is_oscillating(oscillating, 0.05) is True
+    stats = energy_oscillation_stats(oscillating, 0.05)
+    assert stats is not None
+    assert stats["sign_flips"] >= 4
+
+    descending = [-76.0 - 0.001 * i for i in range(11)]
+    assert energy_is_oscillating(descending, 0.05) is False
+
+    assert energy_is_oscillating(oscillating, 1e-4) is False
+
+
+def test_snapshotter_raises_on_slow_iteration():
+    wfn = SimpleNamespace(molecule=lambda: None)
+    original_gradient = MagicMock(side_effect=lambda *a, **k: (time.sleep(0.05), (MagicMock(), wfn))[1])
+    snap = OptimizationSnapshotter(MagicMock(), {}, iteration_timeout=0.01)
+    snap._original_gradient = original_gradient
+    with patch.object(snap, "_on_iteration_hung"):
+        with patch(
+            "molecular_qm_psi4.nodes.psi4_calculator._energy_and_grad_norm",
+            return_value=(None, None),
+        ):
+            try:
+                snap._wrapped_gradient("pbe", return_wfn=True)
+                raised = None
+            except OptimizationTimeoutError as exc:
+                raised = exc
+    assert raised is not None
+    assert "limit 0.01s" in str(raised)
+
+
+def test_hung_watchdog_writes_sidecar_and_exits(tmp_path, monkeypatch):
+    snap = OptimizationSnapshotter(MagicMock(), {}, iteration_timeout=1)
+    monkeypatch.chdir(tmp_path)
+    killed = {}
+
+    def fake_exit(code):
+        killed["code"] = code
+        raise SystemExit(code)
+
+    with patch("molecular_qm_psi4.nodes.psi4_calculator.os._exit", fake_exit):
+        with patch("molecular_qm_psi4.nodes.psi4_calculator.os.kill", side_effect=OSError("skip posix")):
+            try:
+                snap._on_iteration_hung()
+            except SystemExit:
+                pass
+    assert killed.get("code") == 1
+    sidecar = tmp_path / "optimization_watchdog_timeout.txt"
+    assert sidecar.exists()
+    assert "watchdog" in sidecar.read_text(encoding="utf-8").lower()
+
+
+def test_snapshotter_raises_on_oscillating_energy():
+    energies = _oscillating_energies()
+    step = {"n": 0}
+
+    class _FakeGrad:
+        def to_array(self):
+            return [[0.2, 0.0, 0.0], [-0.2, 0.0, 0.0]]
+
+    wfn = SimpleNamespace(
+        molecule=lambda: None,
+        energy=lambda: energies[min(step["n"] - 1, len(energies) - 1)],
+        gradient=lambda: _FakeGrad(),
+    )
+
+    def fake_gradient(*args, **kwargs):
+        step["n"] += 1
+        return (wfn.gradient(), wfn)
+
+    snap = OptimizationSnapshotter(MagicMock(), {}, iteration_timeout=600)
+    snap._original_gradient = fake_gradient
+    with patch.object(snap, "_on_iteration_hung"):
+        raised = None
+        for _ in range(len(energies)):
+            try:
+                snap._wrapped_gradient("pbe", return_wfn=True)
+            except OptimizationOscillationError as exc:
+                raised = exc
+                break
+    assert raised is not None
+    assert "oscillating" in str(raised)
 

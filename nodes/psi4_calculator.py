@@ -1,8 +1,12 @@
 import asyncio
 import copy
 import logging
+import os
 import re
+import signal
 import sys
+import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +23,13 @@ except ImportError:
     psi4 = None
 
 from molecular_qm_psi4.util.psi4_calculator import (
+    OptimizationOscillationError,
+    OptimizationTimeoutError,
     Psi4Calculator,
+    basis_name_from_qm_input,
+    energy_oscillation_stats,
+    iteration_timeout_seconds,
+    n_atoms_from_molecule,
     python_log_level_for_print_level,
 )
 from molecular_qm_psi4.util.psi4_result import Psi4Result
@@ -49,6 +59,7 @@ _WFN_NPY_NAME = "result.wfn.npy"
 _FREQ_ANALYSIS_KEY = "frequency_analysis"
 _SNAPSHOT_INTERVAL = 10
 _SNAPSHOT_WFN_NAME = "snapshot.wfn.npy"
+_WATCHDOG_SIDECAR = "optimization_watchdog_timeout.txt"
 
 
 def _safe_call(fn, default=None):
@@ -637,6 +648,7 @@ class OptimizationSnapshotter:
         kwargs: dict,
         qm_input: QMInput | None = None,
         interval: int = _SNAPSHOT_INTERVAL,
+        iteration_timeout: float | None = None,
     ):
         self.source_molecule = source_molecule
         self.kwargs = kwargs
@@ -654,6 +666,22 @@ class OptimizationSnapshotter:
         self._original_gradient = None
         self._patched_modules = []
         self._optimize_globals = None
+        self._iter_timer = None
+        self._timeout_logged = False
+        if qm_input is None:
+            n_atoms = n_atoms_from_molecule(source_molecule)
+        else:
+            n_atoms = n_atoms_from_molecule(
+                getattr(qm_input, "molecule", None) or source_molecule
+            )
+        basis = basis_name_from_qm_input(qm_input)
+        self.n_atoms = n_atoms
+        self.basis_name = basis
+        self.iteration_timeout = (
+            float(iteration_timeout)
+            if iteration_timeout is not None
+            else iteration_timeout_seconds(n_atoms, basis)
+        )
 
     def _resolve_psi4(self):
         psi4_mod = psi4
@@ -664,6 +692,95 @@ class OptimizationSnapshotter:
         except ImportError:
             return None
         return imported
+
+    def _node_runner(self):
+        return None if not self.kwargs else self.kwargs.get("node_runner")
+
+    def _log_timeout_budget(self):
+        if self._timeout_logged:
+            return
+        self._timeout_logged = True
+        msg = (
+            f"Optimization iteration timeout: {self.iteration_timeout:g}s "
+            f"(n_atoms={self.n_atoms}, basis={self.basis_name or 'unknown'})"
+        )
+        node_runner = self._node_runner()
+        if node_runner is not None:
+            node_runner.info(msg)
+        else:
+            logger.info(msg)
+
+    def _cancel_iter_timer(self):
+        timer = self._iter_timer
+        self._iter_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _start_iter_timer(self):
+        self._cancel_iter_timer()
+        timeout = self.iteration_timeout
+        if timeout is None or timeout <= 0:
+            return
+        timer = threading.Timer(timeout, self._on_iteration_hung)
+        timer.daemon = True
+        timer.start()
+        self._iter_timer = timer
+
+    def _on_iteration_hung(self):
+        msg = (
+            f"Optimization iteration watchdog: gradient did not return within "
+            f"{self.iteration_timeout:g}s (n_atoms={self.n_atoms}, "
+            f"basis={self.basis_name or 'unknown'}, geom_iter={self.geom_iter}). "
+            "Terminating process."
+        )
+        node_runner = self._node_runner()
+        if node_runner is not None:
+            try:
+                node_runner.error(msg)
+            except Exception:
+                pass
+        logger.error(msg)
+        try:
+            Path(_WATCHDOG_SIDECAR).write_text(msg + "\n", encoding="utf-8")
+        except Exception:
+            pass
+        if os.name != "nt" and hasattr(signal, "SIGTERM"):
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+            except Exception:
+                pass
+        os._exit(1)
+
+    def _raise_if_iteration_timed_out(self, elapsed):
+        if elapsed <= self.iteration_timeout:
+            return
+        raise OptimizationTimeoutError(
+            f"Optimization iteration {self.geom_iter} took {elapsed:.1f}s "
+            f"(limit {self.iteration_timeout:g}s; n_atoms={self.n_atoms}, "
+            f"basis={self.basis_name or 'unknown'})"
+        )
+
+    def _raise_if_energy_oscillating(self):
+        energies = [row["energy"] for row in self.energy_history]
+        grad_norm = self.grad_history[-1]["grad_norm"] if self.grad_history else None
+        stats = energy_oscillation_stats(energies, grad_norm)
+        if stats is None:
+            return
+        msg = (
+            "Optimization failed: energy oscillating without downward trend "
+            f"after {stats['n_steps']} iterations "
+            f"(mean_dE={stats['mean_delta']:.3e} Ha, "
+            f"amplitude={stats['amplitude']:.3e} Ha, "
+            f"sign_flips={stats['sign_flips']}, "
+            f"|g|={stats['grad_norm']:.3e})"
+        )
+        node_runner = self._node_runner()
+        if node_runner is not None:
+            node_runner.error(msg)
+        else:
+            logger.error(msg)
+        raise OptimizationOscillationError(msg)
 
     def __enter__(self):
         psi4_mod = self._resolve_psi4()
@@ -708,9 +825,11 @@ class OptimizationSnapshotter:
         if isinstance(gdict, dict) and gdict.get("gradient") is original:
             gdict["gradient"] = wrapped
             self._optimize_globals = gdict
+        self._log_timeout_budget()
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        self._cancel_iter_timer()
         try:
             self._flush_opt_charts()
         except Exception as e:
@@ -753,7 +872,13 @@ class OptimizationSnapshotter:
         return False
 
     def _wrapped_gradient(self, *args, **gkwargs):
-        result = self._original_gradient(*args, **gkwargs)
+        self._start_iter_timer()
+        start = time.monotonic()
+        try:
+            result = self._original_gradient(*args, **gkwargs)
+        finally:
+            self._cancel_iter_timer()
+        elapsed = time.monotonic() - start
         self.geom_iter += 1
         self.scf_iter = self.geom_iter
         wfn = _wavefunction_from_gradient_result(result)
@@ -762,7 +887,7 @@ class OptimizationSnapshotter:
         try:
             self._record_opt_charts(result)
         except Exception as e:
-            node_runner = self.kwargs.get("node_runner")
+            node_runner = self._node_runner()
             if node_runner is not None:
                 node_runner.warning(f"Failed to store optimization charts: {e}")
             else:
@@ -770,15 +895,34 @@ class OptimizationSnapshotter:
         try:
             self._maybe_snapshot(result)
         except Exception as e:
-            node_runner = self.kwargs.get("node_runner")
+            node_runner = self._node_runner()
             if node_runner is not None:
                 node_runner.warning(f"Failed to store MoleculeSnapshot: {e}")
             else:
                 logger.warning("Failed to store MoleculeSnapshot: %s", e)
+        self._raise_if_iteration_timed_out(elapsed)
+        self._raise_if_energy_oscillating()
         return result
+
+    def _log_opt_step(self, energy, grad_norm):
+        step = int(self.geom_iter)
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if energy is None or grad_norm is None:
+            msg = f"{stamp} Optimization step {step}: energy/gradient unavailable"
+        else:
+            msg = (
+                f"{stamp} Optimization step {step}: "
+                f"energy={float(energy):.12f} Ha, |g|={float(grad_norm):.6e} Ha/Bohr"
+            )
+        node_runner = self._node_runner()
+        if node_runner is not None:
+            node_runner.info(msg)
+        else:
+            logger.info(msg)
 
     def _record_opt_charts(self, result):
         energy, grad_norm = _energy_and_grad_norm(result)
+        self._log_opt_step(energy, grad_norm)
         if energy is None or grad_norm is None:
             return
         iteration = self.geom_iter
