@@ -4,6 +4,7 @@ from molecular_qm_models import Molecule, Atom, MoleculeList, QMInput, QMMethod
 from molecular_qm_models.basis_set import BasisSet, BasisSetEnum
 from molecular_qm_models.density_functional import Functional, FunctionalEnum
 from molecular_qm_psi4.nodes.relax_harmonic import relax_harmonic
+from molecular_qm_psi4.util.qm_engine import QMEngineInput
 from simstack.models import FloatData, Parameters
 from simstack.core.context import context
 
@@ -69,6 +70,7 @@ async def relax_harmonic_minimal_water():
             molecules=molecules,
             qm_input=qm_input,
             spring_constant=spring_constant,
+            engine=QMEngineInput(),
             parameters=docker_parameters
         )
         
