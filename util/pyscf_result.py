@@ -1,0 +1,115 @@
+import logging
+
+from molecular_qm_models import QMInput, QMResult, Molecule, Atom, MoleculeList, BOHR_TO_ANGSTROM
+from simstack.core.node_runner import NodeRunner
+from simstack.models.simple_table import SimpleTable
+
+logger = logging.getLogger(__name__)
+
+
+class PySCFResult:
+    def __init__(self, qm_input: QMInput, output_path="pyscf.out"):
+        self.qm_input = qm_input
+        self.qm_result = QMResult()
+        self._output_path = output_path
+
+    @property
+    def output_path(self):
+        from pathlib import Path
+
+        return Path(self._output_path)
+
+    def molecule_from_pyscf(self, mol, smiles=None, formula=None) -> Molecule:
+        molecule = Molecule()
+        coords = mol.atom_coords()
+        to_angstrom = True
+        try:
+            coords = mol.atom_coords(unit="Angstrom")
+            to_angstrom = False
+        except TypeError:
+            coords = mol.atom_coords()
+        for i in range(mol.natm):
+            xyz = coords[i]
+            if to_angstrom:
+                xyz = [float(xyz[0]) * BOHR_TO_ANGSTROM, float(xyz[1]) * BOHR_TO_ANGSTROM, float(xyz[2]) * BOHR_TO_ANGSTROM]
+            else:
+                xyz = [float(xyz[0]), float(xyz[1]), float(xyz[2])]
+            molecule.add_atom(
+                Atom.from_coords(
+                    element=mol.atom_pure_symbol(i),
+                    coords=[float(xyz[0]), float(xyz[1]), float(xyz[2])],
+                )
+            )
+        molecule.smiles = smiles
+        molecule.formula = formula
+        return molecule
+
+    def parse_mf(self, energy, mol, mf, node_runner: NodeRunner, optimized=False):
+        self.qm_result.final_energy = float(energy)
+        self.qm_result.scf_converged = bool(getattr(mf, "converged", True))
+        self.qm_result.normal_termination = True
+        if optimized:
+            self.qm_result.optimization_converged = True
+        source = self.qm_input.molecule
+        new_molecule = self.molecule_from_pyscf(
+            mol,
+            smiles=getattr(source, "smiles", None),
+            formula=getattr(source, "formula", None),
+        )
+        self.qm_result.final_structure = new_molecule
+        if self.qm_input.optimization:
+            self.qm_result.structures = MoleculeList(molecules=[new_molecule])
+        self.qm_result.scf_energies = [float(energy)]
+        if getattr(self.qm_input, "Dipole", False):
+            try:
+                dipole = mf.dip_moment(mol, mf.make_rdm1(), unit="AU", verbose=0)
+                self.qm_result.dipole_moment = [float(dipole[0]), float(dipole[1]), float(dipole[2])]
+                self.qm_result.dipole = float(sum(d ** 2 for d in self.qm_result.dipole_moment) ** 0.5)
+            except Exception as exc:
+                logger.warning("Failed to extract PySCF dipole: %s", exc)
+                if node_runner is not None:
+                    node_runner.warning(f"Failed to extract PySCF dipole: {exc}")
+        try:
+            self._fill_orbitals(mf)
+        except Exception as exc:
+            logger.warning("Failed to extract PySCF orbital energies: %s", exc)
+        return self.qm_result
+
+    def _fill_orbitals(self, mf):
+        import pandas as pd
+
+        mo_energy = getattr(mf, "mo_energy", None)
+        mo_occ = getattr(mf, "mo_occ", None)
+        if mo_energy is None or mo_occ is None:
+            return
+        if getattr(mo_energy, "ndim", 1) > 1:
+            mo_energy = mo_energy[0]
+            mo_occ = mo_occ[0]
+        rows = []
+        for index, (energy, occ) in enumerate(zip(mo_energy, mo_occ), start=1):
+            rows.append(
+                {
+                    "orbital_no": int(index),
+                    "occupation": float(occ),
+                    "energy_hartree": float(energy),
+                    "energy_ev": float(energy) * 27.211386245981,
+                    "orbital_type": "occupied" if float(occ) > 1e-8 else "virtual",
+                }
+            )
+        if not rows:
+            return
+        self.qm_result.set_values_from_orbital_energies_dataframe(pd.DataFrame(rows))
+
+    def frequency_tables(self, freq_info):
+        if not freq_info:
+            return
+        table = SimpleTable(name="Vibrational frequencies")
+        table.add_column("Mode", "number")
+        table.add_column("Wavenumber", "number")
+        wavenumbers = freq_info.get("freq_wavenumber")
+        if wavenumbers is None:
+            return
+        for index, freq in enumerate(wavenumbers, start=1):
+            value = float(freq.real - abs(freq.imag)) if hasattr(freq, "real") else float(freq)
+            table.add_row({"Mode": index, "Wavenumber": value})
+        self.qm_result.vibrational_frequencies = table

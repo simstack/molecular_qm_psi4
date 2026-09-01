@@ -5,12 +5,10 @@ from molecular_qm_psi4.util.psi4_calculator import (
 )
 from molecular_qm_psi4.util.psi4_result import Psi4Result
 from molecular_qm_psi4.util.psi4_thermo import run_manual_thermo
-from molecular_qm_psi4.util.pyscf_calculator import PySCFCalculator
 from molecular_qm_psi4.util.qm_engine import QMEngine, QMEngineInput
 
 __all__ = [
     "Psi4Calculator",
-    "PySCFCalculator",
     "Psi4Result",
     "clamp_print_level",
     "python_log_level_for_print_level",
