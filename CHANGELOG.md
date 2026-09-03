@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v0.3.2 (2026-09-03)
+
+### Bug Fixes
+
+- Add logging and snapshot tracking for PySCF optimization
+  ([`c329a76`](https://github.com/simstack/molecular_qm_psi4/commit/c329a766d2c45284414ac7f4b4ad6a27848b50ac))
+
+- Introduced a `PySCFOptCycleReporter` to log and track optimization cycle details, including
+  energy, delta energy, and gradient norm. - Enhanced `OptimizationSnapshotter` with streamlined
+  chart recording and stdout redirection using `_TeeStdout`. - Added regex-based parsing for PySCF
+  geometry optimization log lines. - Updated tests to validate new logging, charting, and reporting
+  functionalities.
+
+
 ## v0.3.1 (2026-09-03)
 
 ### Bug Fixes
