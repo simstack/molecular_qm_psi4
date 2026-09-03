@@ -1,8 +1,12 @@
 import logging
 
 from molecular_qm_models import QMInput, QMResult, Molecule, Atom, MoleculeList, BOHR_TO_ANGSTROM
+from molecular_qm_psi4.util.frequency_table import (
+    attach_vibrational_frequencies,
+    infer_linear,
+    signed_wavenumber_cm1,
+)
 from simstack.core.node_runner import NodeRunner
-from simstack.models.simple_table import SimpleTable
 
 logger = logging.getLogger(__name__)
 
@@ -100,16 +104,16 @@ class PySCFResult:
             return
         self.qm_result.set_values_from_orbital_energies_dataframe(pd.DataFrame(rows))
 
-    def frequency_tables(self, freq_info):
-        if not freq_info:
-            return
-        table = SimpleTable(name="Vibrational frequencies")
-        table.add_column("Mode", "number")
-        table.add_column("Wavenumber", "number")
-        wavenumbers = freq_info.get("freq_wavenumber")
-        if wavenumbers is None:
-            return
-        for index, freq in enumerate(wavenumbers, start=1):
-            value = float(freq.real - abs(freq.imag)) if hasattr(freq, "real") else float(freq)
-            table.add_row({"Mode": index, "Wavenumber": value})
-        self.qm_result.vibrational_frequencies = table
+    def frequency_tables(self, freq_info, node_runner, n_atoms):
+        if freq_info is None:
+            raise ValueError("freq_info is required")
+        raw = freq_info.get("freq_wavenumber")
+        if raw is None:
+            raise ValueError("freq_info has no freq_wavenumber")
+        if n_atoms is None:
+            raise ValueError("n_atoms is required")
+        wavenumbers = [signed_wavenumber_cm1(freq) for freq in raw]
+        linear = infer_linear(n_atoms, len(wavenumbers))
+        return attach_vibrational_frequencies(
+            node_runner, self.qm_result, wavenumbers, n_atoms, linear
+        )

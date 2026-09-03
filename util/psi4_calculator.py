@@ -38,6 +38,18 @@ _SCF_ACCURACY_MAP = {
 }
 _DEFAULT_SCF_ACCURACY = 1e-6
 
+# QMInput.optimization_accuracy -> Psi4 OptKing g_convergence keyword.
+_OPT_G_CONVERGENCE = {
+    "Sloppy": "NWCHEM_LOOSE",
+    "Loose": "GAU_LOOSE",
+    "Medium": "GAU",
+    "Strong": "QCHEM",
+    "Tight": "GAU_TIGHT",
+    "VeryTight": "GAU_VERYTIGHT",
+    "Extreme": "GAU_VERYTIGHT",
+}
+_DEFAULT_OPT_G_CONVERGENCE = "GAU"
+
 _TIMEOUT_SECONDS_PER_ATOM = 20
 _TIMEOUT_MIN_SECONDS = 600
 _TIMEOUT_MAX_SECONDS = 3600
@@ -110,6 +122,11 @@ def psi4_dft_grid(grid_type) -> tuple[int, int]:
 def scf_convergence_threshold(scf_accuracy) -> float:
     name = _named_value(scf_accuracy, "Medium")
     return _SCF_ACCURACY_MAP.get(name, _DEFAULT_SCF_ACCURACY)
+
+
+def psi4_opt_g_convergence(optimization_accuracy) -> str:
+    name = _named_value(optimization_accuracy, "Medium")
+    return _OPT_G_CONVERGENCE.get(name, _DEFAULT_OPT_G_CONVERGENCE)
 
 
 def basis_weight(basis_name) -> float:
@@ -303,6 +320,8 @@ class Psi4Calculator:
         # dropped by the Psi4 task planner. Redundant internals still abort on the
         # first RFO step for floppy/large systems (AlgError in dq_to_dx before
         # ensure_bt_convergence can shrink the step), so use cartesians.
+        opt_acc_name = _named_value(getattr(self.qm_input, "optimization_accuracy", None), "Medium")
+        g_convergence = psi4_opt_g_convergence(getattr(self.qm_input, "optimization_accuracy", None))
         if getattr(self.qm_input, "optimization", False):
             psi4_options.update({
                 "optking__opt_coordinates": "cartesian",
@@ -310,6 +329,7 @@ class Psi4Calculator:
                 "optking__intrafrag_step_limit_max": 0.25,
                 "optking__dynamic_level": 1,
                 "optking__ensure_bt_convergence": True,
+                "optking__g_convergence": g_convergence,
             })
 
         # Set thermochemistry options if provided
@@ -334,6 +354,7 @@ class Psi4Calculator:
                 f"max_optimization_iterations={self.qm_input.max_optimization_iterations} -> geom_maxiter, "
                 f"print_level={getattr(self.qm_input, 'print_level', 1)}, "
                 f"scf_accuracy={acc_name} -> e_convergence={scf_conv} d_convergence={scf_conv}, "
+                f"optimization_accuracy={opt_acc_name} -> g_convergence={g_convergence}, "
                 f"grid_type={grid_name} -> dft_spherical_points={spherical_points} "
                 f"dft_radial_points={radial_points}, "
                 f"non_standard_parameters={getattr(self.qm_input, 'non_standard_parameters', None)}, "

@@ -4,6 +4,8 @@ import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from molecular_qm_psi4.nodes.psi4_calculator import (
     OptimizationSnapshotter,
     OptKingStepReporter,
@@ -11,6 +13,7 @@ from molecular_qm_psi4.nodes.psi4_calculator import (
     parse_optking_step_line,
     redirect_psi4_logs,
 )
+from molecular_qm_psi4.util.optimization_timing import optimization_timing_table
 from molecular_qm_psi4.util.psi4_calculator import (
     OptimizationOscillationError,
     OptimizationTimeoutError,
@@ -20,6 +23,7 @@ from molecular_qm_psi4.util.psi4_calculator import (
     energy_oscillation_stats,
     iteration_timeout_seconds,
     psi4_dft_grid,
+    psi4_opt_g_convergence,
     python_log_level_for_print_level,
     psi4_print_options,
     scf_convergence_threshold,
@@ -66,6 +70,8 @@ def test_set_options_logs_qm_input_iteration_limits():
     assert "non_standard_parameters=True" in msg
     assert "grid_type=Grid2" in msg
     assert "scf_accuracy=Medium" in msg
+    assert "optimization_accuracy=Medium" in msg
+    assert "g_convergence=GAU" in msg
 
 
 def test_set_options_uses_qm_input_defaults():
@@ -80,6 +86,7 @@ def test_set_options_uses_qm_input_defaults():
     assert options["optking__intrafrag_step_limit_max"] == 0.25
     assert options["optking__dynamic_level"] == 1
     assert options["optking__ensure_bt_convergence"] is True
+    assert options["optking__g_convergence"] == "GAU"
     assert options["dft_spherical_points"] == 302
     assert options["dft_radial_points"] == 75
     assert options["e_convergence"] == 1e-6
@@ -96,6 +103,7 @@ def test_set_options_omits_optking_limits_without_optimization():
     assert "optking__intrafrag_step_limit_max" not in options
     assert "optking__dynamic_level" not in options
     assert "optking__ensure_bt_convergence" not in options
+    assert "optking__g_convergence" not in options
 
 
 def test_set_options_maps_print_level():
@@ -359,12 +367,14 @@ def test_snapshotter_patches_optimize_globals_gradient():
 def test_set_options_maps_grid_type_and_scf_accuracy():
     qm_input = _qm_input()
     qm_input.scf_accuracy.value = "Tight"
+    qm_input.optimization_accuracy.value = "Tight"
     qm_input.grid_type.value = "Grid5"
     options = _set_options_payload(qm_input)
     assert options["e_convergence"] == 1e-8
     assert options["d_convergence"] == 1e-8
     assert options["dft_spherical_points"] == 770
     assert options["dft_radial_points"] == 100
+    assert options["optking__g_convergence"] == "GAU_TIGHT"
     assert "grid_spacing" not in options
 
     coarse = _qm_input()
@@ -391,6 +401,11 @@ def test_psi4_dft_grid_and_scf_threshold_helpers():
     assert scf_convergence_threshold("Loose") == 1e-4
     assert scf_convergence_threshold("Strong") == 1e-7
     assert scf_convergence_threshold("VeryTight") == 1e-10
+    assert psi4_opt_g_convergence("Sloppy") == "NWCHEM_LOOSE"
+    assert psi4_opt_g_convergence("Loose") == "GAU_LOOSE"
+    assert psi4_opt_g_convergence("Medium") == "GAU"
+    assert psi4_opt_g_convergence("Tight") == "GAU_TIGHT"
+    assert psi4_opt_g_convergence("VeryTight") == "GAU_VERYTIGHT"
 
 
 def test_iteration_timeout_floor_scale_and_cap():
@@ -505,4 +520,59 @@ def test_snapshotter_raises_on_oscillating_energy():
                 break
     assert raised is not None
     assert "oscillating" in str(raised)
+
+
+def test_snapshotter_records_wall_and_cpu_time():
+    from molecular_qm_psi4.nodes import psi4_calculator as mod
+
+    def fake_run_async(coro):
+        coro.close()
+
+    original_gradient = MagicMock(return_value=(MagicMock(name="grad"), MagicMock(name="wfn")))
+    snap = OptimizationSnapshotter(MagicMock(), {}, interval=10)
+    snap._original_gradient = original_gradient
+    with patch.object(mod, "_run_async", side_effect=fake_run_async), patch.object(
+        mod, "_energy_and_grad_norm", return_value=(-76.5, 0.12)
+    ):
+        snap._wrapped_gradient("pbe", return_wfn=True)
+    assert len(snap.timing_history) == 1
+    row = snap.timing_history[0]
+    assert row["step"] == 1
+    assert row["wall_time_s"] >= 0
+    assert row["cpu_time_s"] >= 0
+    assert row["energy"] == -76.5
+
+
+def test_optimization_timing_table_has_iteration_and_summary_rows():
+    snap = SimpleNamespace(
+        timing_history=[
+            {"step": 1, "wall_time_s": 2.0, "cpu_time_s": 1.5},
+            {"step": 2, "wall_time_s": 4.0, "cpu_time_s": 3.0},
+        ],
+        opt_wall_s=7.0,
+        opt_cpu_s=5.0,
+    )
+    table = optimization_timing_table(snap)
+    assert table.name == "Optimization timing"
+    assert table.row[0]["metric"] == "iteration"
+    assert table.row[0]["step"] == 1
+    assert table.row[1]["step"] == 2
+    by_metric = {row["metric"]: row for row in table.row if row["metric"] != "iteration"}
+    assert by_metric["total"]["wall_time_s"] == 6.0
+    assert by_metric["mean"]["cpu_time_s"] == 2.25
+    assert by_metric["min"]["wall_time_s"] == 2.0
+    assert by_metric["max"]["cpu_time_s"] == 3.0
+    assert by_metric["optimize"]["wall_time_s"] == 7.0
+
+
+def test_optimization_timing_table_skips_empty_snapshotter():
+    assert optimization_timing_table(None) is None
+    snap = SimpleNamespace(timing_history=[], opt_wall_s=None, opt_cpu_s=None)
+    assert optimization_timing_table(snap) is None
+
+
+def test_optimization_timing_table_requires_cpu_when_wall_set():
+    snap = SimpleNamespace(timing_history=[], opt_wall_s=1.0, opt_cpu_s=None)
+    with pytest.raises(ValueError, match="opt_cpu_s"):
+        optimization_timing_table(snap)
 

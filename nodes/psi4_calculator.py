@@ -34,7 +34,7 @@ from molecular_qm_psi4.util.psi4_calculator import (
 )
 from molecular_qm_psi4.util.psi4_result import Psi4Result
 from molecular_qm_psi4.util.psi4_thermo import run_manual_thermo
-from molecular_qm_psi4.util.qm_engine import resources_from_parent_parameters
+from molecular_qm_psi4.util.qm_engine import attach_optimizer_timings, resources_from_parent_parameters
 from odmantic import ObjectId
 
 from simstack.core.context import context
@@ -662,6 +662,11 @@ class OptimizationSnapshotter:
         self.pending = []
         self.energy_history = []
         self.grad_history = []
+        self.timing_history = []
+        self.opt_wall_s = None
+        self.opt_cpu_s = None
+        self._opt_wall_start = None
+        self._opt_cpu_start = None
         self.charts = (None, None)
         self._chart_steps = set()
         self._original_gradient = None
@@ -784,6 +789,8 @@ class OptimizationSnapshotter:
         raise OptimizationOscillationError(msg)
 
     def __enter__(self):
+        self._opt_wall_start = time.monotonic()
+        self._opt_cpu_start = time.process_time()
         psi4_mod = self._resolve_psi4()
         if psi4_mod is None:
             return self
@@ -830,6 +837,11 @@ class OptimizationSnapshotter:
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        if self._opt_wall_start is not None:
+            if self._opt_cpu_start is None:
+                raise ValueError("optimization CPU timer was not started")
+            self.opt_wall_s = time.monotonic() - self._opt_wall_start
+            self.opt_cpu_s = time.process_time() - self._opt_cpu_start
         self._cancel_iter_timer()
         try:
             self._flush_opt_charts()
@@ -874,19 +886,33 @@ class OptimizationSnapshotter:
 
     def _wrapped_gradient(self, *args, **gkwargs):
         self._start_iter_timer()
-        start = time.monotonic()
+        wall_start = time.monotonic()
+        cpu_start = time.process_time()
         try:
             result = self._original_gradient(*args, **gkwargs)
         finally:
             self._cancel_iter_timer()
-        elapsed = time.monotonic() - start
+        wall_s = time.monotonic() - wall_start
+        cpu_s = time.process_time() - cpu_start
         self.geom_iter += 1
         self.scf_iter = self.geom_iter
         wfn = _wavefunction_from_gradient_result(result)
         if wfn is not None:
             self.last_wfn = wfn
+        energy, grad_norm = _energy_and_grad_norm(result)
+        stamp = self._log_opt_step(energy, grad_norm, wall_s, cpu_s)
+        self.timing_history.append(
+            {
+                "step": int(self.geom_iter),
+                "wall_time_s": wall_s,
+                "cpu_time_s": cpu_s,
+                "timestamp": stamp,
+                "energy": energy,
+                "grad_norm": grad_norm,
+            }
+        )
         try:
-            self._record_opt_charts(result)
+            self._record_opt_charts(energy, grad_norm, stamp)
         except Exception as e:
             node_runner = self._node_runner()
             if node_runner is not None:
@@ -901,11 +927,11 @@ class OptimizationSnapshotter:
                 node_runner.warning(f"Failed to store MoleculeSnapshot: {e}")
             else:
                 logger.warning("Failed to store MoleculeSnapshot: %s", e)
-        self._raise_if_iteration_timed_out(elapsed)
+        self._raise_if_iteration_timed_out(wall_s)
         self._raise_if_energy_oscillating()
         return result
 
-    def _log_opt_step(self, energy, grad_norm):
+    def _log_opt_step(self, energy, grad_norm, wall_s, cpu_s):
         step = int(self.geom_iter)
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if energy is None or grad_norm is None:
@@ -915,15 +941,15 @@ class OptimizationSnapshotter:
                 f"{stamp} Optimization step {step}: "
                 f"energy={float(energy):.12f} Ha, |g|={float(grad_norm):.6e} Ha/Bohr"
             )
+        msg = f"{msg}, wall={float(wall_s):.2f}s, cpu={float(cpu_s):.2f}s"
         node_runner = self._node_runner()
         if node_runner is not None:
             node_runner.info(msg)
         else:
             logger.info(msg)
+        return stamp
 
-    def _record_opt_charts(self, result):
-        energy, grad_norm = _energy_and_grad_norm(result)
-        self._log_opt_step(energy, grad_norm)
+    def _record_opt_charts(self, energy, grad_norm, stamp):
         if energy is None or grad_norm is None:
             return
         iteration = self.geom_iter
@@ -931,8 +957,8 @@ class OptimizationSnapshotter:
         if step in self._chart_steps:
             return
         self._chart_steps.add(step)
-        self.energy_history.append({"step": step, "energy": energy})
-        self.grad_history.append({"step": step, "grad_norm": grad_norm})
+        self.energy_history.append({"step": step, "energy": energy, "timestamp": stamp})
+        self.grad_history.append({"step": step, "grad_norm": grad_norm, "timestamp": stamp})
         if step % self.interval == 0:
             self._flush_opt_charts()
 
@@ -1353,6 +1379,11 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         
     SimstackResult:
         qm_result (QMResult): Parsed result from the Psi4 calculation.
+        vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
+            were computed.
+        wall_time_s (FloatData): Total optimization wall time in seconds.
+        cpu_time_s (FloatData): Total optimization CPU time in seconds.
+        optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
     """
     node_runner = kwargs.get("node_runner")
 
@@ -1384,6 +1415,7 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         await context.db.save(molecule)
         node_runner.info(f"Generated SMILES and formula from molecule: {molecule.smiles} ({molecule.formula})")
 
+    snapshotter = None
     psi4_result = Psi4Result(qm_input)
     # parse_wfn returns this same object; initialize here so finally can attach
     # log/output files even when the calculation fails before parse_wfn.
@@ -1430,6 +1462,7 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 snapshotter = OptimizationSnapshotter(molecule, kwargs, qm_input=qm_input)
                 with snapshotter:
                     energy, wfn = psi4.optimize(method, return_wfn=True, ref_wfn=restart_wfn)
+                attach_optimizer_timings(node_runner, snapshotter)
                 if snapshotter.pending:
                     await snapshotter.flush_pending()
                 orbital_payload = _payload_from_wfn_or_reference(wfn)
@@ -1475,6 +1508,7 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
 
             qm_result = psi4_result.parse_wfn(energy, wfn, node_runner=node_runner)
             if wfn_freq is not None:
+                psi4_result.frequency_tables(wfn_freq, node_runner)
                 thermo_result = psi4_result.calculate_thermo(energy, wfn_freq, node_runner=node_runner)
 
             # Save a reusable wavefunction. Do not call Psi4 to_file(): it always

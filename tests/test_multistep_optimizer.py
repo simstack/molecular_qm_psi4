@@ -1,13 +1,16 @@
 from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
 
 import pytest
 
 from molecular_qm_dftb.models.dftb_input import DftbHamiltonian, DftbInput, SkfSet, XtbMethod
 from molecular_qm_models import BasisSet, Functional, Molecule, QMInput, QMResult
 from molecular_qm_models.basis_set import BasisSetEnum
+from molecular_qm_models.qm_input import GridType, OptimizationAccuracy, SCFAccuracy
 from molecular_qm_psi4.nodes.multistep_optimizer import (
     OptimizationStepInput,
     PreOptimizerInput,
+    _append_step_row,
     _child_qm_result,
     _dftb_method_label,
     _dftb_preopt_input,
@@ -16,9 +19,13 @@ from molecular_qm_psi4.nodes.multistep_optimizer import (
     _persist_qm_input,
     _persist_step_molecule,
     _qm_input_for_step,
+    _setting_label,
 )
+from molecular_qm_psi4.util.qm_engine import attach_optimizer_timings, timings_from_child_result
 from simstack.core.definitions import TaskStatus
 from simstack.core.simstack_result import SimstackResult
+from simstack.models import FloatData
+from simstack.models.simple_table import SimpleTable
 
 
 def test_dftb_preopt_input_uses_full_dftb_input():
@@ -145,6 +152,9 @@ def test_qm_input_for_step_forces_optimization_true():
         functional=Functional(functional="BLYP"),
         max_optimization_iterations=80,
         max_scf_iterations=250,
+        scf_accuracy=SCFAccuracy.Tight,
+        optimization_accuracy=OptimizationAccuracy.Strong,
+        grid_type=GridType.Grid4,
     )
     other = _water()
     copied = _qm_input_for_step(source, step, other)
@@ -157,10 +167,16 @@ def test_qm_input_for_step_forces_optimization_true():
     assert copied.functional.functional.value == "BLYP"
     assert copied.max_optimization_iterations == 80
     assert copied.max_scf_iterations == 250
+    assert copied.scf_accuracy == SCFAccuracy.Tight
+    assert copied.optimization_accuracy == OptimizationAccuracy.Strong
+    assert copied.grid_type == GridType.Grid4
     assert copied.non_standard_parameters is True
     assert copied.id != source.id
     assert "max_scf_iterations" in copied.__fields_modified__
     assert "max_optimization_iterations" in copied.__fields_modified__
+    assert "scf_accuracy" in copied.__fields_modified__
+    assert "optimization_accuracy" in copied.__fields_modified__
+    assert "grid_type" in copied.__fields_modified__
     assert "non_standard_parameters" in copied.__fields_modified__
 
 
@@ -170,6 +186,9 @@ def _sto3g_step():
         functional=Functional(functional="BLYP"),
         max_optimization_iterations=80,
         max_scf_iterations=250,
+        scf_accuracy=SCFAccuracy.Loose,
+        optimization_accuracy=OptimizationAccuracy.Sloppy,
+        grid_type=GridType.Grid1,
     )
 
 
@@ -280,3 +299,122 @@ async def test_persist_dftb_input_saves_copied_settings():
     assert got is saved
     node_runner.warning.assert_not_called()
     assert "max_optimization_steps" in opts.__fields_modified__
+
+
+def test_optimization_step_schema_exposes_accuracy_and_grid():
+    schema = OptimizationStepInput.model_json_schema()
+    props = schema["properties"]
+    assert props["scf_accuracy"]["default"] == "Medium"
+    assert props["optimization_accuracy"]["default"] == "Medium"
+    assert props["grid_type"]["default"] == "Grid2"
+
+
+def test_setting_label_uses_enum_value():
+    assert _setting_label(SCFAccuracy.Tight) == "Tight"
+    assert _setting_label(None) == ""
+    assert _setting_label(SimpleNamespace(value="Grid4")) == "Grid4"
+
+
+def test_append_step_row_records_settings_and_timings():
+    table = SimpleTable(name="Multistep optimizer")
+    table.add_column("step", "string")
+    table.add_column("basis_set", "string")
+    table.add_column("functional", "string")
+    table.add_column("scf_accuracy", "string")
+    table.add_column("optimization_accuracy", "string")
+    table.add_column("grid_type", "string")
+    table.add_column("energy", "number")
+    table.add_column("optimization_converged", "string")
+    table.add_column("wall_time_s", "number")
+    table.add_column("cpu_time_s", "number")
+    node_runner = MagicMock()
+    _append_step_row(
+        table,
+        "psi4-1",
+        "sto-3g",
+        "BLYP",
+        QMResult(final_energy=-1.5, optimization_converged=True),
+        node_runner,
+        scf_accuracy="Loose",
+        optimization_accuracy="Sloppy",
+        grid_type="Grid1",
+        wall_time_s=12.5,
+        cpu_time_s=40.0,
+    )
+    _append_step_row(
+        table,
+        "psi4-2",
+        "def2-SVP",
+        "PBE",
+        QMResult(final_energy=-2.0, optimization_converged=True),
+        node_runner,
+        scf_accuracy="Tight",
+        optimization_accuracy="Strong",
+        grid_type="Grid4",
+        wall_time_s=30.0,
+        cpu_time_s=80.0,
+    )
+    _append_step_row(
+        table,
+        "total",
+        "",
+        "",
+        None,
+        node_runner,
+        wall_time_s=42.5,
+        cpu_time_s=120.0,
+    )
+    assert table.row[0]["scf_accuracy"] == "Loose"
+    assert table.row[0]["grid_type"] == "Grid1"
+    assert table.row[0]["wall_time_s"] == 12.5
+    assert table.row[-1]["step"] == "total"
+    assert table.row[-1]["wall_time_s"] == 42.5
+    assert table.row[-1]["cpu_time_s"] == 120.0
+
+
+def test_timings_from_child_result_reads_float_data_and_dict():
+    result = SimstackResult(status=TaskStatus.COMPLETED)
+    result.wall_time_s = FloatData(field_name="wall_time_s", value=11.0)
+    result.cpu_time_s = {"field_name": "cpu_time_s", "value": 22.0}
+    wall, cpu = timings_from_child_result(result)
+    assert wall == 11.0
+    assert cpu == 22.0
+    assert timings_from_child_result(None) == (None, None)
+
+
+def test_timings_from_child_result_rejects_non_numeric():
+    result = SimstackResult(status=TaskStatus.COMPLETED)
+    result.wall_time_s = "slow"
+    with pytest.raises(ValueError, match="wall_time_s"):
+        timings_from_child_result(result)
+
+
+def test_attach_optimizer_timings_copies_totals_and_iteration_table():
+    node_runner = SimpleNamespace()
+    node_runner.info = MagicMock()
+    snapshotter = SimpleNamespace(
+        opt_wall_s=15.5,
+        opt_cpu_s=40.25,
+        timing_history=[
+            {"step": 1, "wall_time_s": 10.0, "cpu_time_s": 25.0},
+            {"step": 2, "wall_time_s": 5.5, "cpu_time_s": 15.25},
+        ],
+    )
+    attach_optimizer_timings(node_runner, snapshotter)
+    assert node_runner.wall_time_s.value == 15.5
+    assert node_runner.cpu_time_s.value == 40.25
+    assert node_runner.optimization_timing.row[0]["step"] == 1
+    assert node_runner.optimization_timing.row[1]["cpu_time_s"] == 15.25
+    node_runner.info.assert_called()
+    assert "wall=15.50s" in node_runner.info.call_args[0][0]
+
+
+def test_timings_from_child_result_reads_optimization_timing_table():
+    table = SimpleTable(name="Optimization timing")
+    table.add_row({"metric": "iteration", "step": 1, "wall_time_s": 2.0, "cpu_time_s": 1.0})
+    table.add_row({"metric": "total", "step": None, "wall_time_s": 2.0, "cpu_time_s": 1.0})
+    table.add_row({"metric": "optimize", "step": None, "wall_time_s": 3.5, "cpu_time_s": 4.0})
+    result = SimpleNamespace(wall_time_s=None, cpu_time_s=None, optimization_timing=table)
+    wall, cpu = timings_from_child_result(result)
+    assert wall == 3.5
+    assert cpu == 4.0

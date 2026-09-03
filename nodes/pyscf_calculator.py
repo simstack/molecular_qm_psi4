@@ -33,7 +33,7 @@ from molecular_qm_psi4.util.pyscf_calculator import (
 )
 from molecular_qm_psi4.util.pyscf_result import PySCFResult
 from molecular_qm_psi4.util.pyscf_thermo import run_pyscf_thermo
-from molecular_qm_psi4.util.qm_engine import resources_from_parent_parameters
+from molecular_qm_psi4.util.qm_engine import attach_optimizer_timings, resources_from_parent_parameters
 from simstack.core.context import context
 from simstack.core.node import node
 from simstack.core.node_runner import NodeRunner
@@ -317,6 +317,11 @@ class OptimizationSnapshotter:
         self.last_mol = None
         self.energy_history = []
         self.grad_history = []
+        self.timing_history = []
+        self.opt_wall_s = None
+        self.opt_cpu_s = None
+        self._last_wall_s = None
+        self._last_cpu_s = None
         self.charts = (None, None)
         self._chart_steps = set()
         n_atoms = n_atoms_from_molecule(getattr(qm_input, "molecule", None) or source_molecule)
@@ -413,7 +418,19 @@ class OptimizationSnapshotter:
             grad_norm = float(np.linalg.norm(np.asarray(gradients, dtype=float))) if gradients is not None and np is not None else None
         except Exception:
             grad_norm = None
-        self._log_opt_step(energy, grad_norm)
+        if self._last_wall_s is not None:
+            if self._last_cpu_s is None:
+                raise ValueError("cpu_time_s is required when wall_time_s is set")
+            self.timing_history.append(
+                {
+                    "step": int(self.geom_iter),
+                    "wall_time_s": self._last_wall_s,
+                    "cpu_time_s": self._last_cpu_s,
+                }
+            )
+        self._log_opt_step(energy, grad_norm, self._last_wall_s, self._last_cpu_s)
+        self._last_wall_s = None
+        self._last_cpu_s = None
         if energy is not None and grad_norm is not None:
             step = int(self.geom_iter)
             if step not in self._chart_steps:
@@ -446,7 +463,7 @@ class OptimizationSnapshotter:
                 if node_runner is not None:
                     node_runner.warning(f"Failed to store MoleculeSnapshot: {exc}")
 
-    def _log_opt_step(self, energy, grad_norm):
+    def _log_opt_step(self, energy, grad_norm, wall_s, cpu_s):
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         step = int(self.geom_iter)
         if energy is None or grad_norm is None:
@@ -456,6 +473,10 @@ class OptimizationSnapshotter:
                 f"{stamp} Optimization step {step}: "
                 f"energy={float(energy):.12f} Ha, |g|={float(grad_norm):.6e} Ha/Bohr"
             )
+        if wall_s is not None or cpu_s is not None:
+            if wall_s is None or cpu_s is None:
+                raise ValueError("wall_s and cpu_s must both be set")
+            msg = f"{msg}, wall={float(wall_s):.2f}s, cpu={float(cpu_s):.2f}s"
         node_runner = self._node_runner()
         if node_runner is not None:
             node_runner.info(msg)
@@ -594,30 +615,41 @@ def _optimize(mf, qm_input, snapshotter):
     def scan_fn(mol):
         if snapshotter is not None:
             snapshotter._start_iter_timer()
-        start = time.monotonic()
+        wall_start = time.monotonic()
+        cpu_start = time.process_time()
         try:
             energy, grad = scanner(mol)
             if constraints:
                 energy, grad = _apply_harmonic_to_gradient(energy, grad, mol, constraints)
             return energy, grad
         finally:
+            wall_s = time.monotonic() - wall_start
+            cpu_s = time.process_time() - cpu_start
             if snapshotter is not None:
                 snapshotter._cancel_iter_timer()
-                elapsed = time.monotonic() - start
-                if elapsed > snapshotter.iteration_timeout:
+                snapshotter._last_wall_s = wall_s
+                snapshotter._last_cpu_s = cpu_s
+                if wall_s > snapshotter.iteration_timeout:
                     raise OptimizationTimeoutError(
-                        f"Optimization iteration {snapshotter.geom_iter} took {elapsed:.1f}s "
+                        f"Optimization iteration {snapshotter.geom_iter} took {wall_s:.1f}s "
                         f"(limit {snapshotter.iteration_timeout:g}s; n_atoms={snapshotter.n_atoms}, "
                         f"basis={snapshotter.basis_name or 'unknown'})"
                     )
 
     conv_params = pyscf_opt_conv_params(getattr(qm_input, "optimization_accuracy", None))
-    mol_eq = optimize(
-        as_pyscf_method(mf.mol, scan_fn),
-        callback=None if snapshotter is None else snapshotter.callback,
-        maxsteps=int(qm_input.max_optimization_iterations),
-        **conv_params,
-    )
+    wall_start = time.monotonic()
+    cpu_start = time.process_time()
+    try:
+        mol_eq = optimize(
+            as_pyscf_method(mf.mol, scan_fn),
+            callback=None if snapshotter is None else snapshotter.callback,
+            maxsteps=int(qm_input.max_optimization_iterations),
+            **conv_params,
+        )
+    finally:
+        if snapshotter is not None:
+            snapshotter.opt_wall_s = time.monotonic() - wall_start
+            snapshotter.opt_cpu_s = time.process_time() - cpu_start
     return mol_eq
 
 
@@ -631,6 +663,11 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
 
     SimstackResult:
         qm_result (QMResult): Parsed result from the PySCF calculation.
+        vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
+            were computed.
+        wall_time_s (FloatData): Total optimization wall time in seconds.
+        cpu_time_s (FloatData): Total optimization CPU time in seconds.
+        optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
     """
     node_runner = kwargs.get("node_runner")
     memory, num_threads, resource_log = resources_from_parent_parameters(kwargs, label="PySCF")
@@ -705,8 +742,10 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                     mol_eq = _optimize(mf, qm_input, snapshotter)
                 except Exception:
                     snapshotter.finish(exc_type=Exception)
+                    attach_optimizer_timings(node_runner, snapshotter)
                     raise
                 snapshotter.finish()
+                attach_optimizer_timings(node_runner, snapshotter)
                 mol = mol_eq
                 mf.reset(mol)
                 energy = mf.kernel()
@@ -757,7 +796,8 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 energy, mol, mf, node_runner, optimized=bool(qm_input.optimization)
             )
             if freq_info:
-                pyscf_result.frequency_tables(freq_info)
+                n_atoms = mol.natm if hasattr(mol, "natm") else None
+                pyscf_result.frequency_tables(freq_info, node_runner, n_atoms)
             thermo_result = None
             if freq_info and qm_input.frequencies:
                 thermo_result = run_pyscf_thermo(mf, freq_info, 298.15, 101325.0, node_runner)

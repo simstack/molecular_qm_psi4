@@ -1,4 +1,4 @@
-from typing import Any, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from odmantic import EmbeddedModel, Field, Model, ObjectId
 from pydantic import model_validator
@@ -6,10 +6,22 @@ from pydantic import model_validator
 from molecular_qm_dftb.models.dftb_input import DftbHamiltonian, DftbInput
 from molecular_qm_dftb.nodes.dftb_calculator import dftb_calculator
 
-from molecular_qm_models import Molecule, QMInput, QMResult
+from molecular_qm_models import (
+    GridType,
+    Molecule,
+    OptimizationAccuracy,
+    QMInput,
+    QMResult,
+    SCFAccuracy,
+)
 from molecular_qm_models.basis_set import BasisSet
 from molecular_qm_models.density_functional import Functional
-from molecular_qm_psi4.util.qm_engine import QMEngine, engine_field_schema_extra, run_qm_calculator
+from molecular_qm_psi4.util.qm_engine import (
+    QMEngine,
+    engine_field_schema_extra,
+    run_qm_calculator,
+    timings_from_child_result,
+)
 from simstack.core.context import context
 from simstack.core.definitions import TaskStatus
 from simstack.core.node import node
@@ -32,6 +44,18 @@ class OptimizationStepInput(EmbeddedModel):
     max_scf_iterations: int = Field(
         100,
         json_schema_extra={"description": "Maximum number of SCF cycles"},
+    )
+    scf_accuracy: SCFAccuracy = Field(
+        SCFAccuracy.Medium,
+        json_schema_extra={"description": "SCF convergence accuracy"},
+    )
+    optimization_accuracy: OptimizationAccuracy = Field(
+        OptimizationAccuracy.Medium,
+        json_schema_extra={"description": "Geometry optimization accuracy"},
+    )
+    grid_type: GridType = Field(
+        GridType.Grid2,
+        json_schema_extra={"description": "DFT grid quality level"},
     )
 
     @model_validator(mode="before")
@@ -201,6 +225,9 @@ def _qm_input_for_step(
             "functional": step.functional,
             "max_optimization_iterations": step.max_optimization_iterations,
             "max_scf_iterations": step.max_scf_iterations,
+            "scf_accuracy": step.scf_accuracy,
+            "optimization_accuracy": step.optimization_accuracy,
+            "grid_type": step.grid_type,
             "non_standard_parameters": True,
             "field_name": "QMInput",
         },
@@ -214,6 +241,9 @@ def _qm_input_for_step(
     copied.functional = step.functional
     copied.max_optimization_iterations = step.max_optimization_iterations
     copied.max_scf_iterations = step.max_scf_iterations
+    copied.scf_accuracy = step.scf_accuracy
+    copied.optimization_accuracy = step.optimization_accuracy
+    copied.grid_type = step.grid_type
     post_copy = getattr(copied, "_post_copy_update", None)
     if callable(post_copy):
         post_copy()
@@ -320,6 +350,15 @@ def _child_qm_result(calc_result) -> Tuple[Optional[QMResult], Optional[str]]:
     return None, f"unexpected child result type: {type(calc_result)}"
 
 
+def _setting_label(value) -> str:
+    if value is None:
+        return ""
+    label = getattr(value, "value", value)
+    if label is None:
+        return ""
+    return str(label)
+
+
 def _append_step_row(
     table: SimpleTable,
     step_name: str,
@@ -327,6 +366,11 @@ def _append_step_row(
     functional: str,
     qm_result: Optional[QMResult],
     node_runner,
+    scf_accuracy: str = "",
+    optimization_accuracy: str = "",
+    grid_type: str = "",
+    wall_time_s=None,
+    cpu_time_s=None,
 ) -> None:
     energy = None if qm_result is None else qm_result.final_energy
     converged = (
@@ -339,13 +383,20 @@ def _append_step_row(
             "step": step_name,
             "basis_set": basis_set,
             "functional": functional,
+            "scf_accuracy": scf_accuracy,
+            "optimization_accuracy": optimization_accuracy,
+            "grid_type": grid_type,
             "energy": energy,
             "optimization_converged": converged,
+            "wall_time_s": wall_time_s,
+            "cpu_time_s": cpu_time_s,
         }
     )
     node_runner.info(
         f"step={step_name} basis_set={basis_set} functional={functional} "
-        f"energy={energy} optimization_converged={converged}"
+        f"scf_accuracy={scf_accuracy} optimization_accuracy={optimization_accuracy} "
+        f"grid_type={grid_type} energy={energy} optimization_converged={converged} "
+        f"wall_time_s={wall_time_s} cpu_time_s={cpu_time_s}"
     )
 
 
@@ -357,8 +408,8 @@ async def multistep_optimizer(
 
     Each DFT step uses the previous step's final geometry. Charge, solvent, and
     other QMInput settings are copied from ``qm_input``; each step overrides
-    basis set, functional, and iteration limits. ``preopt.engine`` selects
-    Psi4 or PySCF.
+    basis set, functional, SCF/optimization accuracy, grid, and iteration limits.
+    ``preopt.engine`` selects Psi4 or PySCF.
 
     Parameters:
         qm_input (QMInput): Molecule and shared QM settings used as the copy template.
@@ -371,7 +422,7 @@ async def multistep_optimizer(
 
     SimstackResult:
         qm_result (QMResult): Result of the last successful step.
-        step_table (SimpleTable): Per-step basis, functional, energy, and convergence.
+        step_table (SimpleTable): Per-step settings, energy, convergence, wall/CPU time, and totals.
     """
     node_runner = kwargs.get("node_runner")
     steps = list(preopt.steps or [])
@@ -387,9 +438,16 @@ async def multistep_optimizer(
     step_table.add_column("step", "string")
     step_table.add_column("basis_set", "string")
     step_table.add_column("functional", "string")
+    step_table.add_column("scf_accuracy", "string")
+    step_table.add_column("optimization_accuracy", "string")
+    step_table.add_column("grid_type", "string")
     step_table.add_column("energy", "number")
     step_table.add_column("optimization_converged", "string")
+    step_table.add_column("wall_time_s", "number")
+    step_table.add_column("cpu_time_s", "number")
     tolerate_failure = bool(getattr(qm_input, "tolerate_failure", False))
+    step_walls = []
+    step_cpus = []
 
     if preopt.dftb_opt:
         if dftb_calculator is None:
@@ -411,6 +469,7 @@ async def multistep_optimizer(
         except Exception as exc:
             error = str(exc)
             qm_result = None
+            calc_result = None
         else:
             qm_result, error = _child_qm_result(calc_result)
         if error:
@@ -423,7 +482,21 @@ async def multistep_optimizer(
             next_mol = _molecule_from_qm_result(qm_result, molecule, node_runner, "dftb")
             if next_mol is not molecule:
                 molecule = await _persist_step_molecule(next_mol, node_runner, "dftb")
-            _append_step_row(step_table, "dftb", "", method, qm_result, node_runner)
+            wall_s, cpu_s = timings_from_child_result(calc_result)
+            if wall_s is not None:
+                step_walls.append(wall_s)
+            if cpu_s is not None:
+                step_cpus.append(cpu_s)
+            _append_step_row(
+                step_table,
+                "dftb",
+                "",
+                method,
+                qm_result,
+                node_runner,
+                wall_time_s=wall_s,
+                cpu_time_s=cpu_s,
+            )
             node_runner.info("DFTB pre-optimization finished")
 
     engine = getattr(preopt, "engine", QMEngine.PSI4)
@@ -434,6 +507,9 @@ async def multistep_optimizer(
         node_runner.info(
             f"Starting {step_name}: basis={basis_name}, functional={functional_name}, "
             f"optimization=True, "
+            f"scf_accuracy={_setting_label(step.scf_accuracy)}, "
+            f"optimization_accuracy={_setting_label(step.optimization_accuracy)}, "
+            f"grid_type={_setting_label(step.grid_type)}, "
             f"max_optimization_iterations={step.max_optimization_iterations}, "
             f"max_scf_iterations={step.max_scf_iterations}"
         )
@@ -443,6 +519,9 @@ async def multistep_optimizer(
             f"{step_name} QMInput: "
             f"max_scf_iterations={current_input.max_scf_iterations}, "
             f"max_optimization_iterations={current_input.max_optimization_iterations}, "
+            f"scf_accuracy={_setting_label(current_input.scf_accuracy)}, "
+            f"optimization_accuracy={_setting_label(current_input.optimization_accuracy)}, "
+            f"grid_type={_setting_label(current_input.grid_type)}, "
             f"non_standard_parameters={current_input.non_standard_parameters}"
         )
         try:
@@ -450,6 +529,7 @@ async def multistep_optimizer(
         except Exception as exc:
             error = str(exc)
             qm_result = None
+            calc_result = None
         else:
             qm_result, error = _child_qm_result(calc_result)
         if error:
@@ -461,13 +541,38 @@ async def multistep_optimizer(
         next_mol = _molecule_from_qm_result(qm_result, molecule, node_runner, step_name)
         if next_mol is not molecule:
             molecule = await _persist_step_molecule(next_mol, node_runner, step_name)
+        wall_s, cpu_s = timings_from_child_result(calc_result)
+        if wall_s is not None:
+            step_walls.append(wall_s)
+        if cpu_s is not None:
+            step_cpus.append(cpu_s)
         _append_step_row(
-            step_table, step_name, basis_name, functional_name, qm_result, node_runner
+            step_table,
+            step_name,
+            basis_name,
+            functional_name,
+            qm_result,
+            node_runner,
+            scf_accuracy=_setting_label(step.scf_accuracy),
+            optimization_accuracy=_setting_label(step.optimization_accuracy),
+            grid_type=_setting_label(step.grid_type),
+            wall_time_s=wall_s,
+            cpu_time_s=cpu_s,
         )
 
     if last_result is None:
         return node_runner.fail("multistep_optimizer produced no QMResult")
 
+    _append_step_row(
+        step_table,
+        "total",
+        "",
+        "",
+        None,
+        node_runner,
+        wall_time_s=sum(step_walls) if step_walls else None,
+        cpu_time_s=sum(step_cpus) if step_cpus else None,
+    )
     node_runner.qm_result = last_result
     node_runner.step_table = step_table
     return node_runner.succeed()
