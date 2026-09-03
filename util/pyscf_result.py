@@ -1,11 +1,12 @@
 import logging
 
-from molecular_qm_models import QMInput, QMResult, Molecule, Atom, MoleculeList, BOHR_TO_ANGSTROM
+from molecular_qm_models import QMInput, QMResult, Molecule, Atom, BOHR_TO_ANGSTROM
 from molecular_qm_psi4.util.frequency_table import (
     attach_vibrational_frequencies,
     infer_linear,
     signed_wavenumber_cm1,
 )
+from molecular_qm_psi4.util.orbital_energies import apply_orbital_energies
 from simstack.core.node_runner import NodeRunner
 
 logger = logging.getLogger(__name__)
@@ -61,8 +62,6 @@ class PySCFResult:
             formula=getattr(source, "formula", None),
         )
         self.qm_result.final_structure = new_molecule
-        if self.qm_input.optimization:
-            self.qm_result.structures = MoleculeList(molecules=[new_molecule])
         self.qm_result.scf_energies = [float(energy)]
         if getattr(self.qm_input, "Dipole", False):
             try:
@@ -80,8 +79,6 @@ class PySCFResult:
         return self.qm_result
 
     def _fill_orbitals(self, mf):
-        import pandas as pd
-
         mo_energy = getattr(mf, "mo_energy", None)
         mo_occ = getattr(mf, "mo_occ", None)
         if mo_energy is None or mo_occ is None:
@@ -89,20 +86,7 @@ class PySCFResult:
         if getattr(mo_energy, "ndim", 1) > 1:
             mo_energy = mo_energy[0]
             mo_occ = mo_occ[0]
-        rows = []
-        for index, (energy, occ) in enumerate(zip(mo_energy, mo_occ), start=1):
-            rows.append(
-                {
-                    "orbital_no": int(index),
-                    "occupation": float(occ),
-                    "energy_hartree": float(energy),
-                    "energy_ev": float(energy) * 27.211386245981,
-                    "orbital_type": "occupied" if float(occ) > 1e-8 else "virtual",
-                }
-            )
-        if not rows:
-            return
-        self.qm_result.set_values_from_orbital_energies_dataframe(pd.DataFrame(rows))
+        apply_orbital_energies(self.qm_result, mo_energy, mo_occ)
 
     def frequency_tables(self, freq_info, node_runner, n_atoms):
         if freq_info is None:

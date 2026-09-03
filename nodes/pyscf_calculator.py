@@ -31,6 +31,8 @@ from molecular_qm_psi4.util.pyscf_calculator import (
     method_name_from_qm_input,
     pyscf_opt_conv_params,
 )
+from molecular_qm_psi4.util.opt_structures import optimization_structure_list
+from molecular_qm_psi4.util.orbital_energies import attach_orbital_energy_outputs
 from molecular_qm_psi4.util.pyscf_result import PySCFResult
 from molecular_qm_psi4.util.pyscf_thermo import run_pyscf_thermo
 from molecular_qm_psi4.util.qm_engine import attach_optimizer_timings, resources_from_parent_parameters
@@ -329,6 +331,7 @@ class OptimizationSnapshotter:
         self.energy_history = []
         self.grad_history = []
         self.timing_history = []
+        self.opt_geometries = []
         self.opt_wall_s = None
         self.opt_cpu_s = None
         self._last_wall_s = None
@@ -457,6 +460,19 @@ class OptimizationSnapshotter:
         self.last_payload = payload
         if _should_snapshot(self.geom_iter, self.interval, self.seen):
             self.seen.add(self.geom_iter)
+            if mol is not None:
+                try:
+                    geometry = PySCFResult.molecule_from_pyscf(
+                        None,
+                        mol,
+                        smiles=getattr(self.source_molecule, "smiles", None),
+                        formula=getattr(self.source_molecule, "formula", None),
+                    )
+                    step = int(self.geom_iter)
+                    if not any(existing == step for existing, _ in self.opt_geometries):
+                        self.opt_geometries.append((step, geometry))
+                except (TypeError, ValueError, AttributeError):
+                    pass
             try:
                 _run_async(
                     _persist_molecule_snapshot(
@@ -676,6 +692,10 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         qm_result (QMResult): Parsed result from the PySCF calculation.
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
             were computed.
+        orbital_energies_table_eV (SimpleTable): Orbital energies in eV.
+        HOMO_value_eV (FloatData): HOMO energy in eV.
+        LUMO_value_eV (FloatData): LUMO energy in eV.
+        HOMO_LUMO_gap_eV (FloatData): HOMO-LUMO gap in eV.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
             Frequency jobs add a separate ``frequencies`` row.
     """
@@ -821,6 +841,12 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             qm_result = pyscf_result.parse_mf(
                 energy, mol, mf, node_runner, optimized=bool(qm_input.optimization)
             )
+            if qm_input.optimization:
+                geometries = [] if snapshotter is None else snapshotter.opt_geometries
+                last_iter = None if snapshotter is None else snapshotter.geom_iter
+                qm_result.structures = optimization_structure_list(
+                    geometries, qm_result.final_structure, last_iter
+                )
             if freq_info:
                 n_atoms = mol.natm if hasattr(mol, "natm") else None
                 pyscf_result.frequency_tables(freq_info, node_runner, n_atoms)
@@ -847,7 +873,7 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
 
             node_runner.info("PySCF calculation finished successfully")
             node_runner.qm_result = qm_result
-            node_runner.pyscf_result = qm_result
+            attach_orbital_energy_outputs(node_runner, qm_result)
             current_name = kwargs.get("custom_name", None)
             if (current_name is None or current_name == "") and qm_input.molecule.formula is not None:
                 node_runner.custom_name = qm_input.molecule.formula

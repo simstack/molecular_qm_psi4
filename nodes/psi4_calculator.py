@@ -32,6 +32,8 @@ from molecular_qm_psi4.util.psi4_calculator import (
     n_atoms_from_molecule,
     python_log_level_for_print_level,
 )
+from molecular_qm_psi4.util.opt_structures import optimization_structure_list
+from molecular_qm_psi4.util.orbital_energies import attach_orbital_energy_outputs
 from molecular_qm_psi4.util.psi4_result import Psi4Result
 from molecular_qm_psi4.util.psi4_thermo import run_manual_thermo
 from molecular_qm_psi4.util.qm_engine import attach_optimizer_timings, resources_from_parent_parameters
@@ -664,6 +666,7 @@ class OptimizationSnapshotter:
         self.energy_history = []
         self.grad_history = []
         self.timing_history = []
+        self.opt_geometries = []
         self.opt_wall_s = None
         self.opt_cpu_s = None
         self._opt_wall_start = None
@@ -1025,6 +1028,19 @@ class OptimizationSnapshotter:
             return
         self.seen.add(iteration)
         try:
+            psi4_mol = _safe_call(wfn.molecule)
+            if psi4_mol is not None:
+                geometry = _molecule_from_psi4_molecule(
+                    psi4_mol,
+                    smiles=getattr(self.source_molecule, "smiles", None),
+                    formula=getattr(self.source_molecule, "formula", None),
+                )
+                step = int(iteration)
+                if not any(existing == step for existing, _ in self.opt_geometries):
+                    self.opt_geometries.append((step, geometry))
+        except (TypeError, ValueError):
+            pass
+        try:
             saved = _run_async(
                 _persist_molecule_snapshot(
                     wfn,
@@ -1382,6 +1398,10 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         qm_result (QMResult): Parsed result from the Psi4 calculation.
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
             were computed.
+        orbital_energies_table_eV (SimpleTable): Orbital energies in eV.
+        HOMO_value_eV (FloatData): HOMO energy in eV.
+        LUMO_value_eV (FloatData): LUMO energy in eV.
+        HOMO_LUMO_gap_eV (FloatData): HOMO-LUMO gap in eV.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
             Frequency jobs add a separate ``frequencies`` row.
     """
@@ -1523,6 +1543,12 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 node_runner.warning(f"Failed to store final MoleculeSnapshot: {e_snap}")
 
             qm_result = psi4_result.parse_wfn(energy, wfn, node_runner=node_runner)
+            if qm_input.optimization:
+                geometries = [] if snapshotter is None else snapshotter.opt_geometries
+                last_iter = None if snapshotter is None else snapshotter.geom_iter
+                qm_result.structures = optimization_structure_list(
+                    geometries, qm_result.final_structure, last_iter
+                )
             if wfn_freq is not None:
                 psi4_result.frequency_tables(wfn_freq, node_runner)
                 thermo_result = psi4_result.calculate_thermo(energy, wfn_freq, node_runner=node_runner)
@@ -1557,7 +1583,7 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
 
             node_runner.info("Psi4 calculation finished successfully")
             node_runner.qm_result = qm_result
-            node_runner.psi4_result = qm_result
+            attach_orbital_energy_outputs(node_runner, qm_result)
 
             current_name = kwargs.get("custom_name", None)
             if current_name is None or current_name == "" and qm_input.molecule.formula is not None:

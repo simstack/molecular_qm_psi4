@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from molecular_qm_models import QMInput, QMResult, Molecule, Atom, BOHR_TO_ANGSTROM, MoleculeList, QMThermoResult
+from molecular_qm_models import QMInput, QMResult, Molecule, Atom, BOHR_TO_ANGSTROM, QMThermoResult
 # from molecular_qm_psi4.nodes.psi4_calculator import psi4, logger
 import logging
 logger = logging.getLogger(__name__)
@@ -10,6 +10,7 @@ from molecular_qm_psi4.util.frequency_table import (
     infer_linear,
     signed_wavenumber_cm1,
 )
+from molecular_qm_psi4.util.orbital_energies import apply_orbital_energies, as_float_list
 from molecular_qm_psi4.util.psi4_thermo import run_manual_thermo
 from simstack.core.node_runner import NodeRunner
 
@@ -54,8 +55,13 @@ class Psi4Result:
                 )
                 new_molecule.add_atom(atom)
             self.qm_result.final_structure = new_molecule
-            if self.qm_input.optimization:
-                self.qm_result.structures = MoleculeList(molecules=[new_molecule])
+
+        try:
+            self._fill_orbitals(wfn)
+        except Exception as exc:
+            logger.warning("Failed to extract Psi4 orbital energies: %s", exc)
+            if node_runner is not None:
+                node_runner.warning(f"Failed to extract Psi4 orbital energies: {exc}")
 
         # Extract dipole if requested
         if self.qm_input.Dipole:
@@ -76,6 +82,27 @@ class Psi4Result:
             return node_runner.fail("Failed to extract SCF energies from Psi4 output.")
 
         return self.qm_result
+
+    def _fill_orbitals(self, wfn):
+        if wfn is None:
+            return
+        getter = getattr(wfn, "epsilon_a", None)
+        energies = as_float_list(getter() if callable(getter) else getter)
+        if not energies:
+            return
+        n_alpha = getattr(wfn, "nalpha", None)
+        n_beta = getattr(wfn, "nbeta", None)
+        n_alpha = int(n_alpha() if callable(n_alpha) else (n_alpha or 0))
+        n_beta = int(n_beta() if callable(n_beta) else (n_beta or 0))
+        occupations = []
+        for index in range(len(energies)):
+            occ = 0.0
+            if index < n_beta:
+                occ += 1.0
+            if index < n_alpha:
+                occ += 1.0
+            occupations.append(occ)
+        apply_orbital_energies(self.qm_result, energies, occupations)
 
     def frequency_tables(self, wfn, node_runner: NodeRunner):
         if wfn is None:

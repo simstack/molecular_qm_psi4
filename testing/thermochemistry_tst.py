@@ -28,10 +28,12 @@ async def thermochemistry_tst():
     parameters = Parameters(resource="local", in_docker=True, force_rerun=True)
     psi4_result = await psi4_calculator(qm_input, parameters=parameters)
 
-    if isinstance(psi4_result, SimstackResult) and hasattr(psi4_result, "psi4_result") and psi4_result.psi4_result is not None:
-        psi4_result = psi4_result.psi4_result
-    else:
-        raise ValueError("psi4_result is not a SimstackResult or does not have a psi4_result attribute")
+    if isinstance(psi4_result, SimstackResult):
+        qm_out = getattr(psi4_result, "qm_result", None) or getattr(psi4_result, "psi4_result", None)
+        if qm_out is not None:
+            psi4_result = qm_out
+        else:
+            raise ValueError("psi4_result is not a SimstackResult or does not have a qm_result attribute")
     temp = FloatData(value=298.15)
     pressure = FloatData(value=1.0)
 

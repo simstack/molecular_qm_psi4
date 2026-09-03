@@ -291,6 +291,31 @@ def test_snapshotter_persists_every_ten_gradient_calls_and_on_failure():
         assert 25 in snap.seen
 
 
+def test_snapshotter_records_opt_geometries_every_ten_steps():
+    from molecular_qm_psi4.nodes import psi4_calculator as mod
+
+    def fake_run_async(coro):
+        coro.close()
+
+    psi4_mol = MagicMock()
+    psi4_mol.natom.return_value = 1
+    psi4_mol.symbol.return_value = "H"
+    psi4_mol.x.return_value = 0.0
+    psi4_mol.y.return_value = 0.0
+    psi4_mol.z.return_value = 1.0
+    wfn = MagicMock()
+    wfn.molecule.return_value = psi4_mol
+    snap = OptimizationSnapshotter(MagicMock(smiles="[H]", formula="H"), {}, interval=10)
+    snap._original_gradient = MagicMock(return_value=(MagicMock(), wfn))
+    with patch.object(mod, "_run_async", side_effect=fake_run_async), patch.object(
+        mod, "_energy_and_grad_norm", return_value=(None, None)
+    ):
+        for _ in range(25):
+            snap._wrapped_gradient("pbe", return_wfn=True)
+    assert [step for step, _ in snap.opt_geometries] == [10, 20]
+    assert snap.opt_geometries[0][1].atoms[0].element == "H"
+
+
 def test_snapshotter_logs_energy_and_gradient_every_step():
     from molecular_qm_psi4.nodes import psi4_calculator as mod
 
