@@ -197,23 +197,27 @@ def _qm_input_for_step(
     qm_input: QMInput,
     step: OptimizationStepInput,
     molecule: Molecule,
+    frequencies: bool,
 ) -> QMInput:
     """Copy QMInput for one Psi4 DFT optimization step, applying step overrides.
 
     Geometry optimization is always enabled, even when the template ``qm_input``
-    has ``optimization=False``.
+    has ``optimization=False``. Frequencies are enabled only when ``frequencies``
+    is True (the last QM step, if the parent input requested them).
 
     ``model_copy`` is used instead of ``from_model`` so odmantic marks every
     field as modified. Nested docker reloads the child ``psi4_calculator``
     input from Mongo; a partial upsert would restore default iteration limits.
     SCF and geometry-optimization iteration limits are always 1000.
     """
+    if not isinstance(frequencies, bool):
+        raise ValueError(f"frequencies must be a bool, got {frequencies!r}")
     copied = qm_input.model_copy(
         deep=True,
         update={
             "id": ObjectId(),
             "optimization": True,
-            "frequencies": False,
+            "frequencies": frequencies,
             "molecule": molecule,
             "basis_set": step.basis_set,
             "functional": step.functional,
@@ -227,7 +231,7 @@ def _qm_input_for_step(
         },
     )
     copied.optimization = True
-    copied.frequencies = False
+    copied.frequencies = frequencies
     copied.field_name = "QMInput"
     copied.non_standard_parameters = True
     copied.molecule = molecule
@@ -371,6 +375,8 @@ def _append_step_row(
     n_iterations=None,
     wall_time_s=None,
     cpu_time_s=None,
+    freq_wall_time_s=None,
+    freq_cpu_time_s=None,
 ) -> None:
     energy = None if qm_result is None else qm_result.final_energy
     table.add_row(
@@ -386,6 +392,8 @@ def _append_step_row(
             "n_iterations": n_iterations,
             "wall_time_s": wall_time_s,
             "cpu_time_s": cpu_time_s,
+            "freq_wall_time_s": freq_wall_time_s,
+            "freq_cpu_time_s": freq_cpu_time_s,
         }
     )
     node_runner.info(
@@ -393,7 +401,8 @@ def _append_step_row(
         f"dispersion_correction={dispersion_correction} "
         f"scf_accuracy={scf_accuracy} optimization_accuracy={optimization_accuracy} "
         f"grid_type={grid_type} energy={energy} n_iterations={n_iterations} "
-        f"wall_time_s={wall_time_s} cpu_time_s={cpu_time_s}"
+        f"wall_time_s={wall_time_s} cpu_time_s={cpu_time_s} "
+        f"freq_wall_time_s={freq_wall_time_s} freq_cpu_time_s={freq_cpu_time_s}"
     )
 
 
@@ -407,6 +416,7 @@ async def multistep_optimizer(
     other QMInput settings are copied from ``qm_input``; each step overrides
     basis set, functional, SCF/optimization accuracy, and grid. SCF and
     geometry-optimization iteration limits are always 1000.
+    Frequencies from ``qm_input`` run only on the last Psi4/PySCF step.
     ``preopt.engine`` selects Psi4 or PySCF.
 
     Parameters:
@@ -420,7 +430,7 @@ async def multistep_optimizer(
 
     SimstackResult:
         qm_result (QMResult): Result of the last successful step.
-        step_table (SimpleTable): Per-step settings (including dispersion), energy, iterations, wall/CPU time, and totals.
+        step_table (SimpleTable): Per-step settings (including dispersion), energy, iterations, optimization wall/CPU time, frequency wall/CPU time, and totals.
     """
     node_runner = kwargs.get("node_runner")
     steps = list(preopt.steps or [])
@@ -444,10 +454,14 @@ async def multistep_optimizer(
     step_table.add_column("n_iterations", "number")
     step_table.add_column("wall_time_s", "number")
     step_table.add_column("cpu_time_s", "number")
+    step_table.add_column("freq_wall_time_s", "number")
+    step_table.add_column("freq_cpu_time_s", "number")
     tolerate_failure = bool(getattr(qm_input, "tolerate_failure", False))
     step_walls = []
     step_cpus = []
     step_iters = []
+    step_freq_walls = []
+    step_freq_cpus = []
 
     if preopt.dftb_opt:
         if dftb_calculator is None:
@@ -482,13 +496,19 @@ async def multistep_optimizer(
             next_mol = _molecule_from_qm_result(qm_result, molecule, node_runner, "dftb")
             if next_mol is not molecule:
                 molecule = await _persist_step_molecule(next_mol, node_runner, "dftb")
-            wall_s, cpu_s, n_iterations = timings_from_child_result(calc_result)
+            wall_s, cpu_s, n_iterations, freq_wall_s, freq_cpu_s = timings_from_child_result(
+                calc_result
+            )
             if wall_s is not None:
                 step_walls.append(wall_s)
             if cpu_s is not None:
                 step_cpus.append(cpu_s)
             if n_iterations is not None:
                 step_iters.append(n_iterations)
+            if freq_wall_s is not None:
+                step_freq_walls.append(freq_wall_s)
+            if freq_cpu_s is not None:
+                step_freq_cpus.append(freq_cpu_s)
             _append_step_row(
                 step_table,
                 "dftb",
@@ -499,6 +519,8 @@ async def multistep_optimizer(
                 n_iterations=n_iterations,
                 wall_time_s=wall_s,
                 cpu_time_s=cpu_s,
+                freq_wall_time_s=freq_wall_s,
+                freq_cpu_time_s=freq_cpu_s,
             )
             node_runner.info("DFTB pre-optimization finished")
 
@@ -508,16 +530,20 @@ async def multistep_optimizer(
         basis_name = step.basis_set.basis_set.value
         functional_name = step.functional.functional.value
         dispersion_name = _setting_label(getattr(step.functional, "dispersion_correction", None))
+        run_frequencies = bool(qm_input.frequencies) and index == len(steps)
         node_runner.info(
             f"Starting {step_name}: basis={basis_name}, functional={functional_name}, "
             f"dispersion_correction={dispersion_name}, "
             f"scf_accuracy={_setting_label(step.scf_accuracy)}, "
             f"optimization_accuracy={_setting_label(step.optimization_accuracy)}, "
             f"grid_type={_setting_label(step.grid_type)}, "
+            f"frequencies={run_frequencies}, "
             f"max_optimization_iterations={_STEP_MAX_ITERATIONS}, "
             f"max_scf_iterations={_STEP_MAX_ITERATIONS}"
         )
-        current_input = _qm_input_for_step(qm_input, step, molecule)
+        current_input = _qm_input_for_step(
+            qm_input, step, molecule, frequencies=run_frequencies
+        )
         current_input = await _persist_qm_input(current_input, node_runner)
         node_runner.info(
             f"{step_name} QMInput: "
@@ -526,6 +552,7 @@ async def multistep_optimizer(
             f"scf_accuracy={_setting_label(current_input.scf_accuracy)}, "
             f"optimization_accuracy={_setting_label(current_input.optimization_accuracy)}, "
             f"grid_type={_setting_label(current_input.grid_type)}, "
+            f"frequencies={current_input.frequencies}, "
             f"non_standard_parameters={current_input.non_standard_parameters}"
         )
         kwargs["custom_name"] = f"{basis_name}/{functional_name}"
@@ -546,13 +573,19 @@ async def multistep_optimizer(
         next_mol = _molecule_from_qm_result(qm_result, molecule, node_runner, step_name)
         if next_mol is not molecule:
             molecule = await _persist_step_molecule(next_mol, node_runner, step_name)
-        wall_s, cpu_s, n_iterations = timings_from_child_result(calc_result)
+        wall_s, cpu_s, n_iterations, freq_wall_s, freq_cpu_s = timings_from_child_result(
+            calc_result
+        )
         if wall_s is not None:
             step_walls.append(wall_s)
         if cpu_s is not None:
             step_cpus.append(cpu_s)
         if n_iterations is not None:
             step_iters.append(n_iterations)
+        if freq_wall_s is not None:
+            step_freq_walls.append(freq_wall_s)
+        if freq_cpu_s is not None:
+            step_freq_cpus.append(freq_cpu_s)
         _append_step_row(
             step_table,
             step_name,
@@ -567,6 +600,8 @@ async def multistep_optimizer(
             n_iterations=n_iterations,
             wall_time_s=wall_s,
             cpu_time_s=cpu_s,
+            freq_wall_time_s=freq_wall_s,
+            freq_cpu_time_s=freq_cpu_s,
         )
 
     if last_result is None:
@@ -582,6 +617,8 @@ async def multistep_optimizer(
         n_iterations=sum(step_iters) if step_iters else None,
         wall_time_s=sum(step_walls) if step_walls else None,
         cpu_time_s=sum(step_cpus) if step_cpus else None,
+        freq_wall_time_s=sum(step_freq_walls) if step_freq_walls else None,
+        freq_cpu_time_s=sum(step_freq_cpus) if step_freq_cpus else None,
     )
     node_runner.qm_result = last_result
     node_runner.step_table = step_table

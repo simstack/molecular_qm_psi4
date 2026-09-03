@@ -565,6 +565,26 @@ def test_optimization_timing_table_has_iteration_and_summary_rows():
     assert by_metric["optimize"]["wall_time_s"] == 7.0
 
 
+def test_optimization_timing_table_includes_frequencies_row():
+    snap = SimpleNamespace(
+        timing_history=[{"step": 1, "wall_time_s": 2.0, "cpu_time_s": 1.5}],
+        opt_wall_s=2.0,
+        opt_cpu_s=1.5,
+    )
+    table = optimization_timing_table(snap, freq_wall_s=4.5, freq_cpu_s=9.0)
+    by_metric = {row["metric"]: row for row in table.row}
+    assert by_metric["optimize"]["wall_time_s"] == 2.0
+    assert by_metric["frequencies"]["wall_time_s"] == 4.5
+    assert by_metric["frequencies"]["cpu_time_s"] == 9.0
+
+
+def test_optimization_timing_table_frequencies_only():
+    table = optimization_timing_table(None, freq_wall_s=4.5, freq_cpu_s=9.0)
+    assert table.row[0]["metric"] == "frequencies"
+    assert table.row[0]["wall_time_s"] == 4.5
+    assert table.row[0]["cpu_time_s"] == 9.0
+
+
 def test_optimization_timing_table_skips_empty_snapshotter():
     assert optimization_timing_table(None) is None
     snap = SimpleNamespace(timing_history=[], opt_wall_s=None, opt_cpu_s=None)
@@ -575,4 +595,9 @@ def test_optimization_timing_table_requires_cpu_when_wall_set():
     snap = SimpleNamespace(timing_history=[], opt_wall_s=1.0, opt_cpu_s=None)
     with pytest.raises(ValueError, match="opt_cpu_s"):
         optimization_timing_table(snap)
+
+
+def test_optimization_timing_table_requires_freq_cpu_when_wall_set():
+    with pytest.raises(ValueError, match="freq_cpu_s"):
+        optimization_timing_table(None, freq_wall_s=1.0)
 

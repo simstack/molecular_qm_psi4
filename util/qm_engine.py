@@ -204,9 +204,15 @@ def _timing_metric_row(table, metric: str):
 
 
 def timings_from_child_result(calc_result) -> tuple:
-    """Return ``(wall_time_s, cpu_time_s, n_iterations)`` from a child timing table."""
+    """Return optimization and frequency timings from a child timing table.
+
+    Values are ``(wall_time_s, cpu_time_s, n_iterations, freq_wall_time_s,
+    freq_cpu_time_s)``. Optimization times come from the ``optimize`` row, or
+    ``total`` if that is missing. Frequency times come from the ``frequencies``
+    row and are never folded into the optimization totals.
+    """
     if calc_result is None:
-        return None, None, None
+        return None, None, None, None, None
     table = getattr(calc_result, "optimization_timing", None) or getattr(
         calc_result, "timing_table", None
     )
@@ -221,16 +227,23 @@ def timings_from_child_result(calc_result) -> tuple:
     )
     if counted:
         n_iterations = counted
-    return wall, cpu, n_iterations
+    freq_row = _timing_metric_row(table, "frequencies")
+    freq_wall = freq_cpu = None
+    if freq_row is not None:
+        freq_wall = _numeric_timing(freq_row.get("wall_time_s"), "freq_wall_time_s")
+        freq_cpu = _numeric_timing(freq_row.get("cpu_time_s"), "freq_cpu_time_s")
+    return wall, cpu, n_iterations, freq_wall, freq_cpu
 
 
-def attach_optimizer_timings(node_runner, snapshotter) -> None:
+def attach_optimizer_timings(node_runner, snapshotter, freq_wall_s=None, freq_cpu_s=None) -> None:
     """Attach the per-iteration optimization timing table to the node result."""
-    if node_runner is None or snapshotter is None:
+    if node_runner is None:
         return
     from molecular_qm_psi4.util.optimization_timing import optimization_timing_table
 
-    table = optimization_timing_table(snapshotter)
+    table = optimization_timing_table(
+        snapshotter, freq_wall_s=freq_wall_s, freq_cpu_s=freq_cpu_s
+    )
     if table is None:
         return
     node_runner.optimization_timing = table
@@ -240,6 +253,14 @@ def attach_optimizer_timings(node_runner, snapshotter) -> None:
     cpu = None if chosen is None else chosen.get("cpu_time_s")
     wall_text = "n/a" if wall is None else f"{float(wall):.2f}s"
     cpu_text = "n/a" if cpu is None else f"{float(cpu):.2f}s"
-    node_runner.info(
-        f"Optimization timings: n_steps={n_steps}, wall={wall_text}, cpu={cpu_text}"
-    )
+    message = f"Optimization timings: n_steps={n_steps}, wall={wall_text}, cpu={cpu_text}"
+    freq_row = _timing_metric_row(table, "frequencies")
+    if freq_row is not None:
+        freq_wall = freq_row.get("wall_time_s")
+        freq_cpu = freq_row.get("cpu_time_s")
+        freq_wall_text = "n/a" if freq_wall is None else f"{float(freq_wall):.2f}s"
+        freq_cpu_text = "n/a" if freq_cpu is None else f"{float(freq_cpu):.2f}s"
+        message = (
+            f"{message}; frequencies wall={freq_wall_text}, cpu={freq_cpu_text}"
+        )
+    node_runner.info(message)

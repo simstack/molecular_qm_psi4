@@ -3,7 +3,7 @@
 # so dependency packages are resolved from git via [tool.uv.sources].
 [project]
 name = "molecular_qm_psi4"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Psi4 capabilities for molecular quantum mechanics within the Simstack framework"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -22,8 +22,20 @@ dependencies = [
 molecular_qm_psi4 = "molecular_qm_psi4"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.1.0"
+
+[tool.hatch.version.raw-options]
+version_scheme = "guess-next-dev"
+local_scheme = "no-local-version"
+fallback_version = "0.1.0"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "_version.py"
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -34,6 +46,7 @@ bypass-selection = true
 
 [tool.hatch.build.targets.wheel.force-include]
 "__init__.py" = "molecular_qm_psi4/__init__.py"
+"_version.py" = "molecular_qm_psi4/_version.py"
 "nodes" = "molecular_qm_psi4/nodes"
 "models" = "molecular_qm_psi4/models"
 "util" = "molecular_qm_psi4/util"

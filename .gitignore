@@ -74,6 +74,9 @@ Thumbs.db
 *.tmp
 .output.txt
 
+# hatch-vcs (generated; do not commit)
+_version.py
+
 # Nested clones for local editing — the image installs these from git
 molecular_qm_models/
 molecular_qm_util/

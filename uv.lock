@@ -113,7 +113,6 @@ dependencies = [
 
 [[package]]
 name = "molecular-qm-psi4"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "molecular-qm-dftb" },

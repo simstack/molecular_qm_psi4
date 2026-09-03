@@ -154,7 +154,7 @@ def test_qm_input_for_step_forces_optimization_true():
         grid_type=GridType.Grid4,
     )
     other = _water()
-    copied = _qm_input_for_step(source, step, other)
+    copied = _qm_input_for_step(source, step, other, frequencies=False)
 
     assert copied is not source
     assert copied.optimization is True
@@ -175,6 +175,20 @@ def test_qm_input_for_step_forces_optimization_true():
     assert "optimization_accuracy" in copied.__fields_modified__
     assert "grid_type" in copied.__fields_modified__
     assert "non_standard_parameters" in copied.__fields_modified__
+    assert "frequencies" in copied.__fields_modified__
+
+
+def test_qm_input_for_step_enables_frequencies_when_requested():
+    source = _source_qm_input(_water())
+    copied = _qm_input_for_step(source, _sto3g_step(), source.molecule, frequencies=True)
+    assert copied.frequencies is True
+    assert "frequencies" in copied.__fields_modified__
+
+
+def test_qm_input_for_step_rejects_non_bool_frequencies():
+    source = _source_qm_input(_water())
+    with pytest.raises(ValueError, match="frequencies"):
+        _qm_input_for_step(source, _sto3g_step(), source.molecule, frequencies=None)
 
 
 def _sto3g_step():
@@ -225,7 +239,9 @@ def test_molecule_from_qm_result_propagates_dftb_coords_into_psi4_input():
     qm_result = QMResult(final_structure=optimized, final_energy=-4.2)
 
     next_mol = _molecule_from_qm_result(qm_result, original, node_runner, "dftb")
-    copied = _qm_input_for_step(_source_qm_input(original), _sto3g_step(), next_mol)
+    copied = _qm_input_for_step(
+        _source_qm_input(original), _sto3g_step(), next_mol, frequencies=False
+    )
 
     assert next_mol is not original
     assert next_mol.atoms[0].x == pytest.approx(0.1)
@@ -264,7 +280,9 @@ async def test_persist_step_molecule_saves_for_qm_input_reference():
 @pytest.mark.asyncio
 async def test_persist_qm_input_saves_copied_iteration_limits():
     molecule = _water()
-    copied = _qm_input_for_step(_source_qm_input(molecule), _sto3g_step(), molecule)
+    copied = _qm_input_for_step(
+        _source_qm_input(molecule), _sto3g_step(), molecule, frequencies=False
+    )
     node_runner = MagicMock()
     db = MagicMock()
     db.save = AsyncMock(return_value=copied)
@@ -276,8 +294,10 @@ async def test_persist_qm_input_saves_copied_iteration_limits():
     node_runner.warning.assert_not_called()
     assert copied.max_scf_iterations == 1000
     assert copied.max_optimization_iterations == 1000
+    assert copied.frequencies is False
     assert "max_scf_iterations" in copied.__fields_modified__
     assert "max_optimization_iterations" in copied.__fields_modified__
+    assert "frequencies" in copied.__fields_modified__
 
 
 @pytest.mark.asyncio
@@ -326,6 +346,8 @@ def test_append_step_row_records_settings_and_timings():
     table.add_column("n_iterations", "number")
     table.add_column("wall_time_s", "number")
     table.add_column("cpu_time_s", "number")
+    table.add_column("freq_wall_time_s", "number")
+    table.add_column("freq_cpu_time_s", "number")
     node_runner = MagicMock()
     _append_step_row(
         table,
@@ -356,6 +378,8 @@ def test_append_step_row_records_settings_and_timings():
         n_iterations=12,
         wall_time_s=30.0,
         cpu_time_s=80.0,
+        freq_wall_time_s=9.5,
+        freq_cpu_time_s=22.0,
     )
     _append_step_row(
         table,
@@ -367,19 +391,26 @@ def test_append_step_row_records_settings_and_timings():
         n_iterations=20,
         wall_time_s=42.5,
         cpu_time_s=120.0,
+        freq_wall_time_s=9.5,
+        freq_cpu_time_s=22.0,
     )
     assert table.row[0]["scf_accuracy"] == "Loose"
     assert table.row[0]["dispersion_correction"] == "NONE"
     assert table.row[0]["grid_type"] == "Grid1"
     assert table.row[0]["n_iterations"] == 8
     assert table.row[0]["wall_time_s"] == 12.5
+    assert table.row[0]["freq_wall_time_s"] is None
     assert "optimization_converged" not in table.row[0]
     assert table.row[1]["dispersion_correction"] == "D3BJ"
+    assert table.row[1]["freq_wall_time_s"] == 9.5
+    assert table.row[1]["freq_cpu_time_s"] == 22.0
     assert table.row[-1]["step"] == "total"
     assert table.row[-1]["dispersion_correction"] == ""
     assert table.row[-1]["n_iterations"] == 20
     assert table.row[-1]["wall_time_s"] == 42.5
     assert table.row[-1]["cpu_time_s"] == 120.0
+    assert table.row[-1]["freq_wall_time_s"] == 9.5
+    assert table.row[-1]["freq_cpu_time_s"] == 22.0
 
 
 def test_timings_from_child_result_reads_optimization_timing_table():
@@ -388,12 +419,15 @@ def test_timings_from_child_result_reads_optimization_timing_table():
     table.add_row({"metric": "iteration", "step": 2, "wall_time_s": 1.5, "cpu_time_s": 3.0})
     table.add_row({"metric": "total", "step": None, "wall_time_s": 3.5, "cpu_time_s": 4.0})
     table.add_row({"metric": "optimize", "step": None, "wall_time_s": 5.0, "cpu_time_s": 6.0})
+    table.add_row({"metric": "frequencies", "step": None, "wall_time_s": 8.0, "cpu_time_s": 9.0})
     result = SimpleNamespace(optimization_timing=table)
-    wall, cpu, n_iterations = timings_from_child_result(result)
+    wall, cpu, n_iterations, freq_wall, freq_cpu = timings_from_child_result(result)
     assert wall == 5.0
     assert cpu == 6.0
     assert n_iterations == 2
-    assert timings_from_child_result(None) == (None, None, None)
+    assert freq_wall == 8.0
+    assert freq_cpu == 9.0
+    assert timings_from_child_result(None) == (None, None, None, None, None)
 
 
 def test_attach_optimizer_timings_copies_iteration_table():
@@ -407,11 +441,15 @@ def test_attach_optimizer_timings_copies_iteration_table():
             {"step": 2, "wall_time_s": 5.5, "cpu_time_s": 15.25},
         ],
     )
-    attach_optimizer_timings(node_runner, snapshotter)
+    attach_optimizer_timings(node_runner, snapshotter, freq_wall_s=3.25, freq_cpu_s=8.5)
     assert not hasattr(node_runner, "wall_time_s")
     assert not hasattr(node_runner, "cpu_time_s")
     assert node_runner.optimization_timing.row[0]["step"] == 1
     assert node_runner.optimization_timing.row[1]["cpu_time_s"] == 15.25
+    by_metric = {row["metric"]: row for row in node_runner.optimization_timing.row}
+    assert by_metric["frequencies"]["wall_time_s"] == 3.25
+    assert by_metric["frequencies"]["cpu_time_s"] == 8.5
     node_runner.info.assert_called()
     assert "n_steps=2" in node_runner.info.call_args[0][0]
     assert "wall=15.50s" in node_runner.info.call_args[0][0]
+    assert "frequencies wall=3.25s" in node_runner.info.call_args[0][0]

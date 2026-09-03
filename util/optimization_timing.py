@@ -1,13 +1,18 @@
 from simstack.models.simple_table import SimpleTable, SimpleTableColumnType
 
 
-def optimization_timing_table(snapshotter):
+def optimization_timing_table(snapshotter, freq_wall_s=None, freq_cpu_s=None):
+    if freq_wall_s is not None and freq_cpu_s is None:
+        raise ValueError("freq_cpu_s is required when freq_wall_s is set")
     if snapshotter is None:
-        return None
-    history = snapshotter.timing_history
-    opt_wall_s = snapshotter.opt_wall_s
-    opt_cpu_s = snapshotter.opt_cpu_s
-    if not history and opt_wall_s is None:
+        history = []
+        opt_wall_s = None
+        opt_cpu_s = None
+    else:
+        history = snapshotter.timing_history
+        opt_wall_s = snapshotter.opt_wall_s
+        opt_cpu_s = snapshotter.opt_cpu_s
+    if not history and opt_wall_s is None and freq_wall_s is None:
         return None
     if opt_wall_s is not None and opt_cpu_s is None:
         raise ValueError("opt_cpu_s is required when opt_wall_s is set")
@@ -79,6 +84,15 @@ def optimization_timing_table(snapshotter):
                 "step": None,
                 "wall_time_s": float(opt_wall_s),
                 "cpu_time_s": float(opt_cpu_s),
+            }
+        )
+    if freq_wall_s is not None:
+        table.add_row(
+            {
+                "metric": "frequencies",
+                "step": None,
+                "wall_time_s": float(freq_wall_s),
+                "cpu_time_s": float(freq_cpu_s),
             }
         )
     return table

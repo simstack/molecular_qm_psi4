@@ -677,6 +677,7 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
             were computed.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
+            Frequency jobs add a separate ``frequencies`` row.
     """
     node_runner = kwargs.get("node_runner")
     memory, num_threads, resource_log = resources_from_parent_parameters(kwargs, label="PySCF")
@@ -760,17 +761,33 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 energy = mf.kernel()
                 if qm_input.frequencies:
                     node_runner.log("Optimization finished, starting frequency calculation...")
+                    freq_wall_start = time.monotonic()
+                    freq_cpu_start = time.process_time()
                     hessian = mf.Hessian().kernel()
                     from pyscf.hessian import thermo as pyscf_thermo
 
                     freq_info = pyscf_thermo.harmonic_analysis(mol, hessian)
+                    attach_optimizer_timings(
+                        node_runner,
+                        snapshotter,
+                        freq_wall_s=time.monotonic() - freq_wall_start,
+                        freq_cpu_s=time.process_time() - freq_cpu_start,
+                    )
                     node_runner.log("Frequency calculation finished")
             elif qm_input.frequencies:
                 energy = mf.kernel()
+                freq_wall_start = time.monotonic()
+                freq_cpu_start = time.process_time()
                 hessian = mf.Hessian().kernel()
                 from pyscf.hessian import thermo as pyscf_thermo
 
                 freq_info = pyscf_thermo.harmonic_analysis(mol, hessian)
+                attach_optimizer_timings(
+                    node_runner,
+                    snapshotter,
+                    freq_wall_s=time.monotonic() - freq_wall_start,
+                    freq_cpu_s=time.process_time() - freq_cpu_start,
+                )
             else:
                 post = calculator.post_scf_method(mf)
                 if post is mf:

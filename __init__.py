@@ -50,6 +50,11 @@ from molecular_qm_psi4.testing import (
     TSSearchParameters,
 )
 
+try:
+    from ._version import __version__
+except ImportError:  # pragma: no cover
+    __version__ = "0.0.0"
+
 __all__ = [
     "psi4_calculator",
     "pyscf_calculator",
@@ -90,4 +95,5 @@ __all__ = [
     "RingConformerClassifier",
     "ts_search",
     "TSSearchParameters",
+    "__version__",
 ]

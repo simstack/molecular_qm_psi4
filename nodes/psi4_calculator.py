@@ -1383,6 +1383,7 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
             were computed.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
+            Frequency jobs add a separate ``frequencies`` row.
     """
     node_runner = kwargs.get("node_runner")
 
@@ -1467,7 +1468,15 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 orbital_payload = _payload_from_wfn_or_reference(wfn)
                 if qm_input.frequencies:
                     node_runner.log("Optimization finished, starting frequency calculation...")
+                    freq_wall_start = time.monotonic()
+                    freq_cpu_start = time.process_time()
                     energy, wfn_freq = psi4.frequency(method, return_wfn=True, molecule=wfn.molecule(), ref_wfn=wfn)
+                    attach_optimizer_timings(
+                        node_runner,
+                        snapshotter,
+                        freq_wall_s=time.monotonic() - freq_wall_start,
+                        freq_cpu_s=time.process_time() - freq_cpu_start,
+                    )
                     node_runner.log("Frequency calculation finished")
             elif qm_input.frequencies:
                 snapshotter = None
@@ -1477,7 +1486,15 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                     wfn = restart_wfn
                     energy = wfn.energy()
                 else:
+                    freq_wall_start = time.monotonic()
+                    freq_cpu_start = time.process_time()
                     energy, wfn_freq = psi4.frequency(method, return_wfn=True, ref_wfn=restart_wfn)
+                    attach_optimizer_timings(
+                        node_runner,
+                        snapshotter,
+                        freq_wall_s=time.monotonic() - freq_wall_start,
+                        freq_cpu_s=time.process_time() - freq_cpu_start,
+                    )
                     wfn = wfn_freq
             else:
                 snapshotter = None
