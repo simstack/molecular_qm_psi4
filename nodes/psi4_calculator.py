@@ -63,6 +63,8 @@ _SNAPSHOT_INTERVAL = 10
 _OPT_CHART_STEPS = 20
 _SNAPSHOT_WFN_NAME = "snapshot.wfn.npy"
 _WATCHDOG_SIDECAR = "optimization_watchdog_timeout.txt"
+_FINDIF_BANNER = "Using finite-differences of gradients to determine vibrational frequencies"
+_FINAL_OPT_GEOM = "Final optimized geometry and variables"
 
 
 def _safe_call(fn, default=None):
@@ -285,6 +287,259 @@ def _cleanup_snapshot_files(directory: Path | None = None):
             continue
         except Exception as exc:
             logger.warning("Failed to delete snapshot file %s: %s", file_path, exc)
+
+
+def psi4_out_progress(text: str) -> dict:
+    """Summarize optimization / FINDIF progress from a psi4.out transcript."""
+    if text is None:
+        raise ValueError("psi4.out text is required")
+    last_opt = None
+    findif_at = None
+    n_salcs = None
+    n_atoms = None
+    point_formula = None
+    last_stopped = None
+    last_tstop = None
+    scf_failed = False
+    final_opt_geom = False
+    n_scf_converged = 0
+    n_scf_after_findif = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        opt = parse_optking_step_line(line)
+        if opt is not None:
+            last_opt = {
+                "step": int(opt.group(1)),
+                "energy": float(opt.group(2)),
+                "delta_e": float(opt.group(3)),
+                "max_force": float(opt.group(4)),
+                "rms_force": float(opt.group(5)),
+                "max_disp": float(opt.group(6)),
+                "rms_disp": float(opt.group(7)),
+            }
+        if _FINDIF_BANNER in line:
+            findif_at = True
+        if stripped.startswith("Number of SALCs is"):
+            n_salcs = int(stripped.rsplit(None, 1)[-1].rstrip("."))
+        if stripped.startswith("Number of atoms is"):
+            n_atoms = int(stripped.rsplit(None, 1)[-1].rstrip("."))
+        if "Generating geometries for use with" in stripped and "point formula" in stripped:
+            match = re.search(r"(\d+)-point formula", stripped)
+            if match:
+                point_formula = int(match.group(1))
+        if stripped.startswith("Psi4 stopped on:"):
+            last_stopped = stripped.split(":", 1)[1].strip()
+        if "*** tstop() called" in stripped:
+            at = stripped.find(" at ")
+            if at >= 0:
+                last_tstop = stripped[at + 4 :].strip()
+        if "Could not converge" in stripped or "Fatal Error" in stripped:
+            scf_failed = True
+        if _FINAL_OPT_GEOM in stripped:
+            final_opt_geom = True
+        if "Energy and wave function converged" in stripped:
+            n_scf_converged += 1
+            if findif_at:
+                n_scf_after_findif += 1
+    expected_displacements = None
+    if findif_at and n_salcs is not None and point_formula == 3:
+        expected_displacements = 2 * n_salcs
+    elif findif_at and n_salcs is not None and point_formula == 2:
+        expected_displacements = n_salcs
+    return {
+        "last_opt": last_opt,
+        "findif": bool(findif_at),
+        "n_salcs": n_salcs,
+        "n_atoms": n_atoms,
+        "point_formula": point_formula,
+        "last_stopped": last_stopped,
+        "last_tstop": last_tstop,
+        "scf_failed": scf_failed,
+        "final_opt_geom": final_opt_geom,
+        "n_scf_converged": n_scf_converged,
+        "n_scf_after_findif": n_scf_after_findif,
+        "expected_displacements": expected_displacements,
+    }
+
+
+def _artifact_names(node_runner) -> set:
+    names = set()
+    if node_runner is None:
+        return names
+    for fs in list(getattr(node_runner, "files", []) or []) + list(
+        getattr(node_runner, "info_files", []) or []
+    ):
+        name = getattr(fs, "name", None)
+        if name:
+            names.add(name)
+    return names
+
+
+def _append_artifact_file(node_runner, path: Path, *, in_memory: bool):
+    if node_runner is None:
+        return
+    path = Path(path)
+    if not path.is_file():
+        return
+    if path.name in _artifact_names(node_runner):
+        return
+    task_id = getattr(node_runner, "task_id", "") or ""
+    fs = FileStack.from_local_file(
+        path,
+        in_memory=in_memory,
+        is_hashable=True,
+        secure_source=True,
+        task_id=task_id,
+    )
+    node_runner.files.append(fs)
+    node_runner.info_files.append(fs)
+    node_runner.info(f"Added {path.name} to results (in_memory={in_memory})")
+
+
+def _attach_psi4_result_files(node_runner, psi4_result):
+    if node_runner is None or psi4_result is None:
+        return
+    output_path = getattr(psi4_result, "output_path", None)
+    if output_path is not None:
+        _append_artifact_file(node_runner, Path(output_path), in_memory=False)
+    log_path = getattr(psi4_result, "log_path", None)
+    if log_path is not None and Path(log_path).is_file():
+        if Path(log_path).name not in _artifact_names(node_runner):
+            task_id = getattr(node_runner, "task_id", "") or ""
+            log_fs = FileStack.from_local_file(
+                Path(log_path),
+                in_memory=False,
+                is_hashable=True,
+                secure_source=True,
+                task_id=task_id,
+            )
+            node_runner.info_files.append(log_fs)
+            node_runner.info(f"Psi4 log file: {log_path}")
+    _append_artifact_file(node_runner, Path(_SNAPSHOT_WFN_NAME), in_memory=False)
+
+
+def _log_energy_gradient_summary(node_runner, snapshotter, output_path: Path | None):
+    if node_runner is None:
+        return
+    node_runner.log("Psi4 run summary")
+    if snapshotter is not None and snapshotter.energy_history:
+        node_runner.log(
+            f"Optimization steps recorded: {len(snapshotter.energy_history)} "
+            f"(geom_iter={snapshotter.geom_iter})"
+        )
+        for energy_row, grad_row in zip(
+            snapshotter.energy_history, snapshotter.grad_history
+        ):
+            stamp = energy_row.get("timestamp") or ""
+            step = energy_row.get("step")
+            energy = energy_row.get("energy")
+            grad_norm = grad_row.get("grad_norm") if grad_row else None
+            stamp_bit = f"{stamp} " if stamp else ""
+            energy_bit = f"{float(energy):.12f} Ha" if energy is not None else "unavailable"
+            grad_bit = (
+                f"{float(grad_norm):.6e} Ha/Bohr" if grad_norm is not None else "unavailable"
+            )
+            node_runner.log(
+                f"{stamp_bit}step {step}: energy={energy_bit}, |g|={grad_bit}"
+            )
+    elif snapshotter is not None:
+        node_runner.log(
+            f"No optimization energy/gradient history (geom_iter={snapshotter.geom_iter})"
+        )
+    if output_path is None or not Path(output_path).is_file():
+        node_runner.log("psi4.out not found; cannot summarize FINDIF/timestamps")
+        return
+    progress = psi4_out_progress(Path(output_path).read_text(encoding="utf-8", errors="replace"))
+    if progress["final_opt_geom"]:
+        node_runner.log("Optimization printed a final geometry")
+    last_opt = progress["last_opt"]
+    if last_opt is not None:
+        node_runner.log(
+            f"Last OptKing step {last_opt['step']}: E={last_opt['energy']:.12f} Ha "
+            f"DE={last_opt['delta_e']:.3e} MaxF={last_opt['max_force']:.3e} "
+            f"MaxD={last_opt['max_disp']:.3e}"
+        )
+    if progress["findif"]:
+        done = progress["n_scf_after_findif"]
+        expected = progress["expected_displacements"]
+        expected_bit = f"/{expected}" if expected is not None else ""
+        extras = []
+        if progress["point_formula"] is not None:
+            extras.append(f"{progress['point_formula']}-point")
+        if progress["n_salcs"] is not None:
+            extras.append(f"{progress['n_salcs']} SALCs")
+        extra_bit = f" ({', '.join(extras)})" if extras else ""
+        atoms_bit = ""
+        if progress["n_atoms"] is not None:
+            atoms_bit = f", n_atoms={progress['n_atoms']}"
+        node_runner.log(
+            f"FINDIF frequencies: {done}{expected_bit} displacement SCF+gradient "
+            f"evaluations{extra_bit}{atoms_bit}"
+        )
+    if progress["last_tstop"]:
+        node_runner.log(f"Last Psi4 tstop: {progress['last_tstop']}")
+    if progress["last_stopped"]:
+        node_runner.log(f"Last Psi4 stopped on: {progress['last_stopped']}")
+    if progress["scf_failed"]:
+        node_runner.log("psi4.out contains an SCF/Fatal Error marker")
+
+
+def _meaningful_psi4_error(exc: BaseException, snapshotter, output_path: Path | None) -> str:
+    if exc is None:
+        raise ValueError("exception is required")
+    progress = None
+    if output_path is not None and Path(output_path).is_file():
+        progress = psi4_out_progress(
+            Path(output_path).read_text(encoding="utf-8", errors="replace")
+        )
+    if progress is not None and progress["findif"]:
+        phase = "frequencies"
+    elif snapshotter is not None and snapshotter.geom_iter:
+        phase = f"geometry optimization (step {snapshotter.geom_iter})"
+    else:
+        phase = "Psi4 calculation"
+    parts = [f"Psi4 failed during {phase}: {type(exc).__name__}: {exc}"]
+    if snapshotter is not None and snapshotter.energy_history:
+        last_e = snapshotter.energy_history[-1]
+        last_g = snapshotter.grad_history[-1] if snapshotter.grad_history else None
+        stamp = last_e.get("timestamp") or ""
+        stamp_bit = f" at {stamp}" if stamp else ""
+        energy = last_e.get("energy")
+        grad_norm = last_g.get("grad_norm") if last_g else None
+        energy_bit = f"{float(energy):.12f} Ha" if energy is not None else "unavailable"
+        grad_bit = (
+            f"{float(grad_norm):.6e} Ha/Bohr" if grad_norm is not None else "unavailable"
+        )
+        parts.append(
+            f"Last recorded optimization step {last_e.get('step')}: "
+            f"energy={energy_bit}, |g|={grad_bit}{stamp_bit}."
+        )
+    if progress is not None:
+        if progress["findif"]:
+            done = progress["n_scf_after_findif"]
+            expected = progress["expected_displacements"]
+            expected_bit = f"/{expected}" if expected is not None else ""
+            detail = (
+                f"FINDIF had completed {done}{expected_bit} displacement evaluations"
+            )
+            extras = []
+            if progress["point_formula"] is not None:
+                extras.append(f"{progress['point_formula']}-point")
+            if progress["n_salcs"] is not None:
+                extras.append(f"{progress['n_salcs']} SALCs")
+            if extras:
+                detail += f" ({', '.join(extras)})"
+            parts.append(detail + ".")
+        if progress["last_stopped"]:
+            parts.append(f"Last Psi4 timestamp: {progress['last_stopped']}.")
+        if progress["scf_failed"]:
+            parts.append("psi4.out reports an SCF or fatal error.")
+    sidecar = Path(_WATCHDOG_SIDECAR)
+    if sidecar.is_file():
+        watchdog = sidecar.read_text(encoding="utf-8", errors="replace").strip()
+        if watchdog:
+            parts.append(watchdog)
+    return " ".join(parts)
 
 
 def _is_wavefunction_artifact(name: str) -> bool:
@@ -947,6 +1202,7 @@ class OptimizationSnapshotter:
         msg = f"{msg}, wall={float(wall_s):.2f}s, cpu={float(cpu_s):.2f}s"
         node_runner = self._node_runner()
         if node_runner is not None:
+            node_runner.log(msg)
             node_runner.info(msg)
         else:
             logger.info(msg)
@@ -1129,6 +1385,7 @@ class OptKingStepReporter:
         self._seen_steps.add(step)
         msg = format_optking_step_line(match)
         try:
+            self.node_runner.log(msg)
             self.node_runner.info(msg)
         except Exception:
             logger.info(msg)
@@ -1399,6 +1656,8 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             were computed.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
             Frequency jobs add a separate ``frequencies`` row.
+        files: result.wfn.npy on success; psi4.out and snapshot.wfn.npy are always
+            attached (including on failure). Wavefunction FileStacks are not in_memory.
     """
     node_runner = kwargs.get("node_runner")
 
@@ -1588,28 +1847,30 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
 
     except Exception as e:
         logger.error(f"Psi4 calculation failed: {str(e)}")
-        if qm_input.tolerate_failure:
-            node_runner.warning(f"Psi4 failed but failure is tolerated: {str(e)}")
-            return node_runner.succeed()
-        return node_runner.fail(f"Psi4 execution failed: {str(e)}")
-    finally:
-        if psi4 is not None:
-            psi4.core.clean()
+        output_path = getattr(psi4_result, "output_path", None)
         try:
-            if psi4_result.log_path.exists():
-                psi4_log_fs = FileStack.from_local_file(
-                    psi4_result.log_path, in_memory=True, is_hashable=True, secure_source=True
-                )
-                node_runner.info_files.append(psi4_log_fs)
-                node_runner.info(f"Psi4 log file: {psi4_result.log_path}")
-            if psi4_result.output_path.exists():
-                psi4_output_fs = FileStack.from_local_file(
-                    psi4_result.output_path, in_memory=True, is_hashable=True, secure_source=True
-                )
-                node_runner.info_files.append(psi4_output_fs)
-                node_runner.info(f"Psi4 output file: {psi4_result.output_path}")
+            _log_energy_gradient_summary(node_runner, snapshotter, output_path)
+        except Exception as e_summary:
+            node_runner.warning(f"Failed to write Psi4 run summary: {e_summary}")
+        error_message = _meaningful_psi4_error(e, snapshotter, output_path)
+        node_runner.log(error_message)
+        node_runner.error(error_message)
+        if qm_input.tolerate_failure:
+            node_runner.warning(f"Psi4 failed but failure is tolerated: {error_message}")
+            return node_runner.succeed()
+        return node_runner.fail(error_message)
+    finally:
+        try:
+            if psi4 is not None:
+                psi4.core.clean()
+        except Exception as e_clean:
+            if node_runner is not None:
+                node_runner.warning(f"psi4.core.clean() failed: {e_clean}")
+        try:
+            _attach_psi4_result_files(node_runner, psi4_result)
         except Exception as e_files:
-            node_runner.warning(f"Failed to collect Psi4 log/output files: {e_files}")
+            if node_runner is not None:
+                node_runner.warning(f"Failed to collect Psi4 log/output/snapshot files: {e_files}")
 
 
 

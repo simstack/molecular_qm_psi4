@@ -1,6 +1,7 @@
 import logging
 import re
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -9,8 +10,13 @@ import pytest
 from molecular_qm_psi4.nodes.psi4_calculator import (
     OptimizationSnapshotter,
     OptKingStepReporter,
+    _append_artifact_file,
+    _attach_psi4_result_files,
+    _log_energy_gradient_summary,
+    _meaningful_psi4_error,
     _should_snapshot,
     parse_optking_step_line,
+    psi4_out_progress,
     redirect_psi4_logs,
 )
 from molecular_qm_psi4.util.optimization_timing import optimization_timing_table
@@ -341,6 +347,8 @@ def test_snapshotter_logs_energy_and_gradient_every_step():
     assert "Optimization step 1: energy=-76.500000000000 Ha, |g|=1.200000e-01 Ha/Bohr" in step_logs[0]
     assert "Optimization step 2: energy=-76.510000000000 Ha, |g|=8.000000e-02 Ha/Bohr" in step_logs[1]
     assert "Optimization step 3: energy=-76.520000000000 Ha, |g|=3.000000e-02 Ha/Bohr" in step_logs[2]
+    logged = [call.args[0] for call in node_runner.log.call_args_list]
+    assert step_logs == [msg for msg in logged if "Optimization step " in msg]
 
 
 def test_snapshotter_ignores_stuck_psi4_iteration_variable():
@@ -625,4 +633,158 @@ def test_optimization_timing_table_requires_cpu_when_wall_set():
 def test_optimization_timing_table_requires_freq_cpu_when_wall_set():
     with pytest.raises(ValueError, match="freq_cpu_s"):
         optimization_timing_table(None, freq_wall_s=1.0)
+
+
+_FINDIF_OUT = """
+            21   -1419.44461629   -2.88e-06      2.94e-04 *    8.02e-05 o    6.76e-04 *    2.07e-04 o  ~
+
+    Final optimized geometry and variables:
+
+         ----------------------------------------------------------
+                                   FINDIF
+  Using finite-differences of gradients to determine vibrational frequencies and
+  normal modes. Resulting frequencies are only valid at stationary points.
+    Generating geometries for use with 3-point formula.
+    Number of atoms is 60.
+    Number of SALCs is 177.
+  Energy and wave function converged.
+  Energy and wave function converged.
+*** tstop() called on 38fa327efd19 at Wed Sep  2 02:29:21 2026
+    Psi4 stopped on: Wednesday, 02 September 2026 02:29AM
+"""
+
+
+def test_psi4_out_progress_rejects_none():
+    with pytest.raises(ValueError, match="psi4.out text is required"):
+        psi4_out_progress(None)
+
+
+def test_psi4_out_progress_findif_after_optimization():
+    progress = psi4_out_progress(_FINDIF_OUT)
+    assert progress["findif"] is True
+    assert progress["final_opt_geom"] is True
+    assert progress["last_opt"]["step"] == 21
+    assert progress["last_opt"]["energy"] == pytest.approx(-1419.44461629)
+    assert progress["n_atoms"] == 60
+    assert progress["n_salcs"] == 177
+    assert progress["point_formula"] == 3
+    assert progress["expected_displacements"] == 354
+    assert progress["n_scf_after_findif"] == 2
+    assert progress["last_stopped"] == "Wednesday, 02 September 2026 02:29AM"
+    assert "02:29:21" in progress["last_tstop"]
+
+
+def test_meaningful_error_reports_frequency_phase_and_last_step(tmp_path):
+    out = tmp_path / "psi4.out"
+    out.write_text(_FINDIF_OUT, encoding="utf-8")
+    snapshotter = SimpleNamespace(
+        geom_iter=21,
+        energy_history=[
+            {
+                "step": 21,
+                "energy": -1419.44461629,
+                "timestamp": "2026-09-01 19:48:32",
+            }
+        ],
+        grad_history=[
+            {
+                "step": 21,
+                "grad_norm": 2.94e-4,
+                "timestamp": "2026-09-01 19:48:32",
+            }
+        ],
+    )
+    msg = _meaningful_psi4_error(RuntimeError("child exited with code -9"), snapshotter, out)
+    assert "during frequencies" in msg
+    assert "RuntimeError" in msg
+    assert "child exited with code -9" in msg
+    assert "step 21" in msg
+    assert "-1419.444616290000" in msg
+    assert "FINDIF had completed 2/354" in msg
+    assert "Wednesday, 02 September 2026 02:29AM" in msg
+
+
+def test_log_energy_gradient_summary_writes_history_and_findif(tmp_path):
+    out = tmp_path / "psi4.out"
+    out.write_text(_FINDIF_OUT, encoding="utf-8")
+    node_runner = MagicMock()
+    snapshotter = SimpleNamespace(
+        geom_iter=2,
+        energy_history=[
+            {"step": 1, "energy": -76.5, "timestamp": "2026-09-01 18:00:00"},
+            {"step": 2, "energy": -76.51, "timestamp": "2026-09-01 18:05:00"},
+        ],
+        grad_history=[
+            {"step": 1, "grad_norm": 0.12, "timestamp": "2026-09-01 18:00:00"},
+            {"step": 2, "grad_norm": 0.08, "timestamp": "2026-09-01 18:05:00"},
+        ],
+    )
+    _log_energy_gradient_summary(node_runner, snapshotter, out)
+    logged = "\n".join(call.args[0] for call in node_runner.log.call_args_list)
+    assert "Psi4 run summary" in logged
+    assert "2026-09-01 18:00:00 step 1: energy=-76.500000000000 Ha, |g|=1.200000e-01 Ha/Bohr" in logged
+    assert "2026-09-01 18:05:00 step 2:" in logged
+    assert "FINDIF frequencies: 2/354" in logged
+    assert "Last Psi4 stopped on: Wednesday, 02 September 2026 02:29AM" in logged
+
+
+def test_attach_psi4_result_files_not_in_memory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "psi4.out").write_text("psi4 output", encoding="utf-8")
+    (tmp_path / "psi4.log").write_text("psi4 log", encoding="utf-8")
+    (tmp_path / "snapshot.wfn.npy").write_bytes(b"npy")
+    created = []
+
+    def fake_from_local_file(path, **kwargs):
+        fs = SimpleNamespace(name=Path(path).name, in_memory=kwargs["in_memory"])
+        created.append(fs)
+        return fs
+
+    node_runner = SimpleNamespace(
+        files=[],
+        info_files=[],
+        task_id="task-1",
+        info=MagicMock(),
+    )
+    psi4_result = SimpleNamespace(
+        output_path=tmp_path / "psi4.out",
+        log_path=tmp_path / "psi4.log",
+    )
+    with patch(
+        "molecular_qm_psi4.nodes.psi4_calculator.FileStack.from_local_file",
+        side_effect=fake_from_local_file,
+    ):
+        _attach_psi4_result_files(node_runner, psi4_result)
+
+    by_name = {fs.name: fs for fs in created}
+    assert by_name["psi4.out"].in_memory is False
+    assert by_name["snapshot.wfn.npy"].in_memory is False
+    assert by_name["psi4.log"].in_memory is False
+    result_names = [fs.name for fs in node_runner.files]
+    assert "psi4.out" in result_names
+    assert "snapshot.wfn.npy" in result_names
+    assert "psi4.log" not in result_names
+    info_names = [fs.name for fs in node_runner.info_files]
+    assert "psi4.out" in info_names
+    assert "snapshot.wfn.npy" in info_names
+    assert "psi4.log" in info_names
+
+
+def test_append_artifact_file_skips_duplicates(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "psi4.out"
+    target.write_text("out", encoding="utf-8")
+    existing = SimpleNamespace(name="psi4.out")
+    node_runner = SimpleNamespace(
+        files=[existing],
+        info_files=[],
+        task_id="task-1",
+        info=MagicMock(),
+    )
+    with patch(
+        "molecular_qm_psi4.nodes.psi4_calculator.FileStack.from_local_file"
+    ) as mocked:
+        _append_artifact_file(node_runner, target, in_memory=False)
+    mocked.assert_not_called()
+    assert node_runner.files == [existing]
 
