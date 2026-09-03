@@ -422,8 +422,6 @@ class OptimizationSnapshotter:
         return wrapped
 
     def callback(self, envs):
-        engine = envs.get("self")
-        self.geom_iter = int(getattr(engine, "cycle", self.geom_iter + 1) or self.geom_iter + 1)
         energy = envs.get("energy")
         gradients = envs.get("gradients")
         mol = envs.get("mol")
@@ -432,19 +430,6 @@ class OptimizationSnapshotter:
             grad_norm = float(np.linalg.norm(np.asarray(gradients, dtype=float))) if gradients is not None and np is not None else None
         except Exception:
             grad_norm = None
-        if self._last_wall_s is not None:
-            if self._last_cpu_s is None:
-                raise ValueError("cpu_time_s is required when wall_time_s is set")
-            self.timing_history.append(
-                {
-                    "step": int(self.geom_iter),
-                    "wall_time_s": self._last_wall_s,
-                    "cpu_time_s": self._last_cpu_s,
-                }
-            )
-        self._log_opt_step(energy, grad_norm, self._last_wall_s, self._last_cpu_s)
-        self._last_wall_s = None
-        self._last_cpu_s = None
         if energy is not None and grad_norm is not None:
             step = int(self.geom_iter)
             if step not in self._chart_steps:
@@ -640,6 +625,8 @@ def _optimize(mf, qm_input, snapshotter):
     scanner = mf.nuc_grad_method().as_scanner()
 
     def scan_fn(mol):
+        energy = None
+        grad = None
         if snapshotter is not None:
             snapshotter._start_iter_timer()
         wall_start = time.monotonic()
@@ -654,8 +641,25 @@ def _optimize(mf, qm_input, snapshotter):
             cpu_s = time.process_time() - cpu_start
             if snapshotter is not None:
                 snapshotter._cancel_iter_timer()
+                snapshotter.geom_iter += 1
                 snapshotter._last_wall_s = wall_s
                 snapshotter._last_cpu_s = cpu_s
+                grad_norm = None
+                try:
+                    if grad is not None and np is not None:
+                        grad_norm = float(np.linalg.norm(np.asarray(grad, dtype=float)))
+                except Exception:
+                    pass
+                snapshotter._log_opt_step(energy, grad_norm, wall_s, cpu_s)
+                snapshotter.timing_history.append(
+                    {
+                        "step": int(snapshotter.geom_iter),
+                        "wall_time_s": wall_s,
+                        "cpu_time_s": cpu_s,
+                        "energy": energy,
+                        "grad_norm": grad_norm,
+                    }
+                )
                 if wall_s > snapshotter.iteration_timeout:
                     raise OptimizationTimeoutError(
                         f"Optimization iteration {snapshotter.geom_iter} took {wall_s:.1f}s "

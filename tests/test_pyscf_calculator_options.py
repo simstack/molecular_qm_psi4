@@ -1,4 +1,6 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+import sys
 
 from molecular_qm_psi4.util.pyscf_calculator import (
     PySCFCalculator,
@@ -149,3 +151,50 @@ def test_pyscf_persist_opt_charts_keeps_last_20_steps(monkeypatch):
     grad_charts = [chart for chart in db.saved if chart.series[0].yKey == "grad_norm"]
     assert [row["step"] for row in energy_charts[-1].data] == list(range(6, 26))
     assert [row["step"] for row in grad_charts[-1].data] == list(range(6, 26))
+
+
+def test_pyscf_optimize_records_iteration_and_total_timings():
+    from molecular_qm_psi4.nodes.pyscf_calculator import OptimizationSnapshotter, _optimize
+    from molecular_qm_psi4.util.qm_engine import attach_optimizer_timings
+
+    snapshotter = OptimizationSnapshotter(
+        MagicMock(), {"node_runner": MagicMock()}, interval=10
+    )
+    mf = MagicMock()
+    mf.mol = MagicMock()
+    mf.nuc_grad_method.return_value.as_scanner.return_value = MagicMock(
+        return_value=(-76.5, [[0.0, 0.0, 0.1]])
+    )
+    qm_input = _qm_input()
+
+    def fake_optimize(scan_fn, callback=None, maxsteps=None, **kwargs):
+        mol = MagicMock()
+        scan_fn(mol)
+        scan_fn(mol)
+        return mol
+
+    fake_pyscf = sys.modules.get("pyscf") or SimpleNamespace()
+    with patch.dict(
+        sys.modules,
+        {
+            "pyscf": fake_pyscf,
+            "pyscf.geomopt": SimpleNamespace(),
+            "pyscf.geomopt.addons": SimpleNamespace(as_pyscf_method=lambda mol, fn: fn),
+            "pyscf.geomopt.geometric_solver": SimpleNamespace(optimize=fake_optimize),
+        },
+    ):
+        _optimize(mf, qm_input, snapshotter)
+
+    assert [row["step"] for row in snapshotter.timing_history] == [1, 2]
+    assert snapshotter.timing_history[0]["wall_time_s"] >= 0
+    assert snapshotter.timing_history[0]["cpu_time_s"] >= 0
+    assert snapshotter.timing_history[0]["energy"] == -76.5
+    assert snapshotter.opt_wall_s is not None
+    assert snapshotter.opt_cpu_s is not None
+    node_runner = SimpleNamespace()
+    node_runner.info = MagicMock()
+    attach_optimizer_timings(node_runner, snapshotter)
+    metrics = [row["metric"] for row in node_runner.optimization_timing.row]
+    assert metrics.count("iteration") == 2
+    assert "total" in metrics
+    assert "optimize" in metrics
