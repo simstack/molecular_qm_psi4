@@ -1,9 +1,6 @@
 import pandas as pd
 
-from simstack.models import FloatData
-
 HARTREE_TO_EV = 27.211386245981
-_ORBITAL_OUTPUTS = ("HOMO_value_eV", "LUMO_value_eV", "HOMO_LUMO_gap_eV")
 
 
 def as_float_list(value):
@@ -52,16 +49,7 @@ def apply_orbital_energies(qm_result, energies_hartree, occupations):
             }
         )
     qm_result.set_values_from_orbital_energies_dataframe(pd.DataFrame(rows))
-
-
-def attach_orbital_energy_outputs(node_runner, qm_result):
-    if node_runner is None or qm_result is None:
-        return
-    table = getattr(qm_result, "orbital_energies_table_eV", None)
-    if table is not None:
-        node_runner.orbital_energies_table_eV = table
-    for name in _ORBITAL_OUTPUTS:
-        value = getattr(qm_result, name, None)
-        if value is None:
-            continue
-        setattr(node_runner, name, FloatData(field_name=name, value=float(value)))
+    qm_result.HOMO_value_Hartree = None
+    qm_result.LUMO_value_Hartree = None
+    qm_result.HOMO_LUMO_gap_Hartree = None
+    qm_result.orbital_energies_hartree = None

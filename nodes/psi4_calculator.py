@@ -33,7 +33,6 @@ from molecular_qm_psi4.util.psi4_calculator import (
     python_log_level_for_print_level,
 )
 from molecular_qm_psi4.util.opt_structures import optimization_structure_list
-from molecular_qm_psi4.util.orbital_energies import attach_orbital_energy_outputs
 from molecular_qm_psi4.util.psi4_result import Psi4Result
 from molecular_qm_psi4.util.psi4_thermo import run_manual_thermo
 from molecular_qm_psi4.util.qm_engine import attach_optimizer_timings, resources_from_parent_parameters
@@ -1398,10 +1397,6 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         qm_result (QMResult): Parsed result from the Psi4 calculation.
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
             were computed.
-        orbital_energies_table_eV (SimpleTable): Orbital energies in eV.
-        HOMO_value_eV (FloatData): HOMO energy in eV.
-        LUMO_value_eV (FloatData): LUMO energy in eV.
-        HOMO_LUMO_gap_eV (FloatData): HOMO-LUMO gap in eV.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
             Frequency jobs add a separate ``frequencies`` row.
     """
@@ -1583,7 +1578,6 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
 
             node_runner.info("Psi4 calculation finished successfully")
             node_runner.qm_result = qm_result
-            attach_orbital_energy_outputs(node_runner, qm_result)
 
             current_name = kwargs.get("custom_name", None)
             if current_name is None or current_name == "" and qm_input.molecule.formula is not None:

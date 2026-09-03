@@ -167,20 +167,27 @@ def test_pyscf_optimize_records_iteration_and_total_timings():
     )
     qm_input = _qm_input()
 
-    def fake_optimize(scan_fn, callback=None, maxsteps=None, **kwargs):
-        mol = MagicMock()
-        scan_fn(mol)
-        scan_fn(mol)
-        return mol
+    class FakeEngine:
+        def calc_new(self, coords, dirname):
+            return {"energy": -76.5, "gradient": [0.0, 0.0, 0.1]}
+
+    def fake_optimize(method, callback=None, maxsteps=None, **kwargs):
+        from pyscf.geomopt import geometric_solver
+
+        geometric_solver.PySCFEngine.calc_new(FakeEngine(), None, None)
+        geometric_solver.PySCFEngine.calc_new(FakeEngine(), None, None)
+        return MagicMock()
 
     fake_pyscf = sys.modules.get("pyscf") or SimpleNamespace()
+    fake_solver = SimpleNamespace(optimize=fake_optimize, PySCFEngine=FakeEngine)
+    fake_geomopt = SimpleNamespace(geometric_solver=fake_solver)
     with patch.dict(
         sys.modules,
         {
             "pyscf": fake_pyscf,
-            "pyscf.geomopt": SimpleNamespace(),
+            "pyscf.geomopt": fake_geomopt,
             "pyscf.geomopt.addons": SimpleNamespace(as_pyscf_method=lambda mol, fn: fn),
-            "pyscf.geomopt.geometric_solver": SimpleNamespace(optimize=fake_optimize),
+            "pyscf.geomopt.geometric_solver": fake_solver,
         },
     ):
         _optimize(mf, qm_input, snapshotter)

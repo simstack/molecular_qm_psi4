@@ -32,7 +32,6 @@ from molecular_qm_psi4.util.pyscf_calculator import (
     pyscf_opt_conv_params,
 )
 from molecular_qm_psi4.util.opt_structures import optimization_structure_list
-from molecular_qm_psi4.util.orbital_energies import attach_orbital_energy_outputs
 from molecular_qm_psi4.util.pyscf_result import PySCFResult
 from molecular_qm_psi4.util.pyscf_thermo import run_pyscf_thermo
 from molecular_qm_psi4.util.qm_engine import attach_optimizer_timings, resources_from_parent_parameters
@@ -619,31 +618,41 @@ def _apply_harmonic_to_gradient(energy, grad, mol, constraints):
 
 def _optimize(mf, qm_input, snapshotter):
     from pyscf.geomopt.addons import as_pyscf_method
-    from pyscf.geomopt.geometric_solver import optimize
+    from pyscf.geomopt import geometric_solver
 
     constraints = harmonic_cartesian_constraints(qm_input)
     scanner = mf.nuc_grad_method().as_scanner()
 
     def scan_fn(mol):
-        energy = None
-        grad = None
+        energy, grad = scanner(mol)
+        if constraints:
+            energy, grad = _apply_harmonic_to_gradient(energy, grad, mol, constraints)
+        return energy, grad
+
+    original_calc_new = geometric_solver.PySCFEngine.calc_new
+
+    def timed_calc_new(engine, coords, dirname):
         if snapshotter is not None:
+            snapshotter.geom_iter += 1
             snapshotter._start_iter_timer()
         wall_start = time.monotonic()
         cpu_start = time.process_time()
+        result = None
         try:
-            energy, grad = scanner(mol)
-            if constraints:
-                energy, grad = _apply_harmonic_to_gradient(energy, grad, mol, constraints)
-            return energy, grad
+            result = original_calc_new(engine, coords, dirname)
+            return result
         finally:
             wall_s = time.monotonic() - wall_start
             cpu_s = time.process_time() - cpu_start
             if snapshotter is not None:
                 snapshotter._cancel_iter_timer()
-                snapshotter.geom_iter += 1
                 snapshotter._last_wall_s = wall_s
                 snapshotter._last_cpu_s = cpu_s
+                energy = None
+                grad = None
+                if isinstance(result, dict):
+                    energy = result.get("energy")
+                    grad = result.get("gradient")
                 grad_norm = None
                 try:
                     if grad is not None and np is not None:
@@ -668,16 +677,18 @@ def _optimize(mf, qm_input, snapshotter):
                     )
 
     conv_params = pyscf_opt_conv_params(getattr(qm_input, "optimization_accuracy", None))
+    geometric_solver.PySCFEngine.calc_new = timed_calc_new
     wall_start = time.monotonic()
     cpu_start = time.process_time()
     try:
-        mol_eq = optimize(
+        mol_eq = geometric_solver.optimize(
             as_pyscf_method(mf.mol, scan_fn),
             callback=None if snapshotter is None else snapshotter.callback,
             maxsteps=int(qm_input.max_optimization_iterations),
             **conv_params,
         )
     finally:
+        geometric_solver.PySCFEngine.calc_new = original_calc_new
         if snapshotter is not None:
             snapshotter.opt_wall_s = time.monotonic() - wall_start
             snapshotter.opt_cpu_s = time.process_time() - cpu_start
@@ -696,10 +707,6 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         qm_result (QMResult): Parsed result from the PySCF calculation.
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
             were computed.
-        orbital_energies_table_eV (SimpleTable): Orbital energies in eV.
-        HOMO_value_eV (FloatData): HOMO energy in eV.
-        LUMO_value_eV (FloatData): LUMO energy in eV.
-        HOMO_LUMO_gap_eV (FloatData): HOMO-LUMO gap in eV.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
             Frequency jobs add a separate ``frequencies`` row.
     """
@@ -877,7 +884,6 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
 
             node_runner.info("PySCF calculation finished successfully")
             node_runner.qm_result = qm_result
-            attach_orbital_energy_outputs(node_runner, qm_result)
             current_name = kwargs.get("custom_name", None)
             if (current_name is None or current_name == "") and qm_input.molecule.formula is not None:
                 node_runner.custom_name = qm_input.molecule.formula
