@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.4.0 (2026-09-03)
+
+### Features
+
+- Enhance Psi4 error handling and debugging with detailed logs
+  ([`bd59e68`](https://github.com/simstack/molecular_qm_psi4/commit/bd59e68cd5b773bb526f6f7a93317d556bf3a4ae))
+
+- Added `_attach_psi4_result_files` and `_log_energy_gradient_summary` for improved artifact
+  management and runtime summaries. - Introduced `psi4_out_progress` to parse and track Psi4 output
+  progress, including convergence and errors. - Enhanced error reporting with
+  `_meaningful_psi4_error` for clearer diagnostics during failures. - Updated artifact handling to
+  prevent duplicates and ensure all relevant files are attached. - Improved optimization steps
+  logging with timestamps and detailed summaries.
+
+
 ## v0.3.2 (2026-09-03)
 
 ### Bug Fixes
