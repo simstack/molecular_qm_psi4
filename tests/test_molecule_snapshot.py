@@ -292,10 +292,10 @@ def test_snapshotter_writes_opt_charts_every_ten_steps(tmp_path, monkeypatch):
     with patch.dict("sys.modules", {"psi4.driver.driver": fake_driver}):
         with OptimizationSnapshotter(source, kwargs) as snapshotter:
             wrapped = fake_driver.gradient
-            for _ in range(12):
+            for _ in range(25):
                 wrapped("pbe")
-            assert [row["step"] for row in snapshotter.energy_history] == list(range(1, 13))
-            assert len(db.saved) == 2
+            assert [row["step"] for row in snapshotter.energy_history] == list(range(1, 26))
+            assert len(db.saved) >= 2
             assert {chart.series[0].yKey for chart in db.saved} == {"energy", "grad_norm"}
 
     assert all(isinstance(chart, ChartArtifactModel) for chart in db.saved)
@@ -303,7 +303,8 @@ def test_snapshotter_writes_opt_charts_every_ten_steps(tmp_path, monkeypatch):
     energy_charts = [c for c in db.saved if c.series[0].yKey == "energy"]
     grad_charts = [c for c in db.saved if c.series[0].yKey == "grad_norm"]
     assert len(energy_charts) >= 2
-    assert energy_charts[-1].data[-1]["step"] == 12
+    assert [row["step"] for row in energy_charts[-1].data] == list(range(6, 26))
+    assert energy_charts[-1].data[-1]["step"] == 25
     assert energy_charts[0].id == energy_charts[-1].id
     assert grad_charts[0].id == grad_charts[-1].id
     assert energy_charts[-1].title.text == "Psi4 optimization energy"

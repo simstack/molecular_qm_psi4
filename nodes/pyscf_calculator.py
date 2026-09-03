@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 _WFN_NPY_NAME = "result.wfn.npy"
 _CHK_NAME = "result.chk"
 _SNAPSHOT_INTERVAL = 10
+_OPT_CHART_STEPS = 20
 _SNAPSHOT_WFN_NAME = "snapshot.wfn.npy"
 _WATCHDOG_SIDECAR = "optimization_watchdog_timeout.txt"
 _FREQ_KEY = "frequency_analysis"
@@ -149,10 +150,20 @@ async def _persist_opt_charts(energy_data, grad_data, kwargs, existing=(None, No
     if db is None:
         return existing
     energy_chart = _opt_line_chart(
-        list(energy_data), "energy", "PySCF optimization energy", "Energy (Ha)", parent_id, existing[0]
+        list(energy_data)[-_OPT_CHART_STEPS:],
+        "energy",
+        "PySCF optimization energy",
+        "Energy (Ha)",
+        parent_id,
+        existing[0],
     )
     grad_chart = _opt_line_chart(
-        list(grad_data), "grad_norm", "PySCF optimization gradient norm", "|g| (Ha/Bohr)", parent_id, existing[1]
+        list(grad_data)[-_OPT_CHART_STEPS:],
+        "grad_norm",
+        "PySCF optimization gradient norm",
+        "|g| (Ha/Bohr)",
+        parent_id,
+        existing[1],
     )
     try:
         await db.save(energy_chart)
@@ -665,8 +676,6 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         qm_result (QMResult): Parsed result from the PySCF calculation.
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
             were computed.
-        wall_time_s (FloatData): Total optimization wall time in seconds.
-        cpu_time_s (FloatData): Total optimization CPU time in seconds.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
     """
     node_runner = kwargs.get("node_runner")

@@ -121,3 +121,31 @@ def test_pyscf_set_options_logs_qminput_limits():
                 pass
     # Log may or may not fire if import patching failed; mapping helpers are covered above.
     assert pyscf_basis_name(qm_input) == "def2-svp"
+
+
+def test_pyscf_persist_opt_charts_keeps_last_20_steps(monkeypatch):
+    import asyncio
+
+    from odmantic import ObjectId
+
+    from molecular_qm_psi4.nodes import pyscf_calculator as mod
+
+    class FakeDb:
+        def __init__(self):
+            self.saved = []
+
+        async def save(self, obj):
+            self.saved.append(obj)
+            return obj
+
+    db = FakeDb()
+    monkeypatch.setattr(mod, "_get_db", lambda: db)
+    energy = [{"step": i, "energy": float(-i)} for i in range(1, 26)]
+    grad = [{"step": i, "grad_norm": 0.1 / i} for i in range(1, 26)]
+    asyncio.run(
+        mod._persist_opt_charts(energy, grad, {"task_id": str(ObjectId()), "node_runner": MagicMock()})
+    )
+    energy_charts = [chart for chart in db.saved if chart.series[0].yKey == "energy"]
+    grad_charts = [chart for chart in db.saved if chart.series[0].yKey == "grad_norm"]
+    assert [row["step"] for row in energy_charts[-1].data] == list(range(6, 26))
+    assert [row["step"] for row in grad_charts[-1].data] == list(range(6, 26))

@@ -5,7 +5,7 @@ from typing import Optional
 from odmantic import Field, Model
 from pydantic import model_validator
 
-from simstack.models import FloatData, simstack_model
+from simstack.models import simstack_model
 from simstack.util.generate_ui_schema import generate_ui_schema
 
 _SLURM_MEMORY_PATTERN = re.compile(r"^(\d+(?:\.\d+)?)\s*([MGmg])B?$")
@@ -204,53 +204,42 @@ def _timing_metric_row(table, metric: str):
 
 
 def timings_from_child_result(calc_result) -> tuple:
-    """Return ``(wall_time_s, cpu_time_s)`` from a Psi4/PySCF child result."""
+    """Return ``(wall_time_s, cpu_time_s, n_iterations)`` from a child timing table."""
     if calc_result is None:
-        return None, None
-    wall = _numeric_timing(getattr(calc_result, "wall_time_s", None), "wall_time_s")
-    cpu = _numeric_timing(getattr(calc_result, "cpu_time_s", None), "cpu_time_s")
-    if wall is not None and cpu is not None:
-        return wall, cpu
+        return None, None, None
     table = getattr(calc_result, "optimization_timing", None) or getattr(
         calc_result, "timing_table", None
     )
     chosen = _timing_metric_row(table, "optimize") or _timing_metric_row(table, "total")
-    if chosen is None:
-        return wall, cpu
-    if wall is None:
+    wall = cpu = None
+    if chosen is not None:
         wall = _numeric_timing(chosen.get("wall_time_s"), "wall_time_s")
-    if cpu is None:
         cpu = _numeric_timing(chosen.get("cpu_time_s"), "cpu_time_s")
-    return wall, cpu
+    n_iterations = None
+    counted = sum(
+        1 for row in (getattr(table, "row", None) or []) if row.get("metric") == "iteration"
+    )
+    if counted:
+        n_iterations = counted
+    return wall, cpu, n_iterations
 
 
 def attach_optimizer_timings(node_runner, snapshotter) -> None:
-    """Copy snapshotter wall/CPU totals and the iteration timing table onto the node result."""
+    """Attach the per-iteration optimization timing table to the node result."""
     if node_runner is None or snapshotter is None:
         return
     from molecular_qm_psi4.util.optimization_timing import optimization_timing_table
 
     table = optimization_timing_table(snapshotter)
-    wall = getattr(snapshotter, "opt_wall_s", None)
-    cpu = getattr(snapshotter, "opt_cpu_s", None)
-    if wall is None or cpu is None:
-        chosen = _timing_metric_row(table, "optimize") or _timing_metric_row(table, "total")
-        if chosen is not None:
-            if wall is None:
-                wall = chosen.get("wall_time_s")
-            if cpu is None:
-                cpu = chosen.get("cpu_time_s")
-    if wall is not None:
-        node_runner.wall_time_s = FloatData(field_name="wall_time_s", value=float(wall))
-    if cpu is not None:
-        node_runner.cpu_time_s = FloatData(field_name="cpu_time_s", value=float(cpu))
-    if table is not None:
-        node_runner.optimization_timing = table
-    if wall is None and cpu is None:
+    if table is None:
         return
-    history = list(getattr(snapshotter, "timing_history", None) or [])
+    node_runner.optimization_timing = table
+    n_steps = sum(1 for row in table.row if row.get("metric") == "iteration")
+    chosen = _timing_metric_row(table, "optimize") or _timing_metric_row(table, "total")
+    wall = None if chosen is None else chosen.get("wall_time_s")
+    cpu = None if chosen is None else chosen.get("cpu_time_s")
     wall_text = "n/a" if wall is None else f"{float(wall):.2f}s"
     cpu_text = "n/a" if cpu is None else f"{float(cpu):.2f}s"
     node_runner.info(
-        f"Optimization timings: n_steps={len(history)}, wall={wall_text}, cpu={cpu_text}"
+        f"Optimization timings: n_steps={n_steps}, wall={wall_text}, cpu={cpu_text}"
     )
