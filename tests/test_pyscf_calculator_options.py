@@ -1,5 +1,7 @@
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+import logging
 import sys
 
 from molecular_qm_psi4.util.pyscf_calculator import (
@@ -205,3 +207,78 @@ def test_pyscf_optimize_records_iteration_and_total_timings():
     assert metrics.count("iteration") == 2
     assert "total" in metrics
     assert "optimize" in metrics
+
+
+def test_parse_pyscf_opt_cycle_line():
+    from molecular_qm_psi4.nodes.pyscf_calculator import parse_pyscf_opt_cycle_line
+
+    line = "cycle 36: E = -1418.98625799  dE = 6.64386e-10  norm(grad) = 0.00013208"
+    match = parse_pyscf_opt_cycle_line(line)
+    assert match is not None
+    assert match.group(1) == "36"
+    assert match.group(2) == "-1418.98625799"
+    assert match.group(3) == "6.64386e-10"
+    assert match.group(4) == "0.00013208"
+    assert parse_pyscf_opt_cycle_line(
+        "cycle= 10 E= -529.546875252347  delta_E= -4.99e-10  |g|= 1.74e-05"
+    ) is None
+    assert parse_pyscf_opt_cycle_line("") is None
+    try:
+        parse_pyscf_opt_cycle_line(None)
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for None line")
+
+
+def test_pyscf_opt_cycle_reporter_logs_and_records_charts():
+    from molecular_qm_psi4.nodes.pyscf_calculator import (
+        OptimizationSnapshotter,
+        PySCFOptCycleReporter,
+        _TeeStdout,
+    )
+
+    node_runner = MagicMock()
+    seen = []
+    node_runner.info.side_effect = lambda msg: seen.append(msg)
+    snapshotter = OptimizationSnapshotter(MagicMock(), {"node_runner": node_runner}, interval=1)
+    reporter = PySCFOptCycleReporter(node_runner)
+    reporter.snapshotter = snapshotter
+    line = "cycle 36: E = -1418.98625799  dE = 6.64386e-10  norm(grad) = 0.00013208\n"
+    reporter.consume(line)
+    compact = [msg for msg in seen if "cycle 36:" in msg and "norm(grad)" in msg]
+    assert len(compact) == 1
+    assert "E = -1418.98625799" in compact[0]
+    assert "dE = 6.64386e-10" in compact[0]
+    assert "norm(grad) = 0.00013208" in compact[0]
+    node_runner.log.assert_called()
+    assert snapshotter.energy_history[-1]["step"] == 36
+    assert snapshotter.energy_history[-1]["energy"] == -1418.98625799
+    assert snapshotter.grad_history[-1]["grad_norm"] == 0.00013208
+    reporter.consume(line)
+    assert len([msg for msg in seen if "cycle 36:" in msg and "norm(grad)" in msg]) == 1
+
+    buf = StringIO()
+    tee = _TeeStdout(buf, reporter)
+    tee.write("cycle 37: E = -1418.98625800  dE = -1.0e-8  norm(grad) = 0.00010000\n")
+    assert "cycle 37:" in buf.getvalue()
+    assert snapshotter.energy_history[-1]["step"] == 37
+    assert [row["step"] for row in snapshotter.energy_history] == [36, 37]
+
+
+def test_redirect_pyscf_logs_forwards_geomopt_cycle_line():
+    from molecular_qm_psi4.nodes.pyscf_calculator import (
+        PySCFOptCycleReporter,
+        redirect_pyscf_logs,
+    )
+
+    node_runner = MagicMock()
+    seen = []
+    node_runner.info.side_effect = lambda msg: seen.append(msg)
+    reporter = PySCFOptCycleReporter(node_runner)
+    with redirect_pyscf_logs(print_level=1, node_runner=node_runner, cycle_reporter=reporter):
+        logging.getLogger("pyscf.geomopt").info(
+            "cycle 36: E = -1418.98625799  dE = 6.64386e-10  norm(grad) = 0.00013208"
+        )
+    compact = [msg for msg in seen if "cycle 36:" in msg and "norm(grad)" in msg]
+    assert len(compact) == 1
+    assert "E = -1418.98625799" in compact[0]

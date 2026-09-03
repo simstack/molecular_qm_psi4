@@ -1,7 +1,9 @@
 import asyncio
 import logging
 import os
+import re
 import signal
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -337,6 +339,7 @@ class OptimizationSnapshotter:
         self._last_cpu_s = None
         self.charts = (None, None)
         self._chart_steps = set()
+        self.stdout_tee = None
         n_atoms = n_atoms_from_molecule(getattr(qm_input, "molecule", None) or source_molecule)
         basis = basis_name_from_qm_input(qm_input)
         self.n_atoms = n_atoms
@@ -424,20 +427,16 @@ class OptimizationSnapshotter:
         energy = envs.get("energy")
         gradients = envs.get("gradients")
         mol = envs.get("mol")
+        if mol is not None and self.stdout_tee is not None:
+            mol.stdout = self.stdout_tee
         self.last_mol = mol
         try:
             grad_norm = float(np.linalg.norm(np.asarray(gradients, dtype=float))) if gradients is not None and np is not None else None
         except Exception:
             grad_norm = None
-        if energy is not None and grad_norm is not None:
-            step = int(self.geom_iter)
-            if step not in self._chart_steps:
-                self._chart_steps.add(step)
-                self.energy_history.append({"step": step, "energy": float(energy)})
-                self.grad_history.append({"step": step, "grad_norm": grad_norm})
-                if step % self.interval == 0:
-                    self._flush_opt_charts()
-            self._raise_if_energy_oscillating()
+        cycle = envs.get("cycle")
+        step = int(cycle) if cycle is not None else int(self.geom_iter)
+        self._record_opt_charts(step, energy, grad_norm)
         g_scanner = envs.get("g_scanner")
         mf = getattr(g_scanner, "base", None) if g_scanner is not None else None
         payload = _payload_from_mf(mf, mol, energy)
@@ -493,6 +492,31 @@ class OptimizationSnapshotter:
             node_runner.info(msg)
         else:
             logger.info(msg)
+        return stamp
+
+    def _record_opt_charts(self, step, energy, grad_norm, stamp=None):
+        if energy is None or grad_norm is None:
+            return
+        if step is None:
+            raise ValueError("step is required")
+        step = int(step)
+        if step < 1 or step in self._chart_steps:
+            return
+        self._chart_steps.add(step)
+        self.energy_history.append(
+            {"step": step, "energy": float(energy), "timestamp": stamp}
+        )
+        self.grad_history.append(
+            {"step": step, "grad_norm": float(grad_norm), "timestamp": stamp}
+        )
+        try:
+            self._flush_opt_charts()
+        except Exception as exc:
+            node_runner = self._node_runner()
+            if node_runner is not None:
+                node_runner.warning(f"Failed to store optimization charts: {exc}")
+            else:
+                logger.warning("Failed to store optimization charts: %s", exc)
 
     def _flush_opt_charts(self):
         if not self.energy_history:
@@ -549,15 +573,110 @@ class OptimizationSnapshotter:
                     node_runner.warning(f"Failed to store MoleculeSnapshot: {exc}")
 
 
+_PYSCF_OPT_CYCLE_RE = re.compile(
+    r"cycle\s+(\d+):\s+E\s*=\s*([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)"
+    r"\s+dE\s*=\s*([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)"
+    r"\s+norm\(grad\)\s*=\s*([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)"
+)
+
+
+def parse_pyscf_opt_cycle_line(line: str):
+    if line is None:
+        raise ValueError("line is required")
+    if not line:
+        return None
+    return _PYSCF_OPT_CYCLE_RE.search(line)
+
+
+class _TeeStdout:
+    def __init__(self, stream, consumer):
+        if stream is None:
+            raise ValueError("stream is required")
+        if consumer is None:
+            raise ValueError("consumer is required")
+        self._stream = stream
+        self._consumer = consumer
+
+    def write(self, text):
+        if text is None:
+            raise ValueError("text is required")
+        written = self._stream.write(text)
+        self._consumer.consume(text)
+        return written
+
+    def flush(self):
+        return self._stream.flush()
+
+    def close(self):
+        return self._stream.close()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+class PySCFOptCycleReporter:
+    """Forward geomopt cycle lines to the node log and optimization charts."""
+
+    def __init__(self, node_runner=None):
+        self.node_runner = node_runner
+        self.snapshotter = None
+        self._buffer = ""
+        self._seen_steps = set()
+
+    def consume(self, text):
+        if text is None:
+            raise ValueError("text is required")
+        if not text:
+            return
+        self._buffer += text if isinstance(text, str) else str(text)
+        lines = self._buffer.split("\n")
+        self._buffer = lines[-1]
+        for line in lines[:-1]:
+            self._emit_line(line)
+        if self._buffer and parse_pyscf_opt_cycle_line(self._buffer):
+            self._emit_line(self._buffer)
+            self._buffer = ""
+
+    def _emit_line(self, line: str):
+        match = parse_pyscf_opt_cycle_line(line)
+        if match is None:
+            return
+        step = int(match.group(1))
+        if step in self._seen_steps:
+            return
+        self._seen_steps.add(step)
+        energy, delta_e, grad_norm = match.group(2), match.group(3), match.group(4)
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        msg = (
+            f"{stamp} cycle {step}: E = {energy}  dE = {delta_e}  norm(grad) = {grad_norm}"
+        )
+        if self.node_runner is not None:
+            try:
+                self.node_runner.log(msg)
+                self.node_runner.info(msg)
+            except Exception:
+                logger.info(msg)
+        else:
+            logger.info(msg)
+        snapshotter = self.snapshotter
+        if snapshotter is None:
+            return
+        snapshotter._record_opt_charts(step, float(energy), float(grad_norm), stamp)
+
+
 class NodeRunnerLogHandler(logging.Handler):
-    def __init__(self, node_runner):
+    def __init__(self, node_runner, cycle_reporter=None):
         super().__init__()
         self.node_runner = node_runner
+        self.cycle_reporter = cycle_reporter
 
     def emit(self, record):
         if self.node_runner is None:
             return
         try:
+            raw = record.getMessage()
+            if self.cycle_reporter is not None:
+                self.cycle_reporter.consume(raw if raw.endswith("\n") else raw + "\n")
             msg = self.format(record)
             if record.levelno >= logging.ERROR:
                 self.node_runner.error(msg)
@@ -570,12 +689,12 @@ class NodeRunnerLogHandler(logging.Handler):
 
 
 @contextmanager
-def redirect_pyscf_logs(print_level=1, node_runner=None):
+def redirect_pyscf_logs(print_level=1, node_runner=None, cycle_reporter=None):
     logger_names = ["pyscf", "pyscf.scf", "pyscf.dft", "pyscf.geomopt"]
     file_level = python_log_level_for_print_level(print_level)
     handlers = []
     if node_runner is not None:
-        live_handler = NodeRunnerLogHandler(node_runner)
+        live_handler = NodeRunnerLogHandler(node_runner, cycle_reporter=cycle_reporter)
         live_handler.setLevel(file_level)
         live_handler.setFormatter(logging.Formatter("%(name)s - %(levelname)s - %(message)s"))
         handlers.append(live_handler)
@@ -588,8 +707,24 @@ def redirect_pyscf_logs(print_level=1, node_runner=None):
             )
             if handlers:
                 pyscf_logger.handlers = handlers
-            pyscf_logger.setLevel(file_level)
+            pyscf_logger.setLevel(
+                min(file_level, logging.INFO) if cycle_reporter is not None else file_level
+            )
             pyscf_logger.propagate = False
+        if cycle_reporter is not None:
+            consume_handler = logging.Handler()
+            consume_handler.setLevel(logging.INFO)
+
+            def _consume_emit(record, reporter=cycle_reporter):
+                try:
+                    raw = record.getMessage()
+                    reporter.consume(raw if raw.endswith("\n") else raw + "\n")
+                except Exception:
+                    consume_handler.handleError(record)
+
+            consume_handler.emit = _consume_emit
+            for name in logger_names:
+                logging.getLogger(name).addHandler(consume_handler)
         yield
     finally:
         for pyscf_logger, old_handlers, level, propagate in previous_states:
@@ -622,8 +757,11 @@ def _optimize(mf, qm_input, snapshotter):
 
     constraints = harmonic_cartesian_constraints(qm_input)
     scanner = mf.nuc_grad_method().as_scanner()
+    stdout_tee = None if snapshotter is None else snapshotter.stdout_tee
 
     def scan_fn(mol):
+        if stdout_tee is not None:
+            mol.stdout = stdout_tee
         energy, grad = scanner(mol)
         if constraints:
             energy, grad = _apply_harmonic_to_gradient(energy, grad, mol, constraints)
@@ -635,6 +773,10 @@ def _optimize(mf, qm_input, snapshotter):
         if snapshotter is not None:
             snapshotter.geom_iter += 1
             snapshotter._start_iter_timer()
+            if snapshotter.stdout_tee is not None:
+                engine_mol = getattr(engine, "mol", None)
+                if engine_mol is not None:
+                    engine_mol.stdout = snapshotter.stdout_tee
         wall_start = time.monotonic()
         cpu_start = time.process_time()
         result = None
@@ -659,16 +801,21 @@ def _optimize(mf, qm_input, snapshotter):
                         grad_norm = float(np.linalg.norm(np.asarray(grad, dtype=float)))
                 except Exception:
                     pass
-                snapshotter._log_opt_step(energy, grad_norm, wall_s, cpu_s)
+                stamp = snapshotter._log_opt_step(energy, grad_norm, wall_s, cpu_s)
                 snapshotter.timing_history.append(
                     {
                         "step": int(snapshotter.geom_iter),
                         "wall_time_s": wall_s,
                         "cpu_time_s": cpu_s,
+                        "timestamp": stamp,
                         "energy": energy,
                         "grad_norm": grad_norm,
                     }
                 )
+                snapshotter._record_opt_charts(
+                    int(snapshotter.geom_iter), energy, grad_norm, stamp
+                )
+                snapshotter._raise_if_energy_oscillating()
                 if wall_s > snapshotter.iteration_timeout:
                     raise OptimizationTimeoutError(
                         f"Optimization iteration {snapshotter.geom_iter} took {wall_s:.1f}s "
@@ -741,12 +888,23 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     pyscf_result = PySCFResult(qm_input)
     qm_result = pyscf_result.qm_result
     snapshotter = None
+    cycle_reporter = PySCFOptCycleReporter(node_runner)
     try:
-        with redirect_pyscf_logs(getattr(qm_input, "print_level", 1), node_runner=node_runner):
+        with redirect_pyscf_logs(
+            getattr(qm_input, "print_level", 1),
+            node_runner=node_runner,
+            cycle_reporter=cycle_reporter,
+        ):
             calculator = PySCFCalculator(qm_input, node_runner=node_runner)
             calculator.set_resources(memory, num_threads)
             mol = calculator.build_molecule(pyscf_result.output_path)
+            stdout_tee = None
+            if mol.stdout is not None and mol.stdout not in (sys.stdout, sys.stderr):
+                stdout_tee = _TeeStdout(mol.stdout, cycle_reporter)
+                mol.stdout = stdout_tee
             mf = calculator.build_mean_field(mol)
+            if stdout_tee is not None:
+                mf.stdout = stdout_tee
 
             restart_path = None
             restart_payload = None
@@ -779,6 +937,8 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             elif qm_input.optimization:
                 node_runner.log("Starting optimization...")
                 snapshotter = OptimizationSnapshotter(molecule, kwargs, qm_input=qm_input, calculator=calculator)
+                cycle_reporter.snapshotter = snapshotter
+                snapshotter.stdout_tee = stdout_tee
                 try:
                     mol_eq = _optimize(mf, qm_input, snapshotter)
                 except Exception:
@@ -868,12 +1028,10 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             try:
                 saved = _write_payload(payload, Path(_WFN_NPY_NAME))
                 wfn_fs = FileStack.from_local_file(saved, in_memory=False, is_hashable=True, secure_source=True)
-                node_runner.files.append(wfn_fs)
                 qm_result.files.append(wfn_fs)
                 chk_path = Path(_CHK_NAME)
                 if chk_path.exists():
                     chk_fs = FileStack.from_local_file(chk_path, in_memory=False, is_hashable=True, secure_source=True)
-                    node_runner.files.append(chk_fs)
                     qm_result.files.append(chk_fs)
                 node_runner.info(
                     f"Saved reusable PySCF wavefunction to {saved} "
