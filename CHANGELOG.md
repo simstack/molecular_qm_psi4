@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.3.1 (2026-09-03)
+
+### Bug Fixes
+
+- Add orbital energy utilities and optimization geometry tracking
+  ([`26952e8`](https://github.com/simstack/molecular_qm_psi4/commit/26952e80ca9e847d58ab29d123aed0c2e7eeb035))
+
+- Introduced `orbital_energies.py` for HOMO/LUMO energy extraction and gap calculations. - Added
+  `opt_structures.py` to build MoleculeList from optimization snapshots and final geometries. -
+  Enhanced QM result handling with orbital energy outputs and molecule tracking.
+
+
 ## v0.3.0 (2026-09-03)
 
 
