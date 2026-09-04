@@ -2,6 +2,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from molecular_qm_models import BasisSet, Functional, Molecule, MoleculeSnapshot, QMInput
 from molecular_qm_models.constants import BOHR_TO_ANGSTROM
 from simstack.models import FileStack
@@ -17,6 +18,8 @@ from molecular_qm_psi4.nodes.psi4_calculator import (
     _should_snapshot,
     _task_id_from_kwargs,
     _wavefunction_from_gradient_result,
+    _forces_storage_from_wfn,
+    run_single_point,
 )
 from simstack.models.charts_artifact import ChartArtifactModel
 
@@ -117,7 +120,13 @@ def test_molecule_snapshot_fields():
         "geom_iter",
         "scf_iter",
         "final_structure",
+        "energy_hartree",
+        "has_forces",
+        "force_rms",
+        "geometry_hash",
     }
+    assert snapshot.has_forces is False
+    assert snapshot.forces_hartree_bohr is None
 
 
 def test_snapshotter_saves_on_tenth_gradient_call(tmp_path, monkeypatch):
@@ -147,11 +156,13 @@ def test_snapshotter_saves_on_tenth_gradient_call(tmp_path, monkeypatch):
             assert wrapped is not original_gradient
             wrapped("pbe")
             wrapped("pbe")
+            for _ in range(8):
+                wrapped("pbe")
             assert snapshotter.seen == {10}
-            assert snapshotter.geom_iter == 1
-            assert snapshotter.scf_iter == 2
+            assert snapshotter.geom_iter == 10
+            assert snapshotter.scf_iter == 10
 
-    assert len(run_calls) == 1
+    assert len(run_calls) == 2
     assert fake_driver.gradient is original_gradient
 
 
@@ -185,23 +196,29 @@ def test_persist_molecule_snapshot_saves_models(tmp_path, monkeypatch):
         "molecular_qm_psi4.nodes.psi4_calculator._write_wavefunction_payload",
         write_payload,
     )
+    monkeypatch.setattr(
+        "molecular_qm_psi4.nodes.psi4_calculator.FileStack.from_local_file",
+        lambda *a, **k: FileStack.from_string("wfn", "snapshot.wfn.npy"),
+    )
 
     async def _run():
-        with patch("molecular_qm_psi4.nodes.psi4_calculator.context") as mock_context:
-            mock_context.db = db
-            snapshot = await _persist_molecule_snapshot(
-                wfn,
-                source,
-                {
-                    "task_id": "job-1",
-                    "call_path": ".parent.psi4_calculator",
-                    "node_runner": node_runner,
-                },
-                geom_iter=1,
-                scf_iter=10,
-                final_structure=True,
-                qm_input=qm_input,
-            )
+        monkeypatch.setattr(
+            "molecular_qm_psi4.nodes.psi4_calculator._get_db",
+            lambda: db,
+        )
+        snapshot = await _persist_molecule_snapshot(
+            wfn,
+            source,
+            {
+                "task_id": "job-1",
+                "call_path": ".parent.psi4_calculator",
+                "node_runner": node_runner,
+            },
+            geom_iter=1,
+            scf_iter=10,
+            final_structure=True,
+            qm_input=qm_input,
+        )
         return snapshot
 
     snapshot = asyncio.run(_run())
@@ -214,7 +231,7 @@ def test_persist_molecule_snapshot_saves_models(tmp_path, monkeypatch):
     assert snapshot.final_structure is True
     assert snapshot.qm_input is qm_input
     assert snapshot.molecule.atoms[0].element == "H"
-    assert snapshot.wavefunction.name == "snapshot_geom_0001_scf_0010.wfn.npy"
+    assert snapshot.wavefunction.name == "snapshot.wfn.npy"
     assert db.save.await_count == 3
     node_runner.info.assert_called()
 
@@ -309,3 +326,157 @@ def test_snapshotter_writes_opt_charts_every_ten_steps(tmp_path, monkeypatch):
     assert grad_charts[0].id == grad_charts[-1].id
     assert energy_charts[-1].title.text == "Psi4 optimization energy"
     assert grad_charts[-1].title.text == "Psi4 optimization gradient norm"
+
+
+def test_forces_storage_from_wfn_negates_gradient():
+    molecule = Molecule.from_sites(["H"], [[0.0, 0.0, 0.0]])
+    grad = np.array([[0.25, -0.5, 0.0]], dtype=float)
+    wfn = SimpleNamespace(energy=lambda: -0.5, gradient=lambda: _FakeGrad(grad))
+    energy, has_forces, storage = _forces_storage_from_wfn(
+        wfn, molecule, gradients_requested=True, geom_iter=1
+    )
+    assert energy == pytest.approx(-0.5)
+    assert has_forces is True
+    np.testing.assert_allclose(storage.array, -grad)
+
+
+def test_forces_storage_from_wfn_requires_gradient_when_requested():
+    molecule = Molecule.from_sites(["H"], [[0.0, 0.0, 0.0]])
+    wfn = SimpleNamespace(energy=lambda: -0.5, gradient=lambda: None)
+    with pytest.raises(ValueError, match="requested gradients"):
+        _forces_storage_from_wfn(
+            wfn, molecule, gradients_requested=True, geom_iter=1
+        )
+
+
+def test_run_single_point_energy_when_gradients_false():
+    wfn = SimpleNamespace(energy=lambda: -1.0)
+    psi4_mod = MagicMock()
+    psi4_mod.energy.return_value = (-1.0, wfn)
+    energy, out_wfn = run_single_point(psi4_mod, "B3LYP-d3zero", False, None)
+    assert energy == -1.0
+    assert out_wfn is wfn
+    psi4_mod.energy.assert_called_once_with("B3LYP-d3zero", return_wfn=True, ref_wfn=None)
+    psi4_mod.gradient.assert_not_called()
+
+
+def test_run_single_point_gradient_when_gradients_true():
+    wfn = SimpleNamespace(energy=lambda: -2.5)
+    psi4_mod = MagicMock()
+    psi4_mod.gradient.return_value = ([[0.1, 0.0, 0.0]], wfn)
+    energy, out_wfn = run_single_point(psi4_mod, "wB97M-D3BJ", True, "restart")
+    assert energy == -2.5
+    assert out_wfn is wfn
+    psi4_mod.gradient.assert_called_once_with("wB97M-D3BJ", return_wfn=True, ref_wfn="restart")
+    psi4_mod.energy.assert_not_called()
+
+
+def test_persist_molecule_snapshot_writes_negative_gradient_as_forces(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    psi4_mol = SimpleNamespace(
+        natom=lambda: 1,
+        symbol=lambda i: "H",
+        x=lambda i: 0.0,
+        y=lambda i: 0.0,
+        z=lambda i: 0.0,
+    )
+    grad = np.array([[0.25, -0.5, 0.0]], dtype=float)
+    wfn = SimpleNamespace(
+        molecule=lambda: psi4_mol,
+        energy=lambda: -0.5,
+        gradient=lambda: _FakeGrad(grad),
+    )
+    db = SimpleNamespace(save=AsyncMock())
+    node_runner = MagicMock()
+    source = Molecule.from_sites(["H"], [[0.0, 0.0, 0.0]])
+    source.smiles = "[H]"
+    source.formula = "H"
+    qm_input = _qm_input(source)
+    qm_input.gradients = True
+
+    def write_payload(_payload, path):
+        path.write_bytes(b"wfn")
+        return path
+
+    monkeypatch.setattr(
+        "molecular_qm_psi4.nodes.psi4_calculator._payload_from_wfn_or_reference",
+        lambda _wfn: {"molecule": {"dummy": True}},
+    )
+    monkeypatch.setattr(
+        "molecular_qm_psi4.nodes.psi4_calculator._write_wavefunction_payload",
+        write_payload,
+    )
+    monkeypatch.setattr(
+        "molecular_qm_psi4.nodes.psi4_calculator.FileStack.from_local_file",
+        lambda *a, **k: FileStack.from_string("wfn", "snapshot.wfn.npy"),
+    )
+
+    async def _run():
+        monkeypatch.setattr(
+            "molecular_qm_psi4.nodes.psi4_calculator._get_db",
+            lambda: db,
+        )
+        return await _persist_molecule_snapshot(
+            wfn,
+            source,
+            {
+                "task_id": "job-1",
+                "call_path": ".parent.psi4_calculator",
+                "node_runner": node_runner,
+            },
+            geom_iter=1,
+            scf_iter=1,
+            final_structure=True,
+            qm_input=qm_input,
+        )
+
+    snapshot = asyncio.run(_run())
+    assert snapshot.has_forces is True
+    assert snapshot.energy_hartree == pytest.approx(-0.5)
+    np.testing.assert_allclose(snapshot.forces_hartree_bohr.array, -grad)
+    assert snapshot.geometry_hash is not None
+    assert db.save.await_count == 4
+
+
+def test_persist_molecule_snapshot_fails_when_gradients_missing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    psi4_mol = SimpleNamespace(
+        natom=lambda: 1,
+        symbol=lambda i: "H",
+        x=lambda i: 0.0,
+        y=lambda i: 0.0,
+        z=lambda i: 0.0,
+    )
+    wfn = SimpleNamespace(molecule=lambda: psi4_mol, energy=lambda: -0.5, gradient=lambda: None)
+    source = Molecule.from_sites(["H"], [[0.0, 0.0, 0.0]])
+    qm_input = _qm_input(source)
+    qm_input.gradients = True
+
+    def write_payload(_payload, path):
+        path.write_bytes(b"wfn")
+        return path
+
+    monkeypatch.setattr(
+        "molecular_qm_psi4.nodes.psi4_calculator._payload_from_wfn_or_reference",
+        lambda _wfn: {"molecule": {"dummy": True}},
+    )
+    monkeypatch.setattr(
+        "molecular_qm_psi4.nodes.psi4_calculator._write_wavefunction_payload",
+        write_payload,
+    )
+
+    async def _run():
+        monkeypatch.setattr(
+            "molecular_qm_psi4.nodes.psi4_calculator._get_db",
+            lambda: SimpleNamespace(save=AsyncMock()),
+        )
+        await _persist_molecule_snapshot(
+            wfn,
+            source,
+            {"task_id": "job-1", "node_runner": MagicMock()},
+            qm_input=qm_input,
+        )
+
+    with pytest.raises(ValueError, match="requested gradients"):
+        asyncio.run(_run())
+

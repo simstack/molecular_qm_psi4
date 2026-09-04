@@ -54,6 +54,8 @@ from simstack.models.simple_table import SimpleTable
 from simstack.core.node import node
 from simstack.core.simstack_result import SimstackResult
 from molecular_qm_models import QMInput, QMResult, Molecule, MoleculeSnapshot, Atom, BOHR_TO_ANGSTROM
+from molecular_qm_models.molecule_snapshot import geometry_hash_from_molecule
+from simstack.models.array_storage import ArrayStorage
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,41 @@ _SNAPSHOT_WFN_NAME = "snapshot.wfn.npy"
 _WATCHDOG_SIDECAR = "optimization_watchdog_timeout.txt"
 _FINDIF_BANNER = "Using finite-differences of gradients to determine vibrational frequencies"
 _FINAL_OPT_GEOM = "Final optimized geometry and variables"
+
+
+def run_single_point(psi4_mod, method, gradients, restart_wfn):
+    """Energy or analytic gradient single-point. Returns (energy, wfn)."""
+    if gradients:
+        _grad, wfn = psi4_mod.gradient(method, return_wfn=True, ref_wfn=restart_wfn)
+        energy = wfn.energy()
+        return energy, wfn
+    return psi4_mod.energy(method, return_wfn=True, ref_wfn=restart_wfn)
+
+
+def _forces_storage_from_wfn(wfn, snapshot_molecule, *, gradients_requested, geom_iter):
+    energy = _safe_call(getattr(wfn, "energy", None)) if wfn is not None else None
+    if energy is None and psi4 is not None:
+        energy = _safe_call(lambda: psi4.core.variable("CURRENT ENERGY"))
+    if np is None:
+        if gradients_requested:
+            raise ValueError("numpy is required to persist Cartesian forces")
+        return energy, False, None
+    grad = _safe_array(getattr(wfn, "gradient", None)) if wfn is not None else None
+    if gradients_requested and grad is None:
+        raise ValueError(
+            f"QMInput requested gradients but wavefunction has no gradient at geom_iter={geom_iter}"
+        )
+    if grad is None:
+        return energy, False, None
+    forces = -np.asarray(grad, dtype=float)
+    n_atoms = len(snapshot_molecule.atoms)
+    if forces.ndim != 2 or tuple(forces.shape) != (n_atoms, 3):
+        raise ValueError(
+            f"gradient must have shape ({n_atoms}, 3), got {forces.shape}"
+        )
+    storage = ArrayStorage(name="forces_hartree_bohr")
+    storage.array = forces
+    return energy, True, storage
 
 
 def _safe_call(fn, default=None):
@@ -717,8 +754,8 @@ def _energy_and_grad_norm(result):
     if np is None:
         return None, None
     wfn = _wavefunction_from_gradient_result(result)
-    energy = _safe_call(wfn.energy) if wfn is not None else None
-    grads = _safe_array(wfn.gradient) if wfn is not None else None
+    energy = _safe_call(getattr(wfn, "energy", None)) if wfn is not None else None
+    grads = _safe_array(getattr(wfn, "gradient", None)) if wfn is not None else None
     if grads is None:
         grad_obj = result[0] if isinstance(result, tuple) and result else result
         if grad_obj is not None and grad_obj is not wfn:
@@ -828,17 +865,7 @@ async def _persist_molecule_snapshot(
             )
         return None
 
-    saved_path = _write_wavefunction_payload(
-        payload, Path(_SNAPSHOT_WFN_NAME)
-    )
     task_id = _task_id_from_kwargs(kwargs)
-    wfn_fs = FileStack.from_local_file(
-        saved_path,
-        in_memory=False,
-        is_hashable=True,
-        secure_source=True,
-        task_id=task_id,
-    )
     psi4_mol = _safe_call(wfn.molecule) if wfn is not None else None
     if psi4_mol is not None:
         snapshot_molecule = _molecule_from_psi4_molecule(
@@ -848,6 +875,29 @@ async def _persist_molecule_snapshot(
         )
     else:
         snapshot_molecule = Molecule.from_molecule(source_molecule)
+    gradients_requested = bool(
+        qm_input is not None
+        and (
+            getattr(qm_input, "gradients", False)
+            or getattr(qm_input, "optimization", False)
+        )
+    )
+    energy_hartree, has_forces, forces_storage = _forces_storage_from_wfn(
+        wfn,
+        snapshot_molecule,
+        gradients_requested=gradients_requested,
+        geom_iter=geom_iter,
+    )
+    saved_path = _write_wavefunction_payload(
+        payload, Path(_SNAPSHOT_WFN_NAME)
+    )
+    wfn_fs = FileStack.from_local_file(
+        saved_path,
+        in_memory=False,
+        is_hashable=True,
+        secure_source=True,
+        task_id=task_id,
+    )
     snapshot = MoleculeSnapshot(
         date_created=datetime.now(),
         task_id=task_id,
@@ -857,6 +907,10 @@ async def _persist_molecule_snapshot(
         geom_iter=geom_iter,
         scf_iter=scf_iter,
         final_structure=final_structure,
+        energy_hartree=energy_hartree,
+        has_forces=has_forces,
+        forces_hartree_bohr=forces_storage,
+        geometry_hash=geometry_hash_from_molecule(snapshot_molecule),
         qm_input=qm_input,
         molecule=snapshot_molecule,
         wavefunction=wfn_fs,
@@ -875,6 +929,8 @@ async def _persist_molecule_snapshot(
         return snapshot
     await db.save(wfn_fs)
     await db.save(snapshot_molecule)
+    if forces_storage is not None:
+        await db.save(forces_storage)
     await db.save(snapshot)
     try:
         from molecular_qm_psi4.nodes.molecule_snapshot_inspector import (
@@ -1779,7 +1835,9 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                     wfn = wfn_freq
             else:
                 snapshotter = None
-                energy, wfn = psi4.energy(method, return_wfn=True, ref_wfn=restart_wfn)
+                energy, wfn = run_single_point(
+                    psi4, method, qm_input.gradients, restart_wfn
+                )
                 orbital_payload = _payload_from_wfn_or_reference(wfn)
 
             try:
@@ -1800,6 +1858,8 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                     final_structure=True,
                     qm_input=qm_input,
                 )
+            except ValueError:
+                raise
             except Exception as e_snap:
                 node_runner.warning(f"Failed to store final MoleculeSnapshot: {e_snap}")
 
