@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.6.0 (2026-09-04)
+
+### Features
+
+- Persist Cartesian forces from Psi4 gradient single-points
+  ([`80318e7`](https://github.com/simstack/molecular_qm_psi4/commit/80318e71ef093423f3458c65f2ef39620ad64a08))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.5.1 (2026-09-04)
 
 ### Bug Fixes
