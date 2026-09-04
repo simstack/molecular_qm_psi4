@@ -335,8 +335,6 @@ class OptimizationSnapshotter:
         self.opt_geometries = []
         self.opt_wall_s = None
         self.opt_cpu_s = None
-        self._last_wall_s = None
-        self._last_cpu_s = None
         self.charts = (None, None)
         self._chart_steps = set()
         self.stdout_tee = None
@@ -483,12 +481,12 @@ class OptimizationSnapshotter:
                 f"{stamp} Optimization step {step}: "
                 f"energy={float(energy):.12f} Ha, |g|={float(grad_norm):.6e} Ha/Bohr"
             )
-        if wall_s is not None or cpu_s is not None:
-            if wall_s is None or cpu_s is None:
-                raise ValueError("wall_s and cpu_s must both be set")
-            msg = f"{msg}, wall={float(wall_s):.2f}s, cpu={float(cpu_s):.2f}s"
+        if wall_s is None or cpu_s is None:
+            raise ValueError("wall_s and cpu_s must both be set")
+        msg = f"{msg}, wall={float(wall_s):.2f}s, cpu={float(cpu_s):.2f}s"
         node_runner = self._node_runner()
         if node_runner is not None:
+            node_runner.log(msg)
             node_runner.info(msg)
         else:
             logger.info(msg)
@@ -762,59 +760,47 @@ def _optimize(mf, qm_input, snapshotter):
     def scan_fn(mol):
         if stdout_tee is not None:
             mol.stdout = stdout_tee
-        energy, grad = scanner(mol)
-        if constraints:
-            energy, grad = _apply_harmonic_to_gradient(energy, grad, mol, constraints)
-        return energy, grad
-
-    original_calc_new = geometric_solver.PySCFEngine.calc_new
-
-    def timed_calc_new(engine, coords, dirname):
-        if snapshotter is not None:
-            snapshotter.geom_iter += 1
-            snapshotter._start_iter_timer()
-            if snapshotter.stdout_tee is not None:
-                engine_mol = getattr(engine, "mol", None)
-                if engine_mol is not None:
-                    engine_mol.stdout = snapshotter.stdout_tee
+        if snapshotter is None:
+            energy, grad = scanner(mol)
+            if constraints:
+                energy, grad = _apply_harmonic_to_gradient(energy, grad, mol, constraints)
+            return energy, grad
+        snapshotter.geom_iter += 1
+        snapshotter._start_iter_timer()
         wall_start = time.monotonic()
         cpu_start = time.process_time()
-        result = None
+        energy = None
+        grad = None
         try:
-            result = original_calc_new(engine, coords, dirname)
-            return result
+            energy, grad = scanner(mol)
+            if constraints:
+                energy, grad = _apply_harmonic_to_gradient(energy, grad, mol, constraints)
+            return energy, grad
         finally:
             wall_s = time.monotonic() - wall_start
             cpu_s = time.process_time() - cpu_start
-            if snapshotter is not None:
-                snapshotter._cancel_iter_timer()
-                snapshotter._last_wall_s = wall_s
-                snapshotter._last_cpu_s = cpu_s
-                energy = None
-                grad = None
-                if isinstance(result, dict):
-                    energy = result.get("energy")
-                    grad = result.get("gradient")
-                grad_norm = None
-                try:
-                    if grad is not None and np is not None:
-                        grad_norm = float(np.linalg.norm(np.asarray(grad, dtype=float)))
-                except Exception:
-                    pass
-                stamp = snapshotter._log_opt_step(energy, grad_norm, wall_s, cpu_s)
-                snapshotter.timing_history.append(
-                    {
-                        "step": int(snapshotter.geom_iter),
-                        "wall_time_s": wall_s,
-                        "cpu_time_s": cpu_s,
-                        "timestamp": stamp,
-                        "energy": energy,
-                        "grad_norm": grad_norm,
-                    }
-                )
-                snapshotter._record_opt_charts(
-                    int(snapshotter.geom_iter), energy, grad_norm, stamp
-                )
+            snapshotter._cancel_iter_timer()
+            grad_norm = None
+            try:
+                if grad is not None and np is not None:
+                    grad_norm = float(np.linalg.norm(np.asarray(grad, dtype=float)))
+            except Exception:
+                pass
+            stamp = snapshotter._log_opt_step(energy, grad_norm, wall_s, cpu_s)
+            snapshotter.timing_history.append(
+                {
+                    "step": int(snapshotter.geom_iter),
+                    "wall_time_s": wall_s,
+                    "cpu_time_s": cpu_s,
+                    "timestamp": stamp,
+                    "energy": energy,
+                    "grad_norm": grad_norm,
+                }
+            )
+            snapshotter._record_opt_charts(
+                int(snapshotter.geom_iter), energy, grad_norm, stamp
+            )
+            if energy is not None:
                 snapshotter._raise_if_energy_oscillating()
                 if wall_s > snapshotter.iteration_timeout:
                     raise OptimizationTimeoutError(
@@ -824,7 +810,6 @@ def _optimize(mf, qm_input, snapshotter):
                     )
 
     conv_params = pyscf_opt_conv_params(getattr(qm_input, "optimization_accuracy", None))
-    geometric_solver.PySCFEngine.calc_new = timed_calc_new
     wall_start = time.monotonic()
     cpu_start = time.process_time()
     try:
@@ -835,7 +820,6 @@ def _optimize(mf, qm_input, snapshotter):
             **conv_params,
         )
     finally:
-        geometric_solver.PySCFEngine.calc_new = original_calc_new
         if snapshotter is not None:
             snapshotter.opt_wall_s = time.monotonic() - wall_start
             snapshotter.opt_cpu_s = time.process_time() - cpu_start

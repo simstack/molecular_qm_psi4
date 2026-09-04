@@ -2,6 +2,7 @@ from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 import logging
+import re
 import sys
 
 from molecular_qm_psi4.util.pyscf_calculator import (
@@ -155,44 +156,45 @@ def test_pyscf_persist_opt_charts_keeps_last_20_steps(monkeypatch):
     assert [row["step"] for row in grad_charts[-1].data] == list(range(6, 26))
 
 
+def _run_fake_pyscf_optimize(snapshotter, scanner_returns):
+    from molecular_qm_psi4.nodes.pyscf_calculator import _optimize
+
+    mf = MagicMock()
+    mf.mol = MagicMock()
+    mf.nuc_grad_method.return_value.as_scanner.return_value = MagicMock(
+        side_effect=list(scanner_returns)
+    )
+
+    def fake_optimize(method, callback=None, maxsteps=None, **kwargs):
+        mol = MagicMock()
+        for _ in scanner_returns:
+            method(mol)
+        return MagicMock()
+
+    fake_solver = SimpleNamespace(optimize=fake_optimize)
+    with patch.dict(
+        sys.modules,
+        {
+            "pyscf": sys.modules.get("pyscf") or SimpleNamespace(),
+            "pyscf.geomopt": SimpleNamespace(geometric_solver=fake_solver),
+            "pyscf.geomopt.addons": SimpleNamespace(as_pyscf_method=lambda mol, fn: fn),
+            "pyscf.geomopt.geometric_solver": fake_solver,
+        },
+    ):
+        _optimize(mf, _qm_input(), snapshotter)
+
+
 def test_pyscf_optimize_records_iteration_and_total_timings():
-    from molecular_qm_psi4.nodes.pyscf_calculator import OptimizationSnapshotter, _optimize
+    from molecular_qm_psi4.nodes.pyscf_calculator import OptimizationSnapshotter
     from molecular_qm_psi4.util.qm_engine import attach_optimizer_timings
 
     snapshotter = OptimizationSnapshotter(
         MagicMock(), {"node_runner": MagicMock()}, interval=10
     )
-    mf = MagicMock()
-    mf.mol = MagicMock()
-    mf.nuc_grad_method.return_value.as_scanner.return_value = MagicMock(
-        return_value=(-76.5, [[0.0, 0.0, 0.1]])
+    _run_fake_pyscf_optimize(
+        snapshotter,
+        [(-76.5, [[0.0, 0.0, 0.1]]), (-76.5, [[0.0, 0.0, 0.1]])],
     )
-    qm_input = _qm_input()
-
-    class FakeEngine:
-        def calc_new(self, coords, dirname):
-            return {"energy": -76.5, "gradient": [0.0, 0.0, 0.1]}
-
-    def fake_optimize(method, callback=None, maxsteps=None, **kwargs):
-        from pyscf.geomopt import geometric_solver
-
-        geometric_solver.PySCFEngine.calc_new(FakeEngine(), None, None)
-        geometric_solver.PySCFEngine.calc_new(FakeEngine(), None, None)
-        return MagicMock()
-
-    fake_pyscf = sys.modules.get("pyscf") or SimpleNamespace()
-    fake_solver = SimpleNamespace(optimize=fake_optimize, PySCFEngine=FakeEngine)
-    fake_geomopt = SimpleNamespace(geometric_solver=fake_solver)
-    with patch.dict(
-        sys.modules,
-        {
-            "pyscf": fake_pyscf,
-            "pyscf.geomopt": fake_geomopt,
-            "pyscf.geomopt.addons": SimpleNamespace(as_pyscf_method=lambda mol, fn: fn),
-            "pyscf.geomopt.geometric_solver": fake_solver,
-        },
-    ):
-        _optimize(mf, qm_input, snapshotter)
 
     assert [row["step"] for row in snapshotter.timing_history] == [1, 2]
     assert snapshotter.timing_history[0]["wall_time_s"] >= 0
@@ -207,6 +209,33 @@ def test_pyscf_optimize_records_iteration_and_total_timings():
     assert metrics.count("iteration") == 2
     assert "total" in metrics
     assert "optimize" in metrics
+
+
+def test_pyscf_optimize_logs_energy_and_gradient_every_step():
+    from molecular_qm_psi4.nodes.pyscf_calculator import OptimizationSnapshotter
+
+    node_runner = MagicMock()
+    snapshotter = OptimizationSnapshotter(
+        MagicMock(), {"node_runner": node_runner}, interval=10
+    )
+    _run_fake_pyscf_optimize(
+        snapshotter,
+        [
+            (-76.5, [[0.12, 0.0, 0.0]]),
+            (-76.51, [[0.08, 0.0, 0.0]]),
+            (-76.52, [[0.03, 0.0, 0.0]]),
+        ],
+    )
+
+    messages = [call.args[0] for call in node_runner.info.call_args_list]
+    step_logs = [msg for msg in messages if "Optimization step " in msg]
+    assert len(step_logs) == 3
+    assert re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} ", step_logs[0])
+    assert "Optimization step 1: energy=-76.500000000000 Ha, |g|=1.200000e-01 Ha/Bohr" in step_logs[0]
+    assert "Optimization step 2: energy=-76.510000000000 Ha, |g|=8.000000e-02 Ha/Bohr" in step_logs[1]
+    assert "Optimization step 3: energy=-76.520000000000 Ha, |g|=3.000000e-02 Ha/Bohr" in step_logs[2]
+    logged = [call.args[0] for call in node_runner.log.call_args_list]
+    assert step_logs == [msg for msg in logged if "Optimization step " in msg]
 
 
 def test_parse_pyscf_opt_cycle_line():
