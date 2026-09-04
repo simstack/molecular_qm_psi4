@@ -104,13 +104,27 @@ def _positive_int(value) -> Optional[int]:
     return value if value >= 1 else None
 
 
-def _slurm_cpu_count(slurm) -> Optional[int]:
+def _slurm_task_count(slurm) -> int:
+    """Same as ``simstack.core.run_docker._slurm_task_count``."""
+    tasks = _positive_int(getattr(slurm, "tasks", None))
+    if tasks is not None:
+        return tasks
+    tasks_per_node = _positive_int(getattr(slurm, "tasks_per_node", None))
+    if tasks_per_node is not None:
+        return tasks_per_node
+    return 1
+
+
+def docker_cpu_limit(slurm) -> Optional[int]:
+    """Same as ``simstack.core.run_docker.docker_cpu_limit`` (``--cpus``)."""
+    if slurm is None:
+        return None
     cpus_per_task = _positive_int(getattr(slurm, "cpus_per_task", None))
     tasks = _positive_int(getattr(slurm, "tasks", None))
     tasks_per_node = _positive_int(getattr(slurm, "tasks_per_node", None))
     if cpus_per_task is None and tasks is None and tasks_per_node is None:
         return None
-    return (cpus_per_task or 1) * (tasks or tasks_per_node or 1)
+    return (cpus_per_task or 1) * _slurm_task_count(slurm)
 
 
 def _parse_slurm_memory(value) -> Optional[tuple]:
@@ -130,22 +144,99 @@ def _format_qm_memory(amount: float, unit: str) -> str:
 
 
 def memory_to_mb(memory: str) -> float:
+    if memory is None:
+        raise ValueError("memory is required")
     parsed = _parse_slurm_memory(memory)
     if parsed is None:
-        return 8000.0
+        raise ValueError(f"Cannot parse memory value {memory!r}")
     amount, unit = parsed
     if unit == "g":
         return amount * 1000.0
     return amount
 
 
+def _format_container_memory(amount: float, unit: str) -> str:
+    """Same as ``run_docker._format_container_memory(..., uppercase=False)``."""
+    formatted_amount = str(int(amount)) if amount == int(amount) else str(amount)
+    return f"{formatted_amount}{unit.lower()}"
+
+
+def docker_memory_limit(slurm) -> Optional[str]:
+    """Same as ``simstack.core.run_docker.docker_memory_limit`` (``--memory``)."""
+    if slurm is None:
+        return None
+    mem = _parse_slurm_memory(getattr(slurm, "mem", None))
+    if mem is not None:
+        amount, unit = mem
+        return _format_container_memory(amount, unit)
+    mem_per_cpu = _parse_slurm_memory(getattr(slurm, "mem_per_cpu", None))
+    if mem_per_cpu is None:
+        return None
+    amount, unit = mem_per_cpu
+    cpu_count = docker_cpu_limit(slurm) or 1
+    return _format_container_memory(amount * cpu_count, unit)
+
+
+def docker_container_resource_args(slurm) -> list[str]:
+    """Same flags ``run_docker.container_resource_args`` passes to ``docker run``."""
+    args: list[str] = []
+    cpu_limit = docker_cpu_limit(slurm)
+    if cpu_limit is not None:
+        args.extend(["--cpus", str(cpu_limit)])
+    memory_limit = docker_memory_limit(slurm)
+    if memory_limit is not None:
+        args.extend(["--memory", memory_limit])
+    return args
+
+
+def slurm_from_kwargs(kwargs: dict):
+    params = kwargs.get("parent_parameters") or kwargs.get("parameters")
+    if params is None:
+        return None
+    return getattr(params, "slurm_parameters", None)
+
+
+def pyscf_resources_from_slurm(kwargs: dict) -> tuple[float, int, str]:
+    """PySCF max_memory (MB) and threads matching ``run_docker`` container limits."""
+    slurm = slurm_from_kwargs(kwargs)
+    cpus = docker_cpu_limit(slurm)
+    mem_flag = docker_memory_limit(slurm)
+    flags = " ".join(docker_container_resource_args(slurm)) or "(none)"
+    if mem_flag is None:
+        raise ValueError(
+            "slurm_parameters.mem or mem_per_cpu is required so PySCF max_memory "
+            f"matches run_docker --memory; container flags={flags}"
+        )
+    if cpus is None:
+        raise ValueError(
+            "slurm_parameters cpus_per_task/tasks/tasks_per_node is required so "
+            f"PySCF threads match run_docker --cpus; container flags={flags}"
+        )
+    memory_mb = memory_to_mb(mem_flag)
+    mem_display = int(memory_mb) if memory_mb == int(memory_mb) else memory_mb
+    log = (
+        f"run_docker container limits from slurm_parameters: {flags}; "
+        f"PySCF max_memory={mem_display} MB threads={cpus}"
+    )
+    return memory_mb, cpus, log
+
+
+def slurm_requested_memory_mb(kwargs: dict) -> Optional[float]:
+    mem_flag = docker_memory_limit(slurm_from_kwargs(kwargs))
+    if mem_flag is None:
+        return None
+    return memory_to_mb(mem_flag)
+
+
 def resources_from_parent_parameters(
     kwargs: dict,
     label: str = "QM",
 ) -> tuple[str, int, str]:
-    """Resolve memory/threads from ``parent_parameters.slurm_parameters``."""
-    params = kwargs.get("parent_parameters") or kwargs.get("parameters")
-    slurm = getattr(params, "slurm_parameters", None) if params is not None else None
+    """Resolve memory/threads from ``parent_parameters.slurm_parameters``.
+
+    CPU and memory follow the same rules as ``run_docker`` ``--cpus`` / ``--memory``.
+    """
+    slurm = slurm_from_kwargs(kwargs)
     if slurm is None:
         return (
             _DEFAULT_QM_MEMORY,
@@ -155,23 +246,21 @@ def resources_from_parent_parameters(
             "(no SlurmParameters on parent_parameters; using defaults)",
         )
 
-    threads = _slurm_cpu_count(slurm) or _DEFAULT_QM_THREADS
-    mem = _parse_slurm_memory(getattr(slurm, "mem", None))
-    mem_per_cpu = _parse_slurm_memory(getattr(slurm, "mem_per_cpu", None))
-    if mem is not None:
-        memory = _format_qm_memory(*mem)
-    elif mem_per_cpu is not None:
-        amount, unit = mem_per_cpu
-        memory = _format_qm_memory(amount * (_slurm_cpu_count(slurm) or 1), unit)
+    threads = docker_cpu_limit(slurm) or _DEFAULT_QM_THREADS
+    mem_flag = docker_memory_limit(slurm)
+    if mem_flag is not None:
+        memory = _format_qm_memory(*_parse_slurm_memory(mem_flag))
     else:
         memory = _DEFAULT_QM_MEMORY
+    flags = " ".join(docker_container_resource_args(slurm)) or "(none)"
 
     return (
         memory,
         threads,
         f"{label} resources from parent SlurmParameters: "
         f"memory={memory}, threads={threads} "
-        f"(cpus_per_task={getattr(slurm, 'cpus_per_task', None)}, "
+        f"(run_docker {flags}; "
+        f"cpus_per_task={getattr(slurm, 'cpus_per_task', None)}, "
         f"tasks={getattr(slurm, 'tasks', None)}, "
         f"tasks_per_node={getattr(slurm, 'tasks_per_node', None)}, "
         f"mem={getattr(slurm, 'mem', None)}, "

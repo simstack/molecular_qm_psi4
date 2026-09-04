@@ -7,6 +7,7 @@ import sys
 
 from molecular_qm_psi4.util.pyscf_calculator import (
     PySCFCalculator,
+    df_hessian_memory,
     method_name_from_qm_input,
     pyscf_basis_name,
     pyscf_dispersion,
@@ -19,9 +20,14 @@ from molecular_qm_psi4.util.qm_engine import (
     QMEngine,
     QMEngineInput,
     calculator_node_for,
+    docker_container_resource_args,
+    docker_cpu_limit,
+    docker_memory_limit,
     memory_to_mb,
+    pyscf_resources_from_slurm,
     resolve_engine,
     resources_from_parent_parameters,
+    slurm_requested_memory_mb,
 )
 
 
@@ -92,6 +98,12 @@ def test_calculator_node_for_dispatches_same_qminput_nodes():
 def test_memory_to_mb():
     assert memory_to_mb("8 GB") == 8000.0
     assert memory_to_mb("512 MB") == 512.0
+    try:
+        memory_to_mb("nope")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for unparseable memory")
 
 
 def test_resources_from_parent_parameters_defaults():
@@ -99,6 +111,119 @@ def test_resources_from_parent_parameters_defaults():
     assert memory == "8 GB"
     assert threads == 4
     assert "PySCF resources" in log
+
+
+def test_pyscf_resources_match_run_docker_container_limits():
+    slurm = SimpleNamespace(
+        mem="32 GB",
+        mem_per_cpu=None,
+        cpus_per_task=8,
+        tasks=1,
+        tasks_per_node=1,
+    )
+    assert docker_cpu_limit(slurm) == 8
+    assert docker_memory_limit(slurm) == "32g"
+    assert docker_container_resource_args(slurm) == ["--cpus", "8", "--memory", "32g"]
+    memory_mb, threads, log = pyscf_resources_from_slurm(
+        {"parent_parameters": SimpleNamespace(slurm_parameters=slurm)}
+    )
+    assert memory_mb == 32000.0
+    assert threads == 8
+    assert "--cpus 8" in log
+    assert "--memory 32g" in log
+    assert "max_memory=32000 MB" in log
+    assert "threads=8" in log
+    memory, psi4_threads, _ = resources_from_parent_parameters(
+        {"parent_parameters": SimpleNamespace(slurm_parameters=slurm)},
+        label="Psi4",
+    )
+    assert psi4_threads == threads
+    assert memory_to_mb(memory) == memory_mb
+
+
+def test_pyscf_resources_mem_per_cpu_matches_docker():
+    slurm = SimpleNamespace(
+        mem=None,
+        mem_per_cpu="4G",
+        cpus_per_task=4,
+        tasks=1,
+        tasks_per_node=None,
+    )
+    assert docker_cpu_limit(slurm) == 4
+    assert docker_memory_limit(slurm) == "16g"
+    memory_mb, threads, log = pyscf_resources_from_slurm(
+        {"parameters": SimpleNamespace(slurm_parameters=slurm)}
+    )
+    assert memory_mb == 16000.0
+    assert threads == 4
+    assert "--memory 16g" in log
+
+
+def test_docker_limit_helpers_match_simstack_run_docker():
+    slurm = SimpleNamespace(
+        mem="32G",
+        mem_per_cpu=None,
+        cpus_per_task=8,
+        tasks=1,
+        tasks_per_node=1,
+    )
+    try:
+        from simstack.core.run_docker import (
+            container_resource_args,
+            docker_cpu_limit as simstack_cpus,
+            docker_memory_limit as simstack_mem,
+        )
+    except Exception:
+        return
+    assert docker_cpu_limit(slurm) == simstack_cpus(slurm)
+    assert docker_memory_limit(slurm) == simstack_mem(slurm)
+    assert docker_container_resource_args(slurm) == container_resource_args("docker", slurm)
+
+
+def test_pyscf_resources_require_slurm_memory_and_cpus():
+    try:
+        pyscf_resources_from_slurm({})
+    except ValueError as exc:
+        assert "mem" in str(exc)
+    else:
+        raise AssertionError("expected ValueError when slurm memory is missing")
+    slurm = SimpleNamespace(
+        mem="32G",
+        mem_per_cpu=None,
+        cpus_per_task=None,
+        tasks=None,
+        tasks_per_node=None,
+    )
+    try:
+        pyscf_resources_from_slurm({"parent_parameters": SimpleNamespace(slurm_parameters=slurm)})
+    except ValueError as exc:
+        assert "cpus" in str(exc)
+    else:
+        raise AssertionError("expected ValueError when slurm CPU fields are missing")
+
+
+def test_slurm_requested_memory_mb():
+    params = SimpleNamespace(
+        slurm_parameters=SimpleNamespace(
+            mem="32 GB",
+            mem_per_cpu=None,
+            cpus_per_task=8,
+            tasks=1,
+            tasks_per_node=None,
+        )
+    )
+    assert slurm_requested_memory_mb({"parent_parameters": params}) == 32000.0
+    assert slurm_requested_memory_mb({}) is None
+    per_cpu = SimpleNamespace(
+        slurm_parameters=SimpleNamespace(
+            mem=None,
+            mem_per_cpu="4 GB",
+            cpus_per_task=4,
+            tasks=None,
+            tasks_per_node=None,
+        )
+    )
+    assert slurm_requested_memory_mb({"parent_parameters": per_cpu}) == 16000.0
 
 
 def test_pyscf_set_options_logs_qminput_limits():
@@ -328,14 +453,20 @@ def test_redirect_pyscf_logs_forwards_geomopt_cycle_line():
 
 
 def test_kernel_hessian_logs_info_and_stops_heartbeat():
-    from molecular_qm_psi4.nodes.pyscf_calculator import _kernel_hessian
+    from molecular_qm_psi4.nodes.pyscf_calculator import _HEARTBEAT_INTERVAL_S, _kernel_hessian
 
     node_runner = MagicMock()
     mol = MagicMock()
     mol.natm = 40
+    mol.nao = 40
+    mol.spin = 0
+    mol.nelectron = 16
     mol.stdout = MagicMock()
     mf = MagicMock()
     mf.xc = "wb97m-d3bj"
+    mf.with_df = None
+    mf.max_memory = 27200
+    mf.mo_occ = None
     hobj = MagicMock()
     hobj.verbose = 0
     hobj.kernel.return_value = "hessian"
@@ -347,10 +478,13 @@ def test_kernel_hessian_logs_info_and_stops_heartbeat():
     assert result == "hessian"
     heartbeat.start.assert_called_once()
     heartbeat.stop.assert_called_once()
+    assert heartbeat_cls.call_args.kwargs["interval_s"] == _HEARTBEAT_INTERVAL_S
+    assert _HEARTBEAT_INTERVAL_S == 1800.0
     messages = [call.args[0] for call in node_runner.info.call_args_list]
     assert any("Starting frequency/Hessian calculation" in msg for msg in messages)
     assert hobj.verbose == 4
     assert hobj.stdout is mol.stdout
+    assert hobj.max_memory == 27200
 
 
 def test_process_heartbeat_appends_until_stopped(tmp_path):
@@ -379,3 +513,144 @@ def test_process_heartbeat_appends_until_stopped(tmp_path):
     assert "still running" in text
     assert extra.exists()
     assert "Frequency/Hessian calculation" in extra.read_text(encoding="utf-8")
+
+
+class _Occ:
+    ndim = 1
+
+    def __init__(self, n):
+        self._n = n
+
+    def __gt__(self, other):
+        return self
+
+    def sum(self):
+        return self._n
+
+
+def test_df_hessian_memory_detects_when_tensor_does_not_fit():
+    mol = SimpleNamespace(nao=2000, nelectron=500)
+    auxmol = SimpleNamespace(nao=4000)
+    mf = SimpleNamespace(mo_occ=_Occ(250), with_df=SimpleNamespace(auxmol=auxmol))
+    info = df_hessian_memory(mf, mol, 8000)
+    assert info["density_fit"] is True
+    assert info["fits"] is False
+    assert info["naux"] == 4000
+    assert info["nao"] == 2000
+    assert info["nocc"] == 250
+    small = df_hessian_memory(mf, mol, 40000)
+    assert small["fits"] is True
+
+
+def test_df_hessian_memory_without_density_fit_fits():
+    mol = SimpleNamespace(nao=40, nelectron=16)
+    mf = SimpleNamespace(mo_occ=None, with_df=None)
+    info = df_hessian_memory(mf, mol, 8000)
+    assert info["density_fit"] is False
+    assert info["fits"] is True
+    assert info["required_mb"] == 0.0
+
+
+def test_apply_max_memory_sets_mol_mf_and_df():
+    calc = PySCFCalculator(_qm_input())
+    calc.max_memory = 27200
+    mol = SimpleNamespace()
+    with_df = SimpleNamespace()
+    mf = SimpleNamespace(with_df=with_df)
+    calc.apply_max_memory(mol, mf)
+    assert mol.max_memory == 27200
+    assert mf.max_memory == 27200
+    assert with_df.max_memory == 27200
+
+
+def test_build_molecule_passes_max_memory(monkeypatch):
+    fake_mol = SimpleNamespace(max_memory=None)
+    fake_gto = SimpleNamespace(M=MagicMock(return_value=fake_mol))
+    monkeypatch.setitem(sys.modules, "pyscf", SimpleNamespace(gto=fake_gto))
+    monkeypatch.setitem(sys.modules, "pyscf.gto", fake_gto)
+    calc = PySCFCalculator(_qm_input())
+    calc.max_memory = 27200
+    mol = calc.build_molecule("pyscf.out")
+    assert mol is fake_mol
+    assert fake_mol.max_memory == 27200
+    assert fake_gto.M.call_args.kwargs["max_memory"] == 27200
+
+
+def test_kernel_hessian_uses_conventional_when_df_does_not_fit():
+    from molecular_qm_psi4.nodes.pyscf_calculator import _kernel_hessian
+
+    node_runner = MagicMock()
+    mol = MagicMock()
+    mol.natm = 80
+    mol.nao = 2000
+    mol.spin = 0
+    mol.stdout = MagicMock()
+    mf = MagicMock()
+    mf.xc = "b3lyp"
+    mf.mol = mol
+    mf.mo_occ = _Occ(250)
+    mf.max_memory = 8000
+    mf.with_df.auxmol.nao = 4000
+    conv = MagicMock()
+    conv.verbose = 0
+    conv.kernel.return_value = "conventional"
+    with patch("molecular_qm_psi4.nodes.pyscf_calculator.ProcessHeartbeat") as heartbeat_cls, patch(
+        "molecular_qm_psi4.nodes.pyscf_calculator._conventional_hessian",
+        return_value=conv,
+    ) as conv_factory:
+        heartbeat_cls.return_value = MagicMock()
+        result = _kernel_hessian(mf, mol, node_runner, 8000)
+    assert result == "conventional"
+    conv_factory.assert_called_once_with(mf)
+    mf.Hessian.assert_not_called()
+    warnings = [call.args[0] for call in node_runner.info.call_args_list]
+    assert any("conventional Hessian" in msg for msg in warnings)
+
+
+def test_kernel_hessian_retries_conventional_after_df_memory_error():
+    from molecular_qm_psi4.nodes.pyscf_calculator import _kernel_hessian
+
+    node_runner = MagicMock()
+    mol = MagicMock()
+    mol.natm = 10
+    mol.nao = 20
+    mol.spin = 0
+    mol.stdout = None
+    mf = MagicMock()
+    mf.xc = "b3lyp"
+    mf.mol = mol
+    mf.mo_occ = _Occ(8)
+    mf.max_memory = 32000
+    mf.with_df.auxmol.nao = 30
+    df_hobj = MagicMock()
+    df_hobj.verbose = 0
+    df_hobj.kernel.side_effect = RuntimeError("Memory not enough. You need to increase mol.max_memory")
+    mf.Hessian.return_value = df_hobj
+    conv = MagicMock()
+    conv.verbose = 0
+    conv.kernel.return_value = "conventional"
+    with patch("molecular_qm_psi4.nodes.pyscf_calculator.ProcessHeartbeat") as heartbeat_cls, patch(
+        "molecular_qm_psi4.nodes.pyscf_calculator._conventional_hessian",
+        return_value=conv,
+    ):
+        heartbeat_cls.return_value = MagicMock()
+        result = _kernel_hessian(mf, mol, node_runner, 32000)
+    assert result == "conventional"
+    node_runner.warning.assert_called()
+    assert "retrying with conventional Hessian" in node_runner.warning.call_args[0][0]
+
+
+def test_report_pyscf_failure_writes_called_and_job_logs(capsys):
+    from molecular_qm_psi4.nodes.pyscf_calculator import _report_pyscf_failure
+
+    node_runner = MagicMock()
+    try:
+        raise RuntimeError("Memory not enough. You need to increase mol.max_memory")
+    except RuntimeError as exc:
+        message = _report_pyscf_failure(node_runner, exc)
+    assert "Memory not enough" in message
+    node_runner.error.assert_called_once()
+    assert "Memory not enough" in node_runner.error.call_args[0][0]
+    assert "Traceback" in node_runner.error.call_args[0][0]
+    err = capsys.readouterr().err
+    assert "Memory not enough" in err

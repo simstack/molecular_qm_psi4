@@ -198,6 +198,49 @@ def harmonic_cartesian_constraints(qm_input) -> list:
     return constraints
 
 
+def df_hessian_memory(mf, mol, max_memory) -> dict:
+    """Estimate DF Hessian ``rhok0_Pl_`` size against ``max_memory`` (MB)."""
+    if max_memory is None:
+        raise ValueError("max_memory is required")
+    budget = float(max_memory)
+    if budget <= 0:
+        raise ValueError(f"max_memory must be positive, got {max_memory!r}")
+    nao = int(getattr(mol, "nao"))
+    mo_occ = getattr(mf, "mo_occ", None)
+    if mo_occ is None:
+        nocc = int(getattr(mol, "nelectron", 0) or 0) // 2
+    elif isinstance(mo_occ, (list, tuple)) or getattr(mo_occ, "ndim", 1) > 1:
+        nocc = int(sum(int((occ > 0).sum()) for occ in mo_occ))
+    else:
+        nocc = int((mo_occ > 0).sum())
+    with_df = getattr(mf, "with_df", None)
+    if with_df is None:
+        return {
+            "naux": 0,
+            "nao": nao,
+            "nocc": nocc,
+            "required_mb": 0.0,
+            "fits": True,
+            "density_fit": False,
+        }
+    auxmol = getattr(with_df, "auxmol", None)
+    if auxmol is None:
+        from pyscf import df
+
+        auxmol = df.addons.make_auxmol(getattr(with_df, "mol", None) or mol, with_df.auxbasis)
+    naux = int(auxmol.nao)
+    required_mb = naux * nocc * (nocc + nao) * 8 / 0.8e6
+    fits = budget * 0.8e6 / 8 >= naux * nocc * (nocc + nao)
+    return {
+        "naux": naux,
+        "nao": nao,
+        "nocc": nocc,
+        "required_mb": required_mb,
+        "fits": fits,
+        "density_fit": True,
+    }
+
+
 class PySCFCalculator:
     def __init__(self, qm_input: QMInput, **kwargs):
         self.qm_input = qm_input
@@ -205,20 +248,41 @@ class PySCFCalculator:
         self.mol = None
         self.mf = None
 
-    def set_resources(self, memory: str = "8 GB", num_threads: int = 4):
+    def set_resources(self, max_memory_mb, num_threads):
         from pyscf import lib
 
-        from molecular_qm_psi4.util.qm_engine import memory_to_mb
-
-        lib.num_threads(num_threads)
-        max_memory = memory_to_mb(memory)
+        if max_memory_mb is None:
+            raise ValueError("max_memory_mb is required")
+        if num_threads is None:
+            raise ValueError("num_threads is required")
+        max_memory = float(max_memory_mb)
+        if max_memory <= 0:
+            raise ValueError(f"max_memory_mb must be positive, got {max_memory_mb!r}")
+        threads = int(num_threads)
+        if threads < 1:
+            raise ValueError(f"num_threads must be >= 1, got {num_threads!r}")
+        lib.num_threads(threads)
         lib.param.MAX_MEMORY = max_memory
         self.max_memory = max_memory
-        self.num_threads = num_threads
+        self.num_threads = threads
+
+    def apply_max_memory(self, mol=None, mf=None):
+        if not hasattr(self, "max_memory"):
+            raise ValueError("max_memory has not been set; call set_resources first")
+        budget = self.max_memory
+        if mol is not None:
+            mol.max_memory = budget
+        if mf is not None:
+            mf.max_memory = budget
+            with_df = getattr(mf, "with_df", None)
+            if with_df is not None:
+                with_df.max_memory = budget
 
     def build_molecule(self, output_file="pyscf.out"):
         from pyscf import gto
 
+        if not hasattr(self, "max_memory"):
+            raise ValueError("max_memory has not been set; call set_resources first")
         molecule = self.qm_input.molecule
         atom = "; ".join(
             f"{atom.element} {atom.x} {atom.y} {atom.z}" for atom in molecule.atoms
@@ -234,7 +298,9 @@ class PySCFCalculator:
             verbose=verbose,
             output=str(output_file),
             symmetry=False,
+            max_memory=self.max_memory,
         )
+        mol.max_memory = self.max_memory
         self.mol = mol
         return mol
 
@@ -292,15 +358,16 @@ class PySCFCalculator:
         mf = self._apply_density_fit(mf)
         mf.conv_tol = scf_convergence_threshold(getattr(self.qm_input, "scf_accuracy", None))
         mf.max_cycle = int(self.qm_input.max_scf_iterations)
-        mf.max_memory = getattr(self, "max_memory", 8000)
         mf.chkfile = "result.chk"
         mf = self._apply_solvent(mf)
+        self.apply_max_memory(mol, mf)
         self.mf = mf
         if self.node_runner is not None:
             self.node_runner.info(
                 "QMInput limits for PySCF: "
                 f"method={method}, xc={getattr(mf, 'xc', 'HF')}, "
                 f"basis={pyscf_basis_name(self.qm_input)}, "
+                f"max_memory={self.max_memory} MB, "
                 f"max_scf_iterations={self.qm_input.max_scf_iterations} -> max_cycle, "
                 f"max_optimization_iterations={self.qm_input.max_optimization_iterations}, "
                 f"print_level={getattr(self.qm_input, 'print_level', 1)} -> verbose={mol.verbose}, "

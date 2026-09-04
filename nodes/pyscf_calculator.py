@@ -6,6 +6,7 @@ import signal
 import sys
 import threading
 import time
+import traceback
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,7 @@ from molecular_qm_psi4.util.psi4_calculator import (
 from molecular_qm_psi4.util.process_heartbeat import ProcessHeartbeat
 from molecular_qm_psi4.util.pyscf_calculator import (
     PySCFCalculator,
+    df_hessian_memory,
     harmonic_cartesian_constraints,
     method_name_from_qm_input,
     pyscf_opt_conv_params,
@@ -37,7 +39,10 @@ from molecular_qm_psi4.util.pyscf_calculator import (
 from molecular_qm_psi4.util.opt_structures import optimization_structure_list
 from molecular_qm_psi4.util.pyscf_result import PySCFResult
 from molecular_qm_psi4.util.pyscf_thermo import run_pyscf_thermo
-from molecular_qm_psi4.util.qm_engine import attach_optimizer_timings, resources_from_parent_parameters
+from molecular_qm_psi4.util.qm_engine import (
+    attach_optimizer_timings,
+    pyscf_resources_from_slurm,
+)
 from simstack.core.context import context
 from simstack.core.node import node
 from simstack.core.node_runner import NodeRunner
@@ -60,7 +65,7 @@ _SNAPSHOT_WFN_NAME = "snapshot.wfn.npy"
 _WATCHDOG_SIDECAR = "optimization_watchdog_timeout.txt"
 _HEARTBEAT_LOG = "heartbeat.log"
 _FREQ_KEY = "frequency_analysis"
-_HEARTBEAT_INTERVAL_S = 60.0
+_HEARTBEAT_INTERVAL_S = 1800.0
 
 
 def _run_async(coro):
@@ -780,13 +785,71 @@ def _apply_harmonic_to_gradient(energy, grad, mol, constraints):
     return float(energy) + extra, grad
 
 
-def _kernel_hessian(mf, mol, node_runner):
+def _conventional_hessian(mf):
+    mol = mf.mol
+    open_shell = bool(int(getattr(mol, "spin", 0) or 0))
+    is_ks = getattr(mf, "xc", None) not in (None, "HF")
+    if is_ks:
+        if open_shell:
+            from pyscf.hessian import uks as hess_mod
+        else:
+            from pyscf.hessian import rks as hess_mod
+    elif open_shell:
+        from pyscf.hessian import uhf as hess_mod
+    else:
+        from pyscf.hessian import rhf as hess_mod
+    return hess_mod.Hessian(mf)
+
+
+def _prepare_hessian_object(hobj, mol, max_memory):
+    if max_memory is None:
+        raise ValueError("max_memory is required")
+    hobj.max_memory = max_memory
+    current_verbose = getattr(hobj, "verbose", 0) or 0
+    hobj.verbose = max(int(current_verbose), 4)
+    if getattr(mol, "stdout", None) is not None:
+        hobj.stdout = mol.stdout
+    return hobj
+
+
+def _report_pyscf_failure(node_runner, exc):
+    tb = traceback.format_exc()
+    message = f"PySCF calculation failed: {exc}\n{tb}"
+    logger.error(message)
+    print(message, file=sys.stderr, flush=True)
+    if node_runner is not None:
+        node_runner.error(message)
+        node_runner.log(message)
+    return message
+
+
+def _kernel_hessian(mf, mol, node_runner, max_memory=None):
+    if max_memory is None:
+        max_memory = getattr(mf, "max_memory", None)
+    if max_memory is None:
+        raise ValueError("max_memory is required for the Hessian calculation")
     n_atoms = getattr(mol, "natm", None)
     xc = getattr(mf, "xc", None)
+    info = df_hessian_memory(mf, mol, max_memory)
+    use_df = bool(info["density_fit"] and info["fits"])
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if info["density_fit"] and not info["fits"]:
+        path_msg = (
+            f"DF Hessian needs {info['required_mb'] / 1000:.1f} GB "
+            f"(naux={info['naux']}, nao={info['nao']}, nocc={info['nocc']}) "
+            f"vs budget {float(max_memory) / 1000:.1f} GB; using conventional Hessian"
+        )
+    elif info["density_fit"]:
+        path_msg = (
+            f"DF Hessian fits in budget {float(max_memory) / 1000:.1f} GB "
+            f"(required {info['required_mb'] / 1000:.1f} GB; "
+            f"naux={info['naux']}, nao={info['nao']}, nocc={info['nocc']})"
+        )
+    else:
+        path_msg = "mean field has no density fitting; using mf.Hessian()"
     msg = (
         f"{stamp} Starting frequency/Hessian calculation "
-        f"(n_atoms={n_atoms}, xc={xc}). "
+        f"(n_atoms={n_atoms}, xc={xc}). {path_msg} "
         "This can take many hours; heartbeat lines will be written until it finishes."
     )
     if node_runner is not None:
@@ -794,6 +857,7 @@ def _kernel_hessian(mf, mol, node_runner):
         node_runner.info(msg)
     else:
         logger.info(msg)
+    print(msg, file=sys.stderr, flush=True)
     for stream in (getattr(mol, "stdout", None), getattr(mf, "stdout", None), sys.stdout):
         flush = getattr(stream, "flush", None) if stream is not None else None
         if flush is None:
@@ -802,11 +866,10 @@ def _kernel_hessian(mf, mol, node_runner):
             flush()
         except Exception:
             pass
-    hobj = mf.Hessian()
-    current_verbose = getattr(hobj, "verbose", 0) or 0
-    hobj.verbose = max(int(current_verbose), 4)
-    if getattr(mol, "stdout", None) is not None:
-        hobj.stdout = mol.stdout
+    if use_df or not info["density_fit"]:
+        hobj = _prepare_hessian_object(mf.Hessian(), mol, max_memory)
+    else:
+        hobj = _prepare_hessian_object(_conventional_hessian(mf), mol, max_memory)
     task_id = "" if node_runner is None else str(getattr(node_runner, "task_id", "") or "")
     heartbeat = ProcessHeartbeat(
         _HEARTBEAT_LOG,
@@ -817,7 +880,20 @@ def _kernel_hessian(mf, mol, node_runner):
     )
     heartbeat.start()
     try:
-        return hobj.kernel()
+        try:
+            return hobj.kernel()
+        except RuntimeError as exc:
+            if use_df and "Memory not enough" in str(exc):
+                fallback = (
+                    "DF Hessian ran out of memory; retrying with conventional Hessian "
+                    f"at max_memory={float(max_memory):.0f} MB"
+                )
+                if node_runner is not None:
+                    node_runner.warning(fallback)
+                print(fallback, file=sys.stderr, flush=True)
+                hobj = _prepare_hessian_object(_conventional_hessian(mf), mol, max_memory)
+                return hobj.kernel()
+            raise
     finally:
         heartbeat.stop()
 
@@ -922,9 +998,15 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         S_tot (FloatData): Total entropy when thermochemistry was computed.
     """
     node_runner = kwargs.get("node_runner")
-    memory, num_threads, resource_log = resources_from_parent_parameters(kwargs, label="PySCF")
+    try:
+        budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
+    except ValueError as exc:
+        if node_runner is None:
+            raise
+        return node_runner.fail(str(exc))
     if node_runner is not None:
         node_runner.info(resource_log)
+    print(resource_log, file=sys.stderr, flush=True)
 
     try:
         import pyscf  # noqa: F401
@@ -960,7 +1042,7 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             cycle_reporter=cycle_reporter,
         ):
             calculator = PySCFCalculator(qm_input, node_runner=node_runner)
-            calculator.set_resources(memory, num_threads)
+            calculator.set_resources(budget_mb, num_threads)
             mol = calculator.build_molecule(pyscf_result.output_path)
             stdout_tee = None
             if mol.stdout is not None and mol.stdout not in (sys.stdout, sys.stderr):
@@ -989,6 +1071,26 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
 
             method = method_name_from_qm_input(qm_input)
             node_runner.info(f"Starting PySCF calculation with method {method}")
+            if qm_input.frequencies:
+                hess_info = df_hessian_memory(mf, mol, calculator.max_memory)
+                if hess_info["density_fit"] and not hess_info["fits"]:
+                    preflight = (
+                        f"DF Hessian needs {hess_info['required_mb'] / 1000:.1f} GB "
+                        f"(naux={hess_info['naux']}, nao={hess_info['nao']}, "
+                        f"nocc={hess_info['nocc']}) vs budget "
+                        f"{calculator.max_memory / 1000:.1f} GB; "
+                        "will use conventional Hessian after SCF/optimization"
+                    )
+                    node_runner.warning(preflight)
+                    print(preflight, file=sys.stderr, flush=True)
+                else:
+                    preflight = (
+                        f"Hessian memory estimate required_mb={hess_info['required_mb']:.0f} "
+                        f"budget_mb={calculator.max_memory:.0f} fits={hess_info['fits']} "
+                        f"density_fit={hess_info['density_fit']}"
+                    )
+                    node_runner.info(preflight)
+                    print(preflight, file=sys.stderr, flush=True)
             freq_info = None
             hessian = None
             if restart_payload and restart_payload.get(_FREQ_KEY) and qm_input.frequencies and not qm_input.optimization:
@@ -1027,12 +1129,14 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                             f"Failed to store optimized MoleculeSnapshot before frequencies: {exc}"
                         )
                 mol = mol_eq
+                calculator.apply_max_memory(mol)
                 mf.reset(mol)
+                calculator.apply_max_memory(mol, mf)
                 energy = mf.kernel()
                 if qm_input.frequencies:
                     freq_wall_start = time.monotonic()
                     freq_cpu_start = time.process_time()
-                    hessian = _kernel_hessian(mf, mol, node_runner)
+                    hessian = _kernel_hessian(mf, mol, node_runner, calculator.max_memory)
                     from pyscf.hessian import thermo as pyscf_thermo
 
                     freq_info = pyscf_thermo.harmonic_analysis(mol, hessian)
@@ -1048,7 +1152,7 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 energy = mf.kernel()
                 freq_wall_start = time.monotonic()
                 freq_cpu_start = time.process_time()
-                hessian = _kernel_hessian(mf, mol, node_runner)
+                hessian = _kernel_hessian(mf, mol, node_runner, calculator.max_memory)
                 from pyscf.hessian import thermo as pyscf_thermo
 
                 freq_info = pyscf_thermo.harmonic_analysis(mol, hessian)
@@ -1128,11 +1232,11 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 node_runner.thermodynamics_table = thermodynamics_table
             return node_runner.succeed()
     except Exception as exc:
-        logger.error(f"PySCF calculation failed: {exc}")
+        error_message = _report_pyscf_failure(node_runner, exc)
         if qm_input.tolerate_failure:
             node_runner.warning(f"PySCF failed but failure is tolerated: {exc}")
             return node_runner.succeed()
-        return node_runner.fail(f"PySCF execution failed: {exc}")
+        return node_runner.fail(error_message)
     finally:
         try:
             if pyscf_result.output_path.exists():

@@ -100,6 +100,7 @@ def run_heartbeat(path, prefix, interval_s, parent_pid, task_id="", extra_paths=
                 _append_line(extra, line)
             except OSError:
                 pass
+        print(line, end="", file=sys.stderr, flush=True)
         _insert_mongo(collection, f"{stamp} {message}", task_id or "")
         deadline = time.time() + interval
         while time.time() < deadline and _parent_alive(parent):
@@ -109,7 +110,7 @@ def run_heartbeat(path, prefix, interval_s, parent_pid, task_id="", extra_paths=
 class ProcessHeartbeat:
     """Child process that appends heartbeat lines even when the parent holds the GIL."""
 
-    def __init__(self, path, prefix, interval_s=60.0, task_id="", extra_paths=None):
+    def __init__(self, path, prefix, interval_s=1800.0, task_id="", extra_paths=None):
         if path is None:
             raise ValueError("path is required")
         if prefix is None:
@@ -147,7 +148,6 @@ class ProcessHeartbeat:
         self._proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
 
