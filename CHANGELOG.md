@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.6.1 (2026-09-04)
+
+### Bug Fixes
+
+- Keep PySCF live logs during long Hessian and opt steps
+  ([`20ac21a`](https://github.com/simstack/molecular_qm_psi4/commit/20ac21a20e3834fa3ac4e289717605e69dead582))
+
+Spawn a GIL-free heartbeat process and log iteration/Hessian start so Simstack still shows progress
+  when C code holds the interpreter.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.6.0 (2026-09-04)
 
 ### Features
