@@ -27,6 +27,7 @@ from molecular_qm_psi4.util.psi4_calculator import (
     n_atoms_from_molecule,
     python_log_level_for_print_level,
 )
+from molecular_qm_psi4.util.process_heartbeat import ProcessHeartbeat
 from molecular_qm_psi4.util.pyscf_calculator import (
     PySCFCalculator,
     harmonic_cartesian_constraints,
@@ -57,7 +58,9 @@ _SNAPSHOT_INTERVAL = 10
 _OPT_CHART_STEPS = 20
 _SNAPSHOT_WFN_NAME = "snapshot.wfn.npy"
 _WATCHDOG_SIDECAR = "optimization_watchdog_timeout.txt"
+_HEARTBEAT_LOG = "heartbeat.log"
 _FREQ_KEY = "frequency_analysis"
+_HEARTBEAT_INTERVAL_S = 60.0
 
 
 def _run_async(coro):
@@ -344,6 +347,7 @@ class OptimizationSnapshotter:
         self.basis_name = basis
         self.iteration_timeout = iteration_timeout_seconds(n_atoms, basis)
         self._iter_timer = None
+        self._iter_heartbeat = None
         self._timeout_logged = False
 
     def _node_runner(self):
@@ -354,10 +358,37 @@ class OptimizationSnapshotter:
         self._iter_timer = None
         if timer is not None:
             timer.cancel()
+        heartbeat = self._iter_heartbeat
+        self._iter_heartbeat = None
+        if heartbeat is not None:
+            heartbeat.stop()
 
     def _start_iter_timer(self):
         self._cancel_iter_timer()
         timeout = self.iteration_timeout
+        node_runner = self._node_runner()
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timeout_text = "none" if timeout is None else f"{timeout:g}s"
+        start_msg = (
+            f"{stamp} Starting optimization iteration {self.geom_iter} "
+            f"(timeout {timeout_text}, n_atoms={self.n_atoms}, "
+            f"basis={self.basis_name or 'unknown'})"
+        )
+        if node_runner is not None:
+            node_runner.log(start_msg)
+            node_runner.info(start_msg)
+        else:
+            logger.info(start_msg)
+        task_id = "" if node_runner is None else str(getattr(node_runner, "task_id", "") or "")
+        heartbeat = ProcessHeartbeat(
+            _HEARTBEAT_LOG,
+            f"Optimization iteration {self.geom_iter}",
+            interval_s=_HEARTBEAT_INTERVAL_S,
+            task_id=task_id,
+            extra_paths=["pyscf.out"],
+        )
+        heartbeat.start()
+        self._iter_heartbeat = heartbeat
         if timeout is None or timeout <= 0:
             return
         if not self._timeout_logged:
@@ -366,7 +397,6 @@ class OptimizationSnapshotter:
                 f"Optimization iteration timeout: {self.iteration_timeout:g}s "
                 f"(n_atoms={self.n_atoms}, basis={self.basis_name or 'unknown'})"
             )
-            node_runner = self._node_runner()
             if node_runner is not None:
                 node_runner.info(msg)
         timer = threading.Timer(timeout, self._on_iteration_hung)
@@ -599,6 +629,7 @@ class _TeeStdout:
         if text is None:
             raise ValueError("text is required")
         written = self._stream.write(text)
+        self._stream.flush()
         self._consumer.consume(text)
         return written
 
@@ -747,6 +778,48 @@ def _apply_harmonic_to_gradient(energy, grad, mol, constraints):
         extra += 0.5 * k * float(np.dot(delta, delta))
         grad[idx] += k * delta
     return float(energy) + extra, grad
+
+
+def _kernel_hessian(mf, mol, node_runner):
+    n_atoms = getattr(mol, "natm", None)
+    xc = getattr(mf, "xc", None)
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    msg = (
+        f"{stamp} Starting frequency/Hessian calculation "
+        f"(n_atoms={n_atoms}, xc={xc}). "
+        "This can take many hours; heartbeat lines will be written until it finishes."
+    )
+    if node_runner is not None:
+        node_runner.log(msg)
+        node_runner.info(msg)
+    else:
+        logger.info(msg)
+    for stream in (getattr(mol, "stdout", None), getattr(mf, "stdout", None), sys.stdout):
+        flush = getattr(stream, "flush", None) if stream is not None else None
+        if flush is None:
+            continue
+        try:
+            flush()
+        except Exception:
+            pass
+    hobj = mf.Hessian()
+    current_verbose = getattr(hobj, "verbose", 0) or 0
+    hobj.verbose = max(int(current_verbose), 4)
+    if getattr(mol, "stdout", None) is not None:
+        hobj.stdout = mol.stdout
+    task_id = "" if node_runner is None else str(getattr(node_runner, "task_id", "") or "")
+    heartbeat = ProcessHeartbeat(
+        _HEARTBEAT_LOG,
+        "Frequency/Hessian calculation",
+        interval_s=_HEARTBEAT_INTERVAL_S,
+        task_id=task_id,
+        extra_paths=["pyscf.out"],
+    )
+    heartbeat.start()
+    try:
+        return hobj.kernel()
+    finally:
+        heartbeat.stop()
 
 
 def _optimize(mf, qm_input, snapshotter):
@@ -938,14 +1011,28 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                     raise
                 snapshotter.finish()
                 attach_optimizer_timings(node_runner, snapshotter)
+                if snapshotter.last_payload is not None:
+                    try:
+                        await _persist_molecule_snapshot(
+                            snapshotter.last_payload,
+                            molecule,
+                            kwargs,
+                            geom_iter=snapshotter.geom_iter or 1,
+                            scf_iter=snapshotter.geom_iter or 1,
+                            final_structure=not bool(qm_input.frequencies),
+                            qm_input=qm_input,
+                        )
+                    except Exception as exc:
+                        node_runner.warning(
+                            f"Failed to store optimized MoleculeSnapshot before frequencies: {exc}"
+                        )
                 mol = mol_eq
                 mf.reset(mol)
                 energy = mf.kernel()
                 if qm_input.frequencies:
-                    node_runner.log("Optimization finished, starting frequency calculation...")
                     freq_wall_start = time.monotonic()
                     freq_cpu_start = time.process_time()
-                    hessian = mf.Hessian().kernel()
+                    hessian = _kernel_hessian(mf, mol, node_runner)
                     from pyscf.hessian import thermo as pyscf_thermo
 
                     freq_info = pyscf_thermo.harmonic_analysis(mol, hessian)
@@ -956,11 +1043,12 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                         freq_cpu_s=time.process_time() - freq_cpu_start,
                     )
                     node_runner.log("Frequency calculation finished")
+                    node_runner.info("Frequency calculation finished")
             elif qm_input.frequencies:
                 energy = mf.kernel()
                 freq_wall_start = time.monotonic()
                 freq_cpu_start = time.process_time()
-                hessian = mf.Hessian().kernel()
+                hessian = _kernel_hessian(mf, mol, node_runner)
                 from pyscf.hessian import thermo as pyscf_thermo
 
                 freq_info = pyscf_thermo.harmonic_analysis(mol, hessian)

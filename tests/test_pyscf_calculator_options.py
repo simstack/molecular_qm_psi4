@@ -180,7 +180,9 @@ def _run_fake_pyscf_optimize(snapshotter, scanner_returns):
             "pyscf.geomopt.addons": SimpleNamespace(as_pyscf_method=lambda mol, fn: fn),
             "pyscf.geomopt.geometric_solver": fake_solver,
         },
-    ):
+    ), patch("molecular_qm_psi4.nodes.pyscf_calculator.ProcessHeartbeat") as heartbeat_cls:
+        heartbeat_cls.return_value.start = MagicMock()
+        heartbeat_cls.return_value.stop = MagicMock()
         _optimize(mf, _qm_input(), snapshotter)
 
 
@@ -228,6 +230,9 @@ def test_pyscf_optimize_logs_energy_and_gradient_every_step():
     )
 
     messages = [call.args[0] for call in node_runner.info.call_args_list]
+    start_logs = [msg for msg in messages if "Starting optimization iteration " in msg]
+    assert len(start_logs) == 3
+    assert "Starting optimization iteration 1" in start_logs[0]
     step_logs = [msg for msg in messages if "Optimization step " in msg]
     assert len(step_logs) == 3
     assert re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} ", step_logs[0])
@@ -287,8 +292,17 @@ def test_pyscf_opt_cycle_reporter_logs_and_records_charts():
     assert len([msg for msg in seen if "cycle 36:" in msg and "norm(grad)" in msg]) == 1
 
     buf = StringIO()
+    flush_calls = {"n": 0}
+    original_flush = buf.flush
+
+    def counting_flush():
+        flush_calls["n"] += 1
+        return original_flush()
+
+    buf.flush = counting_flush
     tee = _TeeStdout(buf, reporter)
     tee.write("cycle 37: E = -1418.98625800  dE = -1.0e-8  norm(grad) = 0.00010000\n")
+    assert flush_calls["n"] >= 1
     assert "cycle 37:" in buf.getvalue()
     assert snapshotter.energy_history[-1]["step"] == 37
     assert [row["step"] for row in snapshotter.energy_history] == [36, 37]
@@ -311,3 +325,57 @@ def test_redirect_pyscf_logs_forwards_geomopt_cycle_line():
     compact = [msg for msg in seen if "cycle 36:" in msg and "norm(grad)" in msg]
     assert len(compact) == 1
     assert "E = -1418.98625799" in compact[0]
+
+
+def test_kernel_hessian_logs_info_and_stops_heartbeat():
+    from molecular_qm_psi4.nodes.pyscf_calculator import _kernel_hessian
+
+    node_runner = MagicMock()
+    mol = MagicMock()
+    mol.natm = 40
+    mol.stdout = MagicMock()
+    mf = MagicMock()
+    mf.xc = "wb97m-d3bj"
+    hobj = MagicMock()
+    hobj.verbose = 0
+    hobj.kernel.return_value = "hessian"
+    mf.Hessian.return_value = hobj
+    with patch("molecular_qm_psi4.nodes.pyscf_calculator.ProcessHeartbeat") as heartbeat_cls:
+        heartbeat = MagicMock()
+        heartbeat_cls.return_value = heartbeat
+        result = _kernel_hessian(mf, mol, node_runner)
+    assert result == "hessian"
+    heartbeat.start.assert_called_once()
+    heartbeat.stop.assert_called_once()
+    messages = [call.args[0] for call in node_runner.info.call_args_list]
+    assert any("Starting frequency/Hessian calculation" in msg for msg in messages)
+    assert hobj.verbose == 4
+    assert hobj.stdout is mol.stdout
+
+
+def test_process_heartbeat_appends_until_stopped(tmp_path):
+    import time
+    from molecular_qm_psi4.util.process_heartbeat import ProcessHeartbeat
+
+    path = tmp_path / "heartbeat.log"
+    extra = tmp_path / "pyscf.out"
+    heartbeat = ProcessHeartbeat(
+        str(path),
+        "Frequency/Hessian calculation",
+        interval_s=0.2,
+        task_id="abc",
+        extra_paths=[str(extra)],
+    )
+    heartbeat.start()
+    try:
+        deadline = time.time() + 5
+        while time.time() < deadline and not path.exists():
+            time.sleep(0.05)
+        time.sleep(0.45)
+    finally:
+        heartbeat.stop()
+    text = path.read_text(encoding="utf-8")
+    assert "Frequency/Hessian calculation" in text
+    assert "still running" in text
+    assert extra.exists()
+    assert "Frequency/Hessian calculation" in extra.read_text(encoding="utf-8")
