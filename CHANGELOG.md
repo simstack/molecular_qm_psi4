@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.5.1 (2026-09-04)
+
+### Bug Fixes
+
+- Log every PySCF optimization step to the Simstack log
+  ([`312c87e`](https://github.com/simstack/molecular_qm_psi4/commit/312c87e9d2c08e206a008c41697f036f190b5c91))
+
+Emit energy, gradient norm, and wall/CPU timings from each scanner evaluation so steps appear in
+  node_runner.log like Psi4.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.5.0 (2026-09-04)
 
 ### Refactoring
