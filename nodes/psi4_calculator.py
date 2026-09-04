@@ -1656,8 +1656,15 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             were computed.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
             Frequency jobs add a separate ``frequencies`` row.
-        files: result.wfn.npy on success; psi4.out and snapshot.wfn.npy are always
-            attached (including on failure). Wavefunction FileStacks are not in_memory.
+        files (FileListModel): result.wfn.npy on success; psi4.out and snapshot.wfn.npy
+            always attached, including on failure. Wavefunction FileStacks are not in_memory.
+        thermodynamics_table (SimpleTable): Component thermochemistry (S, Cv, Cp, E, H, G, ZPE)
+            when frequencies were computed. Older stored nodes may still expose
+            ``thermo_result`` (QMThermoResult) instead.
+        G_tot (FloatData): Total Gibbs free energy (Hartree) when thermochemistry was computed.
+        ZPE_tot (FloatData): Total zero-point energy (Hartree) when thermochemistry was computed.
+        E_tot (FloatData): Total thermal internal energy (Hartree) when thermochemistry was computed.
+        S_tot (FloatData): Total entropy when thermochemistry was computed.
     """
     node_runner = kwargs.get("node_runner")
 
@@ -1728,7 +1735,7 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             
             # Execute calculation
             wfn_freq = None
-            thermo_result = None
+            thermodynamics_table = None
             orbital_payload = _payload_from_wfn_or_reference(restart_wfn)
 
             if qm_input.optimization:
@@ -1805,7 +1812,7 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 )
             if wfn_freq is not None:
                 psi4_result.frequency_tables(wfn_freq, node_runner)
-                thermo_result = psi4_result.calculate_thermo(energy, wfn_freq, node_runner=node_runner)
+                thermodynamics_table = psi4_result.calculate_thermo(energy, wfn_freq, node_runner=node_runner)
 
             # Save a reusable wavefunction. Do not call Psi4 to_file(): it always
             # reads Ca() and frequency wavefunctions often have no MO coefficients.
@@ -1841,8 +1848,8 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             current_name = kwargs.get("custom_name", None)
             if current_name is None or current_name == "" and qm_input.molecule.formula is not None:
                 node_runner.custom_name = qm_input.molecule.formula
-            if thermo_result:
-                node_runner.thermo_result = thermo_result
+            if thermodynamics_table:
+                node_runner.thermodynamics_table = thermodynamics_table
             return node_runner.succeed()
 
     except Exception as e:
@@ -1897,9 +1904,12 @@ async def psi4_thermochemistry(qm_result: QMResult, temperature: FloatData, pres
         including enthalpy, Gibbs free energy, entropy, and internal energy. It also includes
         a reference to the original wavefunction file and the associated vibrational frequency
         table if available.
-            result (QMThermoResult): The result of the thermochemical calculation.
-            wavefunction_file (FileStack): The wavefunction file used for the thermochemical calculation.
-            vibrational_frequency_table (SimpleTable): The vibrational frequency table used for the thermochemical calculation.
+            result (SimpleTable): Component thermochemistry table (S, Cv, Cp, E, H, G, ZPE).
+                Older stored nodes may still expose ``result`` as QMThermoResult.
+            G_tot (FloatData): Total Gibbs free energy (Hartree).
+            ZPE_tot (FloatData): Total zero-point energy (Hartree).
+            E_tot (FloatData): Total thermal internal energy (Hartree).
+            S_tot (FloatData): Total entropy.
 
     Raises:
         ValueError: If Psi4 is not installed in the current environment.
@@ -1943,9 +1953,10 @@ async def psi4_thermochemistry(qm_result: QMResult, temperature: FloatData, pres
         node_runner.info(f"Wavefunction energy: {energy}")
         node_runner.info(
             f"Computing thermochemistry at T={temperature_value:.2f} K, P={pressure_value:.2f} Pa ({pressure_atm:.2f} atm)")
-        thermo_result = run_manual_thermo(wfn, energy, node_runner)
-        
-        node_runner.result = thermo_result
+        thermodynamics_table = run_manual_thermo(wfn, energy, node_runner)
+        if thermodynamics_table is None:
+            return node_runner.fail("Thermochemistry produced no thermodynamics table.")
+        node_runner.result = thermodynamics_table
         return node_runner.succeed()
 
     except Exception as e:

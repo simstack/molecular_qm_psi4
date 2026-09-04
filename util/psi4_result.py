@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from molecular_qm_models import QMInput, QMResult, Molecule, Atom, BOHR_TO_ANGSTROM, QMThermoResult
+from molecular_qm_models import QMInput, QMResult, Molecule, Atom, BOHR_TO_ANGSTROM
 # from molecular_qm_psi4.nodes.psi4_calculator import psi4, logger
 import logging
 logger = logging.getLogger(__name__)
@@ -13,6 +13,7 @@ from molecular_qm_psi4.util.frequency_table import (
 from molecular_qm_psi4.util.orbital_energies import apply_orbital_energies, as_float_list
 from molecular_qm_psi4.util.psi4_thermo import run_manual_thermo
 from simstack.core.node_runner import NodeRunner
+from simstack.models.simple_table import SimpleTable
 
 
 class Psi4Result:
@@ -147,10 +148,9 @@ class Psi4Result:
             node_runner, self.qm_result, wavenumbers, n_atoms, linear
         )
 
-    def calculate_thermo(self, energy: float, wfn, node_runner: NodeRunner) -> QMThermoResult | None:
+    def calculate_thermo(self, energy: float, wfn, node_runner: NodeRunner) -> SimpleTable | None:
         """Extract and parse thermochemistry results from the wavefunction and output file."""
         node_runner.log("Parsing thermochemistry...")
         if not self.qm_input.frequencies:
             return None
-        thermo_result = run_manual_thermo(wfn, energy, node_runner)
-        return thermo_result
+        return run_manual_thermo(wfn, energy, node_runner)

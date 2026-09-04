@@ -9,14 +9,15 @@ from simstack.models import FloatData, StringData
 from simstack.models.node_registry import find_child_nodes
 from simstack.util.importer import import_class
 
-from molecular_qm_models.energy_units import convert_energy_unit, MolecularEnergyUnitEnum
 from molecular_qm_psi4 import TemperatureList
 from molecular_qm_psi4.nodes.compare_conformers import (
     empty_compare_conformers_table,
-    _completed_node_output,
     _basis_set_name,
     _functional_name,
     _qm_setting_name,
+    _thermo_component,
+    _pair_difference,
+    _kcal_per_mol_from_hartree,
 )
 from molecular_qm_psi4.nodes.psi4_calculator import psi4_thermochemistry, _find_wavefunction_file as _find_psi4_wfn
 from molecular_qm_psi4.nodes.pyscf_calculator import pyscf_thermochemistry, _find_wavefunction_file as _find_pyscf_wfn
@@ -62,6 +63,11 @@ async def temperature_analysis(
 
     Called Nodes:
         psi4_thermochemistry
+        pyscf_thermochemistry
+
+    SimstackResult:
+        table (SimpleTable): One row per temperature with DDG, DDZ, DE_scf,
+            DE_thermo, and DS.
     """
     node_runner: NodeRunner = kwargs["node_runner"]
     await context.initialize()
@@ -175,6 +181,9 @@ async def temperature_analysis(
             node_runner.info(f"Computing thermochemistry at T={temp} K")
             g_values = []
             zpe_values = []
+            e_thermo_values = []
+            s_values = []
+            scf_values = []
 
             for i, qm_result in enumerate(qm_results):
                 kwargs["custom_name"] = f"{temp}mol{i}"
@@ -195,31 +204,21 @@ async def temperature_analysis(
                     )
                     continue
 
-                thermo_result = _completed_node_output(thermo_calc_result, "result")
-                if thermo_result is not None and getattr(thermo_result, "G_tot", None) is not None:
-                    g_values.append(thermo_result.G_tot)
-                    zpe_values.append(getattr(thermo_result, "ZPE_tot", None))
+                g_tot = _thermo_component(thermo_calc_result, "G")
+                if g_tot is not None:
+                    g_values.append(g_tot)
+                    zpe_values.append(_thermo_component(thermo_calc_result, "ZPE"))
+                    e_thermo_values.append(_thermo_component(thermo_calc_result, "E"))
+                    s_values.append(_thermo_component(thermo_calc_result, "S"))
+                    scf_values.append(qm_result.final_energy)
                 else:
                     node_runner.error(
-                        f"G_tot not found in thermo_result for molecule {i+1} at T={temp} "
+                        f"G tot not found in thermochemistry output for molecule {i+1} at T={temp} "
                         f"(got {type(thermo_calc_result).__name__})"
                     )
 
             # 5. Compute deltas and add row
             if len(g_values) == 2:
-                delta_delta_g = convert_energy_unit(
-                    MolecularEnergyUnitEnum.HARTREE,
-                    g_values[1] - g_values[0],
-                    MolecularEnergyUnitEnum.KCAL_PER_MOL,
-                )
-                delta_delta_zpe_tot = None
-                if len(zpe_values) == 2 and all(v is not None for v in zpe_values):
-                    delta_delta_zpe_tot = convert_energy_unit(
-                        MolecularEnergyUnitEnum.HARTREE,
-                        zpe_values[1] - zpe_values[0],
-                        MolecularEnergyUnitEnum.KCAL_PER_MOL,
-                    )
-
                 table.add_row({
                     "smiles": mol_smiles,
                     "formula": mol_formula,
@@ -230,8 +229,11 @@ async def temperature_analysis(
                     "grid_type": grid_type,
                     "temperature": temp,
                     "pressure": pressure,
-                    "DDG": delta_delta_g,
-                    "DDZ": delta_delta_zpe_tot,
+                    "DDG": _kcal_per_mol_from_hartree(_pair_difference(g_values)),
+                    "DDZ": _kcal_per_mol_from_hartree(_pair_difference(zpe_values)),
+                    "DE_scf": _kcal_per_mol_from_hartree(_pair_difference(scf_values)),
+                    "DE_thermo": _kcal_per_mol_from_hartree(_pair_difference(e_thermo_values)),
+                    "DS": _pair_difference(s_values),
                 })
 
         node_runner.table = table

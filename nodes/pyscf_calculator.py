@@ -856,6 +856,13 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             were computed.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
             Frequency jobs add a separate ``frequencies`` row.
+        thermodynamics_table (SimpleTable): Component thermochemistry (S, Cv, Cp, E, H, G, ZPE)
+            when frequencies were computed. Older stored nodes may still expose
+            ``thermo_result`` (QMThermoResult) instead.
+        G_tot (FloatData): Total Gibbs free energy (Hartree) when thermochemistry was computed.
+        ZPE_tot (FloatData): Total zero-point energy (Hartree) when thermochemistry was computed.
+        E_tot (FloatData): Total thermal internal energy (Hartree) when thermochemistry was computed.
+        S_tot (FloatData): Total entropy when thermochemistry was computed.
     """
     node_runner = kwargs.get("node_runner")
     memory, num_threads, resource_log = resources_from_parent_parameters(kwargs, label="PySCF")
@@ -1021,9 +1028,9 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             if freq_info:
                 n_atoms = mol.natm if hasattr(mol, "natm") else None
                 pyscf_result.frequency_tables(freq_info, node_runner, n_atoms)
-            thermo_result = None
+            thermodynamics_table = None
             if freq_info and qm_input.frequencies:
-                thermo_result = run_pyscf_thermo(mf, freq_info, 298.15, 101325.0, node_runner)
+                thermodynamics_table = run_pyscf_thermo(mf, freq_info, 298.15, 101325.0, node_runner)
 
             try:
                 saved = _write_payload(payload, Path(_WFN_NPY_NAME))
@@ -1045,8 +1052,8 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             current_name = kwargs.get("custom_name", None)
             if (current_name is None or current_name == "") and qm_input.molecule.formula is not None:
                 node_runner.custom_name = qm_input.molecule.formula
-            if thermo_result:
-                node_runner.thermo_result = thermo_result
+            if thermodynamics_table:
+                node_runner.thermodynamics_table = thermodynamics_table
             return node_runner.succeed()
     except Exception as exc:
         logger.error(f"PySCF calculation failed: {exc}")
@@ -1072,7 +1079,12 @@ async def pyscf_thermochemistry(qm_result: QMResult, temperature: FloatData, pre
     Thermochemistry from a saved PySCF wavefunction (requires frequency analysis).
 
     SimstackResult:
-        result (QMThermoResult): Thermochemical properties at the requested T/P.
+        result (SimpleTable): Component thermochemistry table (S, Cv, Cp, E, H, G, ZPE).
+            Older stored nodes may still expose ``result`` as QMThermoResult.
+        G_tot (FloatData): Total Gibbs free energy (Hartree).
+        ZPE_tot (FloatData): Total zero-point energy (Hartree).
+        E_tot (FloatData): Total thermal internal energy (Hartree).
+        S_tot (FloatData): Total entropy.
     """
     node_runner: NodeRunner = kwargs.get("node_runner")
     try:
@@ -1110,8 +1122,10 @@ async def pyscf_thermochemistry(qm_result: QMResult, temperature: FloatData, pre
         node_runner.info(
             f"Computing PySCF thermochemistry at T={temperature_value:.2f} K, P={pressure_value:.2f} Pa"
         )
-        thermo_result = run_pyscf_thermo(mf, freq_info, temperature_value, pressure_value, node_runner)
-        node_runner.result = thermo_result
+        thermodynamics_table = run_pyscf_thermo(mf, freq_info, temperature_value, pressure_value, node_runner)
+        if thermodynamics_table is None:
+            return node_runner.fail("Thermochemistry produced no thermodynamics table.")
+        node_runner.result = thermodynamics_table
         return node_runner.succeed()
     except Exception as exc:
         return node_runner.fail(f"Failed to compute thermochemistry: {exc}")

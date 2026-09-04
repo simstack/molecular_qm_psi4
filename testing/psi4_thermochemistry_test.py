@@ -37,17 +37,22 @@ async def psi4_thermochemistry_testing():
     parameters = Parameters(resource="local", in_docker=True, force_rerun=True)
     psi4_result = await psi4_calculator(qm_input,parameters=parameters)
 
-    if psi4_result.thermo_result is not None:
-        print("Thermo result found:")
+    if getattr(psi4_result, "thermodynamics_table", None) is not None:
+        print("Thermo table found:")
+        assert psi4_result.thermodynamics_table is not None
+        for row in psi4_result.thermodynamics_table.row:
+            for key, value in row.items():
+                print(f"{key}: {value}", end=" ")
+            print(" ")
+    elif getattr(psi4_result, "thermo_result", None) is not None:
+        print("Legacy thermo_result found:")
         assert psi4_result.thermo_result.thermodynamics_table is not None
         for row in psi4_result.thermo_result.thermodynamics_table.row:
             for key, value in row.items():
                 print(f"{key}: {value}", end=" ")
             print(" ")
-
-
     else:
-        print("Warning: psi4_result.thermo_result not found or empty.")
+        print("Warning: thermodynamics table not found or empty.")
 
 
 if __name__ == "__main__":
