@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v0.5.0 (2026-09-04)
+
+### Refactoring
+
+- Replace QMThermoResult with thermodynamics SimpleTable
+  ([`80c0044`](https://github.com/simstack/molecular_qm_psi4/commit/80c0044635601955b78d48bb9153c71855320a23))
+
+- Streamlined thermochemistry outputs by replacing `QMThermoResult` with `SimpleTable` for
+  consistency and future extensibility. - Updated Psi4 and PySCF calculators, result classes, and
+  node logic to use the new table format. - Added utility for attaching total thermochemistry values
+  (e.g., G_tot, ZPE_tot) to NodeRunner. - Adjusted tests and fallback mechanisms to support the new
+  format while maintaining legacy compatibility.
+
+
 ## v0.4.0 (2026-09-03)
 
 ### Features
