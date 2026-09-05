@@ -55,7 +55,6 @@ bypass-selection = true
 molecular_qm_models = { git = "https://github.com/simstack/molecular_qm_models.git" }
 molecular_qm_util = { git = "https://github.com/simstack/molecular_qm_util.git" }
 molecular_qm_dftb = { git = "https://github.com/simstack/molecular_qm_dftb.git" }
-
 simstack = { git = "https://github.com/simstack/simstack.git", rev = "ww/new-features" }
 
 [tool.uv]
