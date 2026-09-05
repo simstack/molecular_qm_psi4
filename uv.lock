@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 overrides = [
     { name = "molecular-qm-models", git = "https://github.com/simstack/molecular_qm_models.git" },
     { name = "molecular-qm-util", git = "https://github.com/simstack/molecular_qm_util.git" },
-    { name = "simstack", git = "https://github.com/simstack/simstack.git?rev=fix-node-submission-logic" },
+    { name = "simstack", git = "https://github.com/simstack/simstack.git?rev=ww%2Fnew-features" },
 ]
 
 [[package]]
@@ -126,7 +126,7 @@ requires-dist = [
     { name = "molecular-qm-dftb", git = "https://github.com/simstack/molecular_qm_dftb.git" },
     { name = "molecular-qm-models", git = "https://github.com/simstack/molecular_qm_models.git" },
     { name = "molecular-qm-util", git = "https://github.com/simstack/molecular_qm_util.git" },
-    { name = "simstack", git = "https://github.com/simstack/simstack.git?rev=fix-node-submission-logic" },
+    { name = "simstack", git = "https://github.com/simstack/simstack.git?rev=ww%2Fnew-features" },
 ]
 
 [[package]]
@@ -656,8 +656,8 @@ wheels = [
 
 [[package]]
 name = "simstack"
-version = "2.1.0.dev146"
-source = { git = "https://github.com/simstack/simstack.git?rev=fix-node-submission-logic#9c7231b89f4d57ccb1b95ddf9227cb2c80e1d51e" }
+version = "2.1.0.dev160"
+source = { git = "https://github.com/simstack/simstack.git?rev=ww%2Fnew-features#e6017325e5a0400a6cb8191994cf30733fb9f76d" }
 dependencies = [
     { name = "cloudpickle" },
     { name = "coolname" },
