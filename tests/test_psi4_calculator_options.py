@@ -448,9 +448,11 @@ def test_iteration_timeout_floor_scale_and_cap():
     assert basis_weight("def2-TZVP") == 4.0
     assert basis_weight("def2-QZVP") == 8.0
     assert basis_weight("cc-pV5Z") == 10.0
-    assert iteration_timeout_seconds(5, "def2-SVP") == 600
-    assert iteration_timeout_seconds(30, "def2-SVP") == 1200
-    assert iteration_timeout_seconds(50, "def2-TZVP") == 3600
+    assert iteration_timeout_seconds(5, "def2-SVP") == 1800
+    assert iteration_timeout_seconds(30, "def2-SVP") == 10800
+    assert iteration_timeout_seconds(50, "def2-TZVP") == 36000
+    assert iteration_timeout_seconds(100, "def2-TZVP") == 72000
+    assert iteration_timeout_seconds(200, "def2-QZVP") == 86400
 
 
 def _oscillating_energies():

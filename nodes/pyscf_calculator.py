@@ -24,7 +24,6 @@ from molecular_qm_psi4.util.psi4_calculator import (
     OptimizationTimeoutError,
     basis_name_from_qm_input,
     energy_oscillation_stats,
-    iteration_timeout_seconds,
     n_atoms_from_molecule,
     python_log_level_for_print_level,
 )
@@ -33,6 +32,7 @@ from molecular_qm_psi4.util.pyscf_calculator import (
     PySCFCalculator,
     df_hessian_memory,
     harmonic_cartesian_constraints,
+    iteration_timeout_seconds,
     method_name_from_qm_input,
     pyscf_opt_conv_params,
 )

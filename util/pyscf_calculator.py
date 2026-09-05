@@ -5,6 +5,7 @@ from molecular_qm_models import QMInput
 from molecular_qm_psi4.util.psi4_calculator import (
     _named_value,
     basis_name_from_qm_input,
+    basis_weight,
     clamp_print_level,
     n_atoms_from_molecule,
     scf_convergence_threshold,
@@ -55,6 +56,12 @@ _GRID_LEVEL = {
     "Grid5": 9,
 }
 _DEFAULT_GRID = "Grid2"
+
+# 40-atom 1,10-diamide-chair, big PySCF: TZVP-wB97M ~319 s/iter. A 100-atom
+# TZVP gradient still ran past the old 1 h cap; 24 h is the hang cutoff.
+_TIMEOUT_SECONDS_PER_ATOM = 120
+_TIMEOUT_MIN_SECONDS = 600
+_TIMEOUT_MAX_SECONDS = 86400
 
 _OPT_CONV = {
     "Sloppy": {
@@ -165,6 +172,13 @@ def pyscf_verbose(print_level) -> int:
 def pyscf_opt_conv_params(optimization_accuracy) -> dict:
     name = _named_value(optimization_accuracy, "Medium")
     return dict(_OPT_CONV.get(name, _OPT_CONV["Medium"]))
+
+
+def iteration_timeout_seconds(n_atoms, basis_name) -> float:
+    """PySCF per-gradient timeout: 120 s × n_atoms × basis_weight, clamped to [10 min, 24 h]."""
+    n = max(int(n_atoms or 0), 1)
+    raw = _TIMEOUT_SECONDS_PER_ATOM * n * basis_weight(basis_name)
+    return min(_TIMEOUT_MAX_SECONDS, max(_TIMEOUT_MIN_SECONDS, raw))
 
 
 def method_name_from_qm_input(qm_input) -> str:

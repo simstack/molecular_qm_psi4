@@ -8,6 +8,7 @@ import sys
 from molecular_qm_psi4.util.pyscf_calculator import (
     PySCFCalculator,
     df_hessian_memory,
+    iteration_timeout_seconds,
     method_name_from_qm_input,
     pyscf_basis_name,
     pyscf_dispersion,
@@ -78,6 +79,14 @@ def test_pyscf_opt_conv_params_medium():
     assert params["convergence_grms"] == 3e-4
     tight = pyscf_opt_conv_params("Tight")
     assert tight["convergence_grms"] == 3e-5
+
+
+def test_pyscf_iteration_timeout_floor_scale_and_cap():
+    assert iteration_timeout_seconds(5, "def2-SVP") == 1200
+    assert iteration_timeout_seconds(30, "def2-SVP") == 7200
+    assert iteration_timeout_seconds(40, "def2-TZVP") == 19200
+    assert iteration_timeout_seconds(100, "def2-TZVP") == 48000
+    assert iteration_timeout_seconds(200, "def2-QZVP") == 86400
 
 
 def test_resolve_engine_defaults_to_psi4():

@@ -50,9 +50,11 @@ _OPT_G_CONVERGENCE = {
 }
 _DEFAULT_OPT_G_CONVERGENCE = "GAU"
 
-_TIMEOUT_SECONDS_PER_ATOM = 20
+# 40-atom 1,10-diamide-chair, big Psi4: TZVP-wB97M ~367 s/iter. Keep a large
+# first-iteration / N^3 margin; 100-atom TZVP still fits under the 24 h cap.
+_TIMEOUT_SECONDS_PER_ATOM = 180
 _TIMEOUT_MIN_SECONDS = 600
-_TIMEOUT_MAX_SECONDS = 3600
+_TIMEOUT_MAX_SECONDS = 86400
 _DEFAULT_BASIS_WEIGHT = 2.0
 
 _OSC_WARMUP_STEPS = 10
@@ -155,7 +157,7 @@ def basis_weight(basis_name) -> float:
 
 
 def iteration_timeout_seconds(n_atoms, basis_name) -> float:
-    """Per-gradient timeout: 20 s × n_atoms × basis_weight, clamped to [10 min, 1 h]."""
+    """Psi4 per-gradient timeout: 180 s × n_atoms × basis_weight, clamped to [10 min, 24 h]."""
     n = max(int(n_atoms or 0), 1)
     raw = _TIMEOUT_SECONDS_PER_ATOM * n * basis_weight(basis_name)
     return min(_TIMEOUT_MAX_SECONDS, max(_TIMEOUT_MIN_SECONDS, raw))
