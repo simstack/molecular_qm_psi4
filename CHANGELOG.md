@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.6.3 (2026-09-05)
+
+### Bug Fixes
+
+- Loosen engine-specific optimization iteration timeouts.
+  ([`7ee5829`](https://github.com/simstack/molecular_qm_psi4/commit/7ee58291c41f11c054c360b52dbee06bd67b3f04))
+
+Psi4 and PySCF used a 1 h per-gradient cap that killed large TZVP jobs.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.6.2 (2026-09-04)
 
 
