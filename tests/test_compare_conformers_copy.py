@@ -15,7 +15,11 @@ import inspect
 from molecular_qm_psi4.nodes.compare_conformers import (
     CompareConformersModel,
     CompareConformersResult,
+    ThermoBenchmarkMethodList,
+    ThermoBenchmarkStep,
     _compare_conformers_outputs,
+    _engine_name,
+    _final_structure_molecule,
     _kcal_per_mol_from_hartree,
     _pair_difference,
     _qm_input_copy,
@@ -24,8 +28,10 @@ from molecular_qm_psi4.nodes.compare_conformers import (
     compare_conformers_results_to_simple_table,
     empty_compare_conformers_method_table,
     empty_compare_conformers_table,
+    thermo_benchmark,
 )
 from molecular_qm_psi4.nodes.multistep_optimizer import PreOptimizerInput
+from molecular_qm_psi4.util.qm_engine import QMEngine, QMEngineInput
 from simstack.models.simple_table import SimpleTable
 
 
@@ -243,3 +249,73 @@ def test_compare_conformers_preopt_takes_preoptimizer_input():
     assert list(params)[:2] == ["arg", "preopt"]
     assert params["arg"].annotation is CompareConformersModel
     assert params["preopt"].annotation is PreOptimizerInput
+
+
+def test_thermo_benchmark_takes_methods_with_engine():
+    params = inspect.signature(inspect.unwrap(thermo_benchmark)).parameters
+    assert list(params)[:4] == ["qm_input", "molecule", "methods", "engine"]
+    assert params["qm_input"].annotation is QMInput
+    assert params["molecule"].annotation is Molecule
+    assert params["methods"].annotation is ThermoBenchmarkMethodList
+    assert params["engine"].annotation is QMEngineInput
+
+
+def test_thermo_benchmark_step_keeps_engine_choice():
+    step = ThermoBenchmarkStep(
+        basis_set=BasisSet(basis_set=BasisSetEnum.Def2_TZVP),
+        functional=Functional(functional="PBE0"),
+        engine=QMEngine.PYSCF,
+    )
+    methods = ThermoBenchmarkMethodList(elements=[step])
+    assert methods[0].engine is QMEngine.PYSCF
+    assert methods[0].basis_set.basis_set == BasisSetEnum.Def2_TZVP
+    assert methods[0].functional.functional.value == "PBE0"
+    ui = ThermoBenchmarkStep.ui_schema()
+    assert ui["engine"]["ui:widget"] == "select"
+    extra = ThermoBenchmarkStep.model_fields["engine"].json_schema_extra
+    assert extra["enum"] == [item.value for item in QMEngine]
+
+
+def test_compare_conformers_result_stores_final_molecules():
+    mol1 = _water()
+    mol2 = _water()
+    result = CompareConformersResult(
+        molecule2=mol2,
+        qm_input=_source(molecule=mol1),
+        delta_delta_g=1.23,
+        delta_delta_zpe_tot=0.45,
+        final_molecule1=mol1,
+        final_molecule2=mol2,
+    )
+    assert result.final_molecule1 is mol1
+    assert result.final_molecule2 is mol2
+
+
+def test_compare_conformers_outputs_stores_final_molecules():
+    mol = _water()
+    mol.smiles = "O"
+    mol.formula = "H2O"
+    other = _water()
+    arg = CompareConformersModel(qm_input=_source(molecule=mol), molecule=mol)
+    node_runner = type("NodeRunner", (), {})()
+    node_runner.info = lambda message: None
+
+    _compare_conformers_outputs(
+        node_runner, arg, 1.0, 0.2, 0.3, 0.4, 1.5, mol, other
+    )
+
+    assert node_runner.result.final_molecule1 is mol
+    assert node_runner.result.final_molecule2 is other
+
+
+def test_final_structure_molecule_and_engine_name():
+    mol = _water()
+    assert _final_structure_molecule(None) is None
+    copied = _final_structure_molecule(
+        type("QMResult", (), {"final_structure": mol})()
+    )
+    assert copied is not mol
+    assert [atom.element for atom in copied.atoms] == ["O", "H", "H"]
+    assert _engine_name(QMEngine.PYSCF) == "pyscf"
+    assert _engine_name(QMEngineInput(engine=QMEngine.PSI4)) == "psi4"
+    assert _engine_name(None) is None

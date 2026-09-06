@@ -13,9 +13,10 @@ Psi4 capabilities for molecular quantum mechanics within the Simstack framework.
 
 Installed from git during the Docker build (see `pyproject.docker`):
 
-- [`molecular_qm_models`](https://github.com/simstack/molecular_qm_models) (`feature-psi4`)
+- [`molecular_qm_models`](https://github.com/simstack/molecular_qm_models)
 - [`molecular_qm_util`](https://github.com/simstack/molecular_qm_util)
-- [`simstack`](https://github.com/simstack/simstack) (`fix-node-submission-logic`)
+- [`molecular_qm_dftb`](https://github.com/simstack/molecular_qm_dftb)
+- [`simstack`](https://github.com/simstack/simstack) (`ww/new-features`)
 
 The image also installs **Psi4** (conda-forge) and **PySCF** (pip). Both calculators
 take the same [`QMInput`](https://github.com/simstack/molecular_qm_models) model.

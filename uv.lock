@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "molecular-qm-models"
-version = "0.3.1.dev8+gd60f43163"
+version = "0.4.0"
 source = { git = "https://github.com/simstack/molecular_qm_models.git#d60f4316328382fb06c0c062d1ddc30dc701fa32" }
 dependencies = [
     { name = "numpy" },
@@ -656,8 +656,8 @@ wheels = [
 
 [[package]]
 name = "simstack"
-version = "2.1.0.dev160"
-source = { git = "https://github.com/simstack/simstack.git?rev=ww%2Fnew-features#e6017325e5a0400a6cb8191994cf30733fb9f76d" }
+version = "2.1.0.dev171"
+source = { git = "https://github.com/simstack/simstack.git?rev=ww%2Fnew-features#ee62a31e9062ef6b6719bed726b84b3b92b016b2" }
 dependencies = [
     { name = "cloudpickle" },
     { name = "coolname" },

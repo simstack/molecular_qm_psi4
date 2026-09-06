@@ -1,15 +1,22 @@
 from typing import Any, Dict, Iterator, List, Optional
+import logging
 
-from odmantic import Field, Model, ObjectId, Reference
+from odmantic import EmbeddedModel, Field, Model, ObjectId, Reference
 from pydantic import model_validator
 
+from molecular_qm_dftb.models.dftb_input import DftbInput
+from molecular_qm_dftb.nodes.dftb_calculator import dftb_calculator
 from molecular_qm_models import Molecule, QMInput
-from molecular_qm_models.basis_set import BasisSet
-from molecular_qm_models.density_functional import Functional
+from molecular_qm_models.basis_set import BasisSet, BasisSetEnum
+from molecular_qm_models.density_functional import Functional, FunctionalEnum
 from molecular_qm_models.energy_units import MolecularEnergyUnitEnum, convert_energy_unit
 from molecular_qm_psi4.nodes.multistep_optimizer import (
     PreOptimizerInput,
     _child_qm_result,
+    _dftb_preopt_input,
+    _persist_dftb_input,
+    _persist_qm_input,
+    _persist_step_molecule,
     multistep_optimizer,
 )
 from molecular_qm_psi4.util.qm_engine import (
@@ -26,8 +33,9 @@ from simstack.core.simstack_result import SimstackResult
 from simstack.models import FloatData, simstack_model
 from simstack.models.base_lists import GenericListMixin, ObjectListMixin
 from simstack.models.simple_table import SimpleTable
+from simstack.util.generate_ui_schema import generate_ui_schema
 
-import logging
+_THERMO_BENCHMARK_DFTB_MAX_STEPS = 1000
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +75,8 @@ class CompareConformersResult(Model):
     delta_s: Optional[float] = Field(
         default=None, description="Entropy difference (S tot) in cal/mol-K"
     )
+    final_molecule1: Optional[Molecule] = None
+    final_molecule2: Optional[Molecule] = None
 
     def molecule_for_table(self) -> Optional[Molecule]:
         if self.qm_input is not None and getattr(self.qm_input, "molecule", None) is not None:
@@ -179,6 +189,50 @@ class TemperatureList(Model, GenericListMixin[float]):
         return data
 
 
+@simstack_model
+class ThermoBenchmarkStep(EmbeddedModel):
+    field_name: str = "ThermoBenchmarkStep"
+    basis_set: BasisSet = Field(default_factory=BasisSet)
+    functional: Functional = Field(default_factory=Functional)
+    engine: QMEngine = Field(
+        QMEngine.PSI4,
+        json_schema_extra=engine_field_schema_extra(),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def ensure_fieldname(cls, data):
+        if isinstance(data, dict) and "field_name" not in data:
+            data["field_name"] = cls.__name__
+        return data
+
+    @classmethod
+    def ui_schema(cls):
+        ui = generate_ui_schema(cls)
+        ui["field_name"] = {"ui:widget": "hidden"}
+        ui["engine"] = {
+            "ui:widget": "select",
+            "ui:title": "QM engine",
+        }
+        return ui
+
+
+@simstack_model
+class ThermoBenchmarkMethodList(Model, GenericListMixin[ThermoBenchmarkStep]):
+    field_name: str = "ThermoBenchmarkMethodList"
+    elements: List[ThermoBenchmarkStep] = Field(default_factory=list)
+
+    def __iter__(self) -> Iterator[ThermoBenchmarkStep]:
+        return iter(self.elements)
+
+    @model_validator(mode="before")
+    @classmethod
+    def ensure_fieldname(cls, data):
+        if isinstance(data, dict) and "field_name" not in data:
+            data["field_name"] = cls.__name__
+        return data
+
+
 def _basis_set_name(basis_set: Optional[BasisSet]) -> Optional[str]:
     if basis_set is None:
         return None
@@ -190,6 +244,21 @@ def _functional_name(functional) -> Optional[str]:
     if functional is None:
         return None
     value = getattr(functional, "functional", functional)
+    return getattr(value, "value", value)
+
+
+def _final_structure_molecule(qm_result) -> Optional[Molecule]:
+    structure = None if qm_result is None else getattr(qm_result, "final_structure", None)
+    atoms = getattr(structure, "atoms", None) if structure is not None else None
+    if not atoms:
+        return None
+    return Molecule.from_molecule(structure)
+
+
+def _engine_name(engine) -> Optional[str]:
+    if engine is None:
+        return None
+    value = getattr(engine, "engine", engine)
     return getattr(value, "value", value)
 
 
@@ -390,6 +459,8 @@ def _compare_conformers_outputs(
     delta_e_scf,
     delta_e_thermo,
     delta_s,
+    final_molecule1=None,
+    final_molecule2=None,
 ):
     if delta_delta_g is not None:
         node_runner.info(f"Computed Delta Delta G: {delta_delta_g} kcal/mol")
@@ -421,6 +492,8 @@ def _compare_conformers_outputs(
         delta_e_scf=delta_e_scf,
         delta_e_thermo=delta_e_thermo,
         delta_s=delta_s,
+        final_molecule1=final_molecule1,
+        final_molecule2=final_molecule2,
     )
     node_runner.result = result
     node_runner.table = compare_conformers_results_to_simple_table([result])
@@ -487,6 +560,7 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
     if custom_name is None:
         node_runner.custom_name = f"{molecules[0].formula}"
 
+    optimized_mols = []
     for i, molecule in enumerate(molecules):
         node_runner.info(f"Starting calculation for molecule {i+1}...")
         
@@ -496,6 +570,12 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
 
         if calc_result.status == TaskStatus.COMPLETED:
             qm_result, qm_error = _child_qm_result(calc_result)
+            final_mol = _final_structure_molecule(qm_result)
+            if final_mol is not None:
+                final_mol = await _persist_step_molecule(
+                    final_mol, node_runner, f"compare-mol{i + 1}"
+                )
+            optimized_mols.append(final_mol)
             scf_energy = None if qm_result is None else qm_result.final_energy
             if scf_energy is None:
                 node_runner.warning(
@@ -544,6 +624,8 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
         _kcal_per_mol_from_hartree(_pair_difference(scf_values)),
         _kcal_per_mol_from_hartree(_pair_difference(e_thermo_values)),
         _pair_difference(s_values),
+        final_molecule1=optimized_mols[0] if len(optimized_mols) == 2 else None,
+        final_molecule2=optimized_mols[1] if len(optimized_mols) == 2 else None,
     )
     return node_runner.succeed()
 
@@ -805,5 +887,232 @@ async def compare_conformers_preopt(
         _kcal_per_mol_from_hartree(_pair_difference(e_thermo_values)),
         _pair_difference(s_values),
     )
+    return node_runner.succeed()
+
+
+@node
+async def thermo_benchmark(
+    qm_input: QMInput,
+    molecule: Molecule,
+    methods: ThermoBenchmarkMethodList,
+    engine: QMEngineInput,
+    **kwargs,
+) -> SimstackResult:
+    """
+    DFTB then PBE/def2-SVP optimization of both conformers, followed by a
+    sequential list of ``compare_conformers`` calculations.
+
+    Each method step has its own functional, basis set, and QM engine. The
+    converged geometries of one ``compare_conformers`` start the next.
+
+    Parameters:
+        qm_input (QMInput): Conformer 1 and shared QM settings (charge, ...).
+        molecule (Molecule): Conformer 2.
+        methods (ThermoBenchmarkMethodList): Ordered functional / basis set /
+            engine steps. Must contain at least one step.
+        engine (QMEngineInput): Psi4 or PySCF for the PBE/def2-SVP optimization.
+
+    Called Nodes:
+        dftb_calculator
+        psi4_calculator
+        pyscf_calculator
+        compare_conformers
+
+    SimstackResult:
+        table (SimpleTable): One row per method with smiles, formula, engine,
+            basis_set, functional, DDG, DDZ, DE_scf, DE_thermo, and DS.
+    """
+    node_runner = kwargs.get("node_runner")
+    await context.initialize()
+
+    if qm_input is None:
+        raise ValueError("qm_input is not set")
+    if getattr(qm_input, "molecule", None) is None:
+        raise ValueError("QMInput.molecule is not set")
+    if molecule is None:
+        raise ValueError("molecule is not set")
+    if methods is None:
+        raise ValueError("methods is not set")
+    if getattr(methods, "elements", None) is None:
+        raise ValueError("ThermoBenchmarkMethodList.elements is not set")
+    if engine is None:
+        raise ValueError("engine is not set")
+    if getattr(engine, "engine", None) is None:
+        raise ValueError("QMEngineInput.engine is not set")
+    if dftb_calculator is None:
+        raise ValueError("dftb_calculator is not available")
+    if len(methods) == 0:
+        return node_runner.fail(
+            "thermo_benchmark requires at least one method step in "
+            "ThermoBenchmarkMethodList"
+        )
+
+    mol1 = qm_input.molecule
+    mol2 = molecule
+    for current in (mol1, mol2):
+        molecule_changed = False
+        if current.smiles is None:
+            current.smiles = current.make_smiles()
+            molecule_changed = True
+        if current.formula is None:
+            current.formula = current.make_formula()
+            molecule_changed = True
+        if molecule_changed:
+            await context.db.save(current)
+
+    custom_name = kwargs.get("custom_name", None)
+    if custom_name is None:
+        node_runner.custom_name = f"{mol1.formula}"
+
+    dftb_template = DftbInput(
+        optimization=True,
+        compute_gradients=True,
+        max_optimization_steps=_THERMO_BENCHMARK_DFTB_MAX_STEPS,
+    )
+    optimized = []
+    for i, current in enumerate((mol1, mol2), start=1):
+        opts = await _persist_dftb_input(
+            _dftb_preopt_input(qm_input, dftb_template), node_runner
+        )
+        node_runner.info(
+            f"DFTB optimization for molecule {i} "
+            f"(max_optimization_steps={opts.max_optimization_steps})"
+        )
+        kwargs["custom_name"] = f"dftb-mol{i}"
+        calc_result = await dftb_calculator(current, opts, **kwargs)
+        qm_result, error = _child_qm_result(calc_result)
+        if error:
+            return node_runner.fail(f"DFTB optimization failed for molecule {i}: {error}")
+        next_mol = _final_structure_molecule(qm_result)
+        if next_mol is None:
+            return node_runner.fail(
+                f"DFTB optimization returned no final_structure for molecule {i}"
+            )
+        optimized.append(
+            await _persist_step_molecule(next_mol, node_runner, f"dftb-mol{i}")
+        )
+    mol1, mol2 = optimized
+
+    pbe_engine = engine.engine
+    pbe_functional = Functional(functional=FunctionalEnum.PBE)
+    svp_basis = BasisSet(basis_set=BasisSetEnum.Def2_SVP)
+    optimized = []
+    for i, current in enumerate((mol1, mol2), start=1):
+        pbe_input = _qm_input_copy(
+            qm_input,
+            basis_set=svp_basis,
+            functional=pbe_functional,
+            molecule=current,
+        )
+        pbe_input.frequencies = False
+        pbe_input = await _persist_qm_input(pbe_input, node_runner)
+        node_runner.info(
+            f"PBE/def2-SVP optimization for molecule {i} with engine "
+            f"{_engine_name(pbe_engine)}"
+        )
+        kwargs["custom_name"] = f"pbe-def2svp-mol{i}"
+        calc_result = await run_qm_calculator(pbe_input, pbe_engine, **kwargs)
+        qm_result, error = _child_qm_result(calc_result)
+        if error:
+            return node_runner.fail(
+                f"PBE/def2-SVP optimization failed for molecule {i}: {error}"
+            )
+        next_mol = _final_structure_molecule(qm_result)
+        if next_mol is None:
+            return node_runner.fail(
+                f"PBE/def2-SVP optimization returned no final_structure for molecule {i}"
+            )
+        optimized.append(
+            await _persist_step_molecule(next_mol, node_runner, f"pbe-mol{i}")
+        )
+    mol1, mol2 = optimized
+
+    table = SimpleTable(name="Thermo Benchmark")
+    table.add_column("smiles", "string")
+    table.add_column("formula", "string")
+    table.add_column("engine", "string")
+    table.add_column("basis_set", "string")
+    table.add_column("functional", "string")
+    _add_compare_delta_columns(table)
+
+    for index, step in enumerate(methods, start=1):
+        if step.engine is None:
+            raise ValueError(f"ThermoBenchmarkStep.engine is not set for step {index}")
+        if step.basis_set is None:
+            raise ValueError(f"ThermoBenchmarkStep.basis_set is not set for step {index}")
+        if step.functional is None:
+            raise ValueError(f"ThermoBenchmarkStep.functional is not set for step {index}")
+        basis_name = _basis_set_name(step.basis_set)
+        functional_name = _functional_name(step.functional)
+        engine_name = _engine_name(step.engine)
+        node_runner.info(
+            f"compare_conformers step {index}: engine={engine_name}, "
+            f"basis={basis_name}, functional={functional_name}"
+        )
+        current_input = _qm_input_copy(
+            qm_input,
+            basis_set=step.basis_set,
+            functional=step.functional,
+            molecule=mol1,
+        )
+        current_input = await _persist_qm_input(current_input, node_runner)
+        arg = CompareConformersModel(
+            qm_input=current_input,
+            molecule=mol2,
+            engine=step.engine,
+        )
+        kwargs["custom_name"] = f"{engine_name}-{basis_name}-{functional_name}"
+        calc_result = await compare_conformers(arg, **kwargs)
+        if isinstance(calc_result, CompareConformersResult):
+            compare_result = calc_result
+        elif isinstance(calc_result, SimstackResult):
+            if calc_result.status != TaskStatus.COMPLETED:
+                return node_runner.fail(
+                    calc_result.error_message
+                    or (
+                        f"compare_conformers failed for engine {engine_name}, "
+                        f"basis set {basis_name}, functional {functional_name}"
+                    )
+                )
+            compare_result = getattr(calc_result, "result", None)
+        else:
+            compare_result = getattr(calc_result, "result", None)
+        if compare_result is None:
+            return node_runner.fail(
+                f"compare_conformers returned no result for engine {engine_name}, "
+                f"basis set {basis_name}, functional {functional_name}"
+            )
+        if compare_result.final_molecule1 is None:
+            return node_runner.fail(
+                f"compare_conformers returned no final_molecule1 for step {index}"
+            )
+        if compare_result.final_molecule2 is None:
+            return node_runner.fail(
+                f"compare_conformers returned no final_molecule2 for step {index}"
+            )
+        mol1 = await _persist_step_molecule(
+            compare_result.final_molecule1, node_runner, f"method{index}-mol1"
+        )
+        mol2 = await _persist_step_molecule(
+            compare_result.final_molecule2, node_runner, f"method{index}-mol2"
+        )
+        row_molecule = compare_result.molecule_for_table() or mol1
+        table.add_row(
+            {
+                "smiles": row_molecule.smiles if row_molecule is not None else None,
+                "formula": row_molecule.formula if row_molecule is not None else None,
+                "engine": engine_name,
+                "basis_set": basis_name,
+                "functional": functional_name,
+                "DDG": compare_result.delta_delta_g,
+                "DDZ": compare_result.delta_delta_zpe_tot,
+                "DE_scf": compare_result.delta_e_scf,
+                "DE_thermo": compare_result.delta_e_thermo,
+                "DS": compare_result.delta_s,
+            }
+        )
+
+    node_runner.table = table
+    node_runner.info(f"Built thermo-benchmark table with {len(table.row)} row(s)")
     return node_runner.succeed()
 
