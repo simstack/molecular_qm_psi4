@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v0.7.0 (2026-09-06)
+
+### Features
+
+- Add `thermo_benchmark` workflow and support for DFTB integration
+  ([`912ed4e`](https://github.com/simstack/molecular_qm_psi4/commit/912ed4e8083445e1cdc69d8476ba5cf86fad62b0))
+
+- Introduce new `thermo_benchmark` node enabling combined DFTB and PBE/def2-SVP optimization
+  workflows. - Add support for `molecular_qm_dftb` with hierarchical method step execution. - Extend
+  `CompareConformersResult` and outputs to include final molecule structures. - Enhance test
+  coverage to validate `thermo_benchmark` functionality and related utilities. - Bump dependencies:
+  `molecular-qm-models` to `0.4.0`, `Simstack` to latest `ww/new-features`.
+
+
 ## v0.6.4 (2026-09-06)
 
 ### Bug Fixes
