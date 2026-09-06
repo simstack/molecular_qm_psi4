@@ -136,18 +136,20 @@ def test_pyscf_resources_match_run_docker_container_limits():
     memory_mb, threads, log = pyscf_resources_from_slurm(
         {"parent_parameters": SimpleNamespace(slurm_parameters=slurm)}
     )
-    assert memory_mb == 32000.0
+    assert memory_mb == 27200.0
     assert threads == 8
     assert "--cpus 8" in log
     assert "--memory 32g" in log
-    assert "max_memory=32000 MB" in log
+    assert "container=32000 MB" in log
+    assert "max_memory=27200 MB" in log
+    assert "0.85 of container" in log
     assert "threads=8" in log
     memory, psi4_threads, _ = resources_from_parent_parameters(
         {"parent_parameters": SimpleNamespace(slurm_parameters=slurm)},
         label="Psi4",
     )
     assert psi4_threads == threads
-    assert memory_to_mb(memory) == memory_mb
+    assert memory_to_mb(memory) == 32000.0
 
 
 def test_pyscf_resources_mem_per_cpu_matches_docker():
@@ -163,9 +165,11 @@ def test_pyscf_resources_mem_per_cpu_matches_docker():
     memory_mb, threads, log = pyscf_resources_from_slurm(
         {"parameters": SimpleNamespace(slurm_parameters=slurm)}
     )
-    assert memory_mb == 16000.0
+    assert memory_mb == 13600.0
     assert threads == 4
     assert "--memory 16g" in log
+    assert "container=16000 MB" in log
+    assert "max_memory=13600 MB" in log
 
 
 def test_docker_limit_helpers_match_simstack_run_docker():

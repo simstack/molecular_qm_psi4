@@ -11,6 +11,10 @@ from simstack.util.generate_ui_schema import generate_ui_schema
 _SLURM_MEMORY_PATTERN = re.compile(r"^(\d+(?:\.\d+)?)\s*([MGmg])B?$")
 _DEFAULT_QM_MEMORY = "8 GB"
 _DEFAULT_QM_THREADS = 4
+# PySCF max_memory is a working-set budget, not a cgroup cap. Matching it 1:1 to
+# slurm/docker/VM RAM leaves no room for the interpreter, OpenMP arenas, or the
+# parent NodeRunner; the kernel then SIGKILLs (-9). Hessian tests already used 0.85.
+_PYSCF_MEMORY_FRACTION_OF_CONTAINER = 0.85
 
 
 class QMEngine(str, Enum):
@@ -197,7 +201,11 @@ def slurm_from_kwargs(kwargs: dict):
 
 
 def pyscf_resources_from_slurm(kwargs: dict) -> tuple[float, int, str]:
-    """PySCF max_memory (MB) and threads matching ``run_docker`` container limits."""
+    """PySCF max_memory (MB) and threads from ``run_docker`` container limits.
+
+    ``max_memory`` is 0.85 of the docker/slurm memory so PySCF spills before
+    RSS fills a VM sized 1:1 with ``mem`` (see CPX62 32 GiB + ``mem=32G``).
+    """
     slurm = slurm_from_kwargs(kwargs)
     cpus = docker_cpu_limit(slurm)
     mem_flag = docker_memory_limit(slurm)
@@ -212,11 +220,20 @@ def pyscf_resources_from_slurm(kwargs: dict) -> tuple[float, int, str]:
             "slurm_parameters cpus_per_task/tasks/tasks_per_node is required so "
             f"PySCF threads match run_docker --cpus; container flags={flags}"
         )
-    memory_mb = memory_to_mb(mem_flag)
-    mem_display = int(memory_mb) if memory_mb == int(memory_mb) else memory_mb
+    container_mb = memory_to_mb(mem_flag)
+    memory_mb = container_mb * _PYSCF_MEMORY_FRACTION_OF_CONTAINER
+    if memory_mb <= 0:
+        raise ValueError(
+            f"PySCF max_memory budget is not positive after applying "
+            f"{_PYSCF_MEMORY_FRACTION_OF_CONTAINER} of container {container_mb} MB "
+            f"(flags={flags})"
+        )
+    mem_display = int(container_mb) if container_mb == int(container_mb) else container_mb
+    pyscf_display = int(memory_mb) if memory_mb == int(memory_mb) else memory_mb
     log = (
         f"run_docker container limits from slurm_parameters: {flags}; "
-        f"PySCF max_memory={mem_display} MB threads={cpus}"
+        f"container={mem_display} MB; PySCF max_memory={pyscf_display} MB "
+        f"({_PYSCF_MEMORY_FRACTION_OF_CONTAINER} of container); threads={cpus}"
     )
     return memory_mb, cpus, log
 
