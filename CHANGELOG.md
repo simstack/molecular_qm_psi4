@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.6.4 (2026-09-06)
+
+### Bug Fixes
+
+- Adjust PySCF memory handling to prevent SIGKILL in memory-constrained environments
+  ([`9f70957`](https://github.com/simstack/molecular_qm_psi4/commit/9f70957b5add036168475dd5f34ca2e833807439))
+
+- Apply `_PYSCF_MEMORY_FRACTION_OF_CONTAINER` (0.85) for `max_memory` to reserve space for other
+  processes. - Update logs and error messages to reflect adjusted memory budget. - Modify unit tests
+  to validate new memory calculation approach.
+
+
 ## v0.6.3 (2026-09-05)
 
 ### Bug Fixes
