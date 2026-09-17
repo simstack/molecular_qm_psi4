@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.8.1 (2026-09-17)
+
+### Bug Fixes
+
+- Count DF Hessian peak RAM before choosing that path.
+  ([`210ab9d`](https://github.com/simstack/molecular_qm_psi4/commit/210ab9dac485185737c98b071433b9e4e5500258))
+
+The rhok0-only estimate reported 1.3 GB for 38-atom TZVP B3LYP, then the DF Hessian SIGKILL -9 on
+  int3c IPIP blocks.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.8.0 (2026-09-17)
 
 ### Features
