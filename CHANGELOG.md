@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.8.0 (2026-09-17)
+
+### Features
+
+- Store batch optimization geometries on QMResult.structures.
+  ([`e81f095`](https://github.com/simstack/molecular_qm_psi4/commit/e81f095f6e6ed9b19dfdf0b6bc2e1e8875886379))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.7.0 (2026-09-06)
 
 ### Features
