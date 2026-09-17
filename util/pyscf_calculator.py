@@ -1,5 +1,7 @@
 import logging
+import os
 import re
+from pathlib import Path
 
 from molecular_qm_models import QMInput
 from molecular_qm_psi4.util.psi4_calculator import (
@@ -212,8 +214,20 @@ def harmonic_cartesian_constraints(qm_input) -> list:
     return constraints
 
 
+# pyscf.df.hessian.rhf caps the 3-center IPIP aux block at 480 functions.
+# lib.einsum/contract copies both GEMM operands; libcint/OpenMP are extra.
+_DF_HESS_AUX_BLK = 480
+_DF_HESS_OVERHEAD_MB = 2048.0
+
+
 def df_hessian_memory(mf, mol, max_memory) -> dict:
-    """Estimate DF Hessian ``rhok0_Pl_`` size against ``max_memory`` (MB)."""
+    """Estimate DF Hessian peak RAM against ``max_memory`` (MB).
+
+    PySCF only checks ``rhok0_Pl_`` (about ``naux*nao*nocc``) before starting.
+    Hybrid DF Hessian then builds ``int3c2e_ipip1`` as ``(9, nao, nao, blk)``
+    with ``blk = min(480, naux)`` and copies that tensor for GEMM. That peak,
+    not rhok0, is what exceeds a 32 GB cgroup and SIGKILLs (-9).
+    """
     if max_memory is None:
         raise ValueError("max_memory is required")
     budget = float(max_memory)
@@ -227,31 +241,73 @@ def df_hessian_memory(mf, mol, max_memory) -> dict:
         nocc = int(sum(int((occ > 0).sum()) for occ in mo_occ))
     else:
         nocc = int((mo_occ > 0).sum())
+    empty = {
+        "naux": 0,
+        "nao": nao,
+        "nocc": nocc,
+        "blk": 0,
+        "rhok0_mb": 0.0,
+        "int3c_ipip1_mb": 0.0,
+        "k_tmp_mb": 0.0,
+        "hdf5_scratch_mb": 0.0,
+        "current_mb": 0.0,
+        "required_mb": 0.0,
+        "fits": True,
+        "density_fit": False,
+        "summary": "mean field has no density fitting",
+    }
     with_df = getattr(mf, "with_df", None)
     if with_df is None:
-        return {
-            "naux": 0,
-            "nao": nao,
-            "nocc": nocc,
-            "required_mb": 0.0,
-            "fits": True,
-            "density_fit": False,
-        }
+        return empty
     auxmol = getattr(with_df, "auxmol", None)
     if auxmol is None:
         from pyscf import df
 
         auxmol = df.addons.make_auxmol(getattr(with_df, "mol", None) or mol, with_df.auxbasis)
     naux = int(auxmol.nao)
-    required_mb = naux * nocc * (nocc + nao) * 8 / 0.8e6
-    fits = budget * 0.8e6 / 8 >= naux * nocc * (nocc + nao)
+    blk = min(_DF_HESS_AUX_BLK, max(naux, 1))
+    if nao > 0:
+        mem_blk = int(budget * 0.3e6 / 8 / (nao * nao))
+        blk = min(blk, max(mem_blk, 1))
+    rhok0_mb = naux * nao * nocc * 8 / 1e6
+    int3c_ipip1_mb = 9 * nao * nao * blk * 8 / 1e6
+    k_tmp_mb = blk * nao * nao * 8 / 1e6
+    hdf5_scratch_mb = 2 * nao * nao * naux * 3 * 8 / 1e6
+    current_mb = 0.0
+    try:
+        from pyscf import lib
+
+        current_mb = float(lib.current_memory()[0])
+    except Exception:
+        current_mb = 0.0
+    required_mb = (
+        rhok0_mb
+        + 2.0 * (int3c_ipip1_mb + k_tmp_mb)
+        + _DF_HESS_OVERHEAD_MB
+        + current_mb
+    )
+    fits = required_mb <= budget
+    summary = (
+        f"peak {required_mb / 1000:.1f} GB (rhok0={rhok0_mb / 1000:.1f}, "
+        f"int3c_ipip1={int3c_ipip1_mb / 1000:.1f}x2, k_tmp={k_tmp_mb / 1000:.1f}x2, "
+        f"overhead={_DF_HESS_OVERHEAD_MB / 1000:.1f}, process={current_mb / 1000:.1f}; "
+        f"hdf5_scratch={hdf5_scratch_mb / 1000:.1f} disk) "
+        f"naux={naux}, nao={nao}, nocc={nocc}, blk={blk}"
+    )
     return {
         "naux": naux,
         "nao": nao,
         "nocc": nocc,
+        "blk": blk,
+        "rhok0_mb": rhok0_mb,
+        "int3c_ipip1_mb": int3c_ipip1_mb,
+        "k_tmp_mb": k_tmp_mb,
+        "hdf5_scratch_mb": hdf5_scratch_mb,
+        "current_mb": current_mb,
         "required_mb": required_mb,
         "fits": fits,
         "density_fit": True,
+        "summary": summary,
     }
 
 
@@ -279,6 +335,11 @@ class PySCFCalculator:
         lib.param.MAX_MEMORY = max_memory
         self.max_memory = max_memory
         self.num_threads = threads
+        if not os.environ.get("PYSCF_TMPDIR"):
+            scratch = Path("pyscf_tmp").resolve()
+            scratch.mkdir(parents=True, exist_ok=True)
+            os.environ["PYSCF_TMPDIR"] = str(scratch)
+        lib.param.TMPDIR = os.environ["PYSCF_TMPDIR"]
 
     def apply_max_memory(self, mol=None, mf=None):
         if not hasattr(self, "max_memory"):

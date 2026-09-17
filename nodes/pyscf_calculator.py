@@ -866,15 +866,13 @@ def _kernel_hessian(mf, mol, node_runner, max_memory=None):
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if info["density_fit"] and not info["fits"]:
         path_msg = (
-            f"DF Hessian needs {info['required_mb'] / 1000:.1f} GB "
-            f"(naux={info['naux']}, nao={info['nao']}, nocc={info['nocc']}) "
-            f"vs budget {float(max_memory) / 1000:.1f} GB; using conventional Hessian"
+            f"DF Hessian {info['summary']} vs budget {float(max_memory) / 1000:.1f} GB; "
+            "using conventional Hessian"
         )
     elif info["density_fit"]:
         path_msg = (
             f"DF Hessian fits in budget {float(max_memory) / 1000:.1f} GB "
-            f"(required {info['required_mb'] / 1000:.1f} GB; "
-            f"naux={info['naux']}, nao={info['nao']}, nocc={info['nocc']})"
+            f"({info['summary']})"
         )
     else:
         path_msg = "mean field has no density fitting; using mf.Hessian()"
@@ -1106,9 +1104,7 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 hess_info = df_hessian_memory(mf, mol, calculator.max_memory)
                 if hess_info["density_fit"] and not hess_info["fits"]:
                     preflight = (
-                        f"DF Hessian needs {hess_info['required_mb'] / 1000:.1f} GB "
-                        f"(naux={hess_info['naux']}, nao={hess_info['nao']}, "
-                        f"nocc={hess_info['nocc']}) vs budget "
+                        f"DF Hessian {hess_info['summary']} vs budget "
                         f"{calculator.max_memory / 1000:.1f} GB; "
                         "will use conventional Hessian after SCF/optimization"
                     )
@@ -1116,7 +1112,7 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                     print(preflight, file=sys.stderr, flush=True)
                 else:
                     preflight = (
-                        f"Hessian memory estimate required_mb={hess_info['required_mb']:.0f} "
+                        f"Hessian memory estimate {hess_info['summary']} "
                         f"budget_mb={calculator.max_memory:.0f} fits={hess_info['fits']} "
                         f"density_fit={hess_info['density_fit']}"
                     )

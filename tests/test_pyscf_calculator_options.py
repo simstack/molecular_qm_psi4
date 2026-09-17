@@ -597,8 +597,31 @@ def test_df_hessian_memory_detects_when_tensor_does_not_fit():
     assert info["naux"] == 4000
     assert info["nao"] == 2000
     assert info["nocc"] == 250
-    small = df_hessian_memory(mf, mol, 40000)
-    assert small["fits"] is True
+    assert info["int3c_ipip1_mb"] > info["rhok0_mb"]
+    huge = df_hessian_memory(mf, mol, 40000)
+    assert huge["fits"] is False
+
+
+def test_df_hessian_memory_tzvp_38_atoms_exceeds_32g_budget():
+    mol = SimpleNamespace(nao=778, nelectron=156)
+    auxmol = SimpleNamespace(nao=1946)
+    mf = SimpleNamespace(mo_occ=_Occ(78), with_df=SimpleNamespace(auxmol=auxmol))
+    info = df_hessian_memory(mf, mol, 27200)
+    assert info["fits"] is False
+    assert info["required_mb"] > 27200
+    assert info["rhok0_mb"] < 2000
+    assert info["int3c_ipip1_mb"] > 10000
+    assert "int3c_ipip1" in info["summary"]
+
+
+def test_df_hessian_memory_small_molecule_fits():
+    mol = SimpleNamespace(nao=40, nelectron=20)
+    auxmol = SimpleNamespace(nao=80)
+    mf = SimpleNamespace(mo_occ=_Occ(10), with_df=SimpleNamespace(auxmol=auxmol))
+    info = df_hessian_memory(mf, mol, 8000)
+    assert info["density_fit"] is True
+    assert info["fits"] is True
+    assert info["required_mb"] < 8000
 
 
 def test_df_hessian_memory_without_density_fit_fits():
