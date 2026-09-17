@@ -298,6 +298,7 @@ def test_snapshotter_persists_every_ten_gradient_calls_and_on_failure():
 
 
 def test_snapshotter_records_opt_geometries_every_ten_steps():
+    from molecular_qm_models import QMResult
     from molecular_qm_psi4.nodes import psi4_calculator as mod
 
     def fake_run_async(coro):
@@ -311,7 +312,14 @@ def test_snapshotter_records_opt_geometries_every_ten_steps():
     psi4_mol.z.return_value = 1.0
     wfn = MagicMock()
     wfn.molecule.return_value = psi4_mol
-    snap = OptimizationSnapshotter(MagicMock(smiles="[H]", formula="H"), {}, interval=10)
+    qm_result = QMResult()
+    node_runner = MagicMock()
+    snap = OptimizationSnapshotter(
+        MagicMock(smiles="[H]", formula="H"),
+        {"node_runner": node_runner},
+        interval=10,
+        qm_result=qm_result,
+    )
     snap._original_gradient = MagicMock(return_value=(MagicMock(), wfn))
     with patch.object(mod, "_run_async", side_effect=fake_run_async), patch.object(
         mod, "_energy_and_grad_norm", return_value=(None, None)
@@ -320,6 +328,10 @@ def test_snapshotter_records_opt_geometries_every_ten_steps():
             snap._wrapped_gradient("pbe", return_wfn=True)
     assert [step for step, _ in snap.opt_geometries] == [10, 20]
     assert snap.opt_geometries[0][1].atoms[0].element == "H"
+    molecules = list(qm_result.structures)
+    assert len(molecules) == 2
+    assert molecules[0].atoms[0].element == "H"
+    assert node_runner.qm_result is qm_result
 
 
 def test_snapshotter_logs_energy_and_gradient_every_step():

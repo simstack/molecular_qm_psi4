@@ -4,7 +4,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from molecular_qm_models import Molecule, QMResult
-from molecular_qm_psi4.util.opt_structures import optimization_structure_list
+from molecular_qm_psi4.util.opt_structures import (
+    optimization_structure_list,
+    write_optimization_structure,
+)
 from molecular_qm_psi4.util.orbital_energies import (
     HARTREE_TO_EV,
     apply_orbital_energies,
@@ -26,6 +29,27 @@ def test_optimization_structure_list_does_not_duplicate_final_interval():
     second = Molecule()
     table = optimization_structure_list([(10, first), (20, second)], second, last_iteration=20)
     assert len(table) == 2
+
+
+def test_write_optimization_structure_appends_and_assigns_runner():
+    qm_result = QMResult()
+    first = Molecule()
+    second = Molecule()
+    node_runner = MagicMock()
+    kwargs = {"node_runner": node_runner}
+    write_optimization_structure(qm_result, first, kwargs)
+    write_optimization_structure(qm_result, second, kwargs)
+    assert len(qm_result.structures) == 2
+    assert node_runner.qm_result is qm_result
+
+
+def test_write_optimization_structure_rejects_none():
+    with pytest.raises(ValueError, match="qm_result is required"):
+        write_optimization_structure(None, Molecule(), {})
+    with pytest.raises(ValueError, match="molecule is required"):
+        write_optimization_structure(QMResult(), None, {})
+    with pytest.raises(ValueError, match="kwargs is required"):
+        write_optimization_structure(QMResult(), Molecule(), None)
 
 
 def test_apply_orbital_energies_sets_ev_table_and_gap():

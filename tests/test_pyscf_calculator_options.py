@@ -381,6 +381,52 @@ def test_pyscf_optimize_logs_energy_and_gradient_every_step():
     assert step_logs == [msg for msg in logged if "Optimization step " in msg]
 
 
+def test_pyscf_snapshotter_writes_qm_result_structures_every_ten_steps():
+    from molecular_qm_models import QMResult
+    from molecular_qm_psi4.nodes import pyscf_calculator as mod
+    from molecular_qm_psi4.nodes.pyscf_calculator import OptimizationSnapshotter
+
+    class FakeMol:
+        natm = 1
+
+        def atom_coords(self, unit=None):
+            return [[1.0, 0.0, 0.0]]
+
+        def atom_pure_symbol(self, i):
+            return "H"
+
+    def fake_run_async(coro):
+        coro.close()
+
+    qm_result = QMResult()
+    node_runner = MagicMock()
+    snapshotter = OptimizationSnapshotter(
+        MagicMock(smiles="[H]", formula="H"),
+        {"node_runner": node_runner},
+        interval=10,
+        qm_result=qm_result,
+    )
+    mol = FakeMol()
+    with patch.object(mod, "_run_async", side_effect=fake_run_async), patch.object(
+        mod, "_payload_from_mf", return_value={"atom": []}
+    ):
+        for i in range(1, 26):
+            snapshotter.geom_iter = i
+            snapshotter.callback(
+                {
+                    "energy": -1.0,
+                    "gradients": [[0.1, 0.0, 0.0]],
+                    "mol": mol,
+                    "g_scanner": None,
+                }
+            )
+    assert [step for step, _ in snapshotter.opt_geometries] == [10, 20]
+    molecules = list(qm_result.structures)
+    assert len(molecules) == 2
+    assert molecules[0].atoms[0].element == "H"
+    assert node_runner.qm_result is qm_result
+
+
 def test_parse_pyscf_opt_cycle_line():
     from molecular_qm_psi4.nodes.pyscf_calculator import parse_pyscf_opt_cycle_line
 

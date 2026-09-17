@@ -36,7 +36,10 @@ from molecular_qm_psi4.util.pyscf_calculator import (
     method_name_from_qm_input,
     pyscf_opt_conv_params,
 )
-from molecular_qm_psi4.util.opt_structures import optimization_structure_list
+from molecular_qm_psi4.util.opt_structures import (
+    optimization_structure_list,
+    write_optimization_structure,
+)
 from molecular_qm_psi4.util.pyscf_result import PySCFResult
 from molecular_qm_psi4.util.pyscf_thermo import run_pyscf_thermo
 from molecular_qm_psi4.util.qm_engine import (
@@ -327,10 +330,21 @@ async def _persist_molecule_snapshot(
 
 
 class OptimizationSnapshotter:
-    def __init__(self, source_molecule, kwargs, qm_input=None, calculator=None, interval=_SNAPSHOT_INTERVAL):
+    def __init__(
+        self,
+        source_molecule,
+        kwargs,
+        qm_input=None,
+        calculator=None,
+        interval=_SNAPSHOT_INTERVAL,
+        qm_result=None,
+    ):
+        if kwargs is None:
+            raise ValueError("kwargs is required")
         self.source_molecule = source_molecule
-        self.kwargs = kwargs or {}
+        self.kwargs = kwargs
         self.qm_input = qm_input
+        self.qm_result = qm_result
         self.calculator = calculator
         self.interval = interval
         self.seen = set()
@@ -487,6 +501,8 @@ class OptimizationSnapshotter:
                     step = int(self.geom_iter)
                     if not any(existing == step for existing, _ in self.opt_geometries):
                         self.opt_geometries.append((step, geometry))
+                        if self.qm_result is not None:
+                            write_optimization_structure(self.qm_result, geometry, self.kwargs)
                 except (TypeError, ValueError, AttributeError):
                     pass
             try:
@@ -587,23 +603,38 @@ class OptimizationSnapshotter:
             node_runner = self._node_runner()
             if node_runner is not None:
                 node_runner.warning(f"Failed to store optimization charts: {exc}")
-        if exc_type is not None and self.last_payload is not None:
-            try:
-                _run_async(
-                    _persist_molecule_snapshot(
-                        self.last_payload,
-                        self.source_molecule,
-                        self.kwargs,
-                        geom_iter=self.geom_iter or 1,
-                        scf_iter=self.geom_iter or 1,
-                        final_structure=True,
-                        qm_input=self.qm_input,
+        if exc_type is not None:
+            if self.last_mol is not None and self.qm_result is not None:
+                try:
+                    geometry = PySCFResult.molecule_from_pyscf(
+                        None,
+                        self.last_mol,
+                        smiles=getattr(self.source_molecule, "smiles", None),
+                        formula=getattr(self.source_molecule, "formula", None),
                     )
-                )
-            except Exception as exc:
-                node_runner = self._node_runner()
-                if node_runner is not None:
-                    node_runner.warning(f"Failed to store MoleculeSnapshot: {exc}")
+                    step = int(self.geom_iter) if self.geom_iter else 1
+                    if not any(existing == step for existing, _ in self.opt_geometries):
+                        self.opt_geometries.append((step, geometry))
+                        write_optimization_structure(self.qm_result, geometry, self.kwargs)
+                except (TypeError, ValueError, AttributeError):
+                    pass
+            if self.last_payload is not None:
+                try:
+                    _run_async(
+                        _persist_molecule_snapshot(
+                            self.last_payload,
+                            self.source_molecule,
+                            self.kwargs,
+                            geom_iter=self.geom_iter or 1,
+                            scf_iter=self.geom_iter or 1,
+                            final_structure=True,
+                            qm_input=self.qm_input,
+                        )
+                    )
+                except Exception as exc:
+                    node_runner = self._node_runner()
+                    if node_runner is not None:
+                        node_runner.warning(f"Failed to store MoleculeSnapshot: {exc}")
 
 
 _PYSCF_OPT_CYCLE_RE = re.compile(
@@ -1102,7 +1133,9 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                     energy = mf.kernel()
             elif qm_input.optimization:
                 node_runner.log("Starting optimization...")
-                snapshotter = OptimizationSnapshotter(molecule, kwargs, qm_input=qm_input, calculator=calculator)
+                snapshotter = OptimizationSnapshotter(
+                    molecule, kwargs, qm_input=qm_input, calculator=calculator, qm_result=qm_result
+                )
                 cycle_reporter.snapshotter = snapshotter
                 snapshotter.stdout_tee = stdout_tee
                 try:
@@ -1233,6 +1266,12 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             return node_runner.succeed()
     except Exception as exc:
         error_message = _report_pyscf_failure(node_runner, exc)
+        if snapshotter is not None:
+            qm_result.structures = optimization_structure_list(
+                snapshotter.opt_geometries, None, snapshotter.geom_iter
+            )
+            if qm_result.structures is not None:
+                node_runner.qm_result = qm_result
         if qm_input.tolerate_failure:
             node_runner.warning(f"PySCF failed but failure is tolerated: {exc}")
             return node_runner.succeed()

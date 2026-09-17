@@ -32,7 +32,10 @@ from molecular_qm_psi4.util.psi4_calculator import (
     n_atoms_from_molecule,
     python_log_level_for_print_level,
 )
-from molecular_qm_psi4.util.opt_structures import optimization_structure_list
+from molecular_qm_psi4.util.opt_structures import (
+    optimization_structure_list,
+    write_optimization_structure,
+)
 from molecular_qm_psi4.util.psi4_result import Psi4Result
 from molecular_qm_psi4.util.psi4_thermo import run_manual_thermo
 from molecular_qm_psi4.util.qm_engine import attach_optimizer_timings, resources_from_parent_parameters
@@ -963,10 +966,12 @@ class OptimizationSnapshotter:
         qm_input: QMInput | None = None,
         interval: int = _SNAPSHOT_INTERVAL,
         iteration_timeout: float | None = None,
+        qm_result: QMResult | None = None,
     ):
         self.source_molecule = source_molecule
         self.kwargs = kwargs
         self.qm_input = qm_input
+        self.qm_result = qm_result
         self.interval = interval
         self.seen = set()
         self.geom_iter = 0
@@ -1349,6 +1354,8 @@ class OptimizationSnapshotter:
                 step = int(iteration)
                 if not any(existing == step for existing, _ in self.opt_geometries):
                     self.opt_geometries.append((step, geometry))
+                    if self.qm_result is not None:
+                        write_optimization_structure(self.qm_result, geometry, self.kwargs)
         except (TypeError, ValueError):
             pass
         try:
@@ -1796,7 +1803,9 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
 
             if qm_input.optimization:
                 node_runner.log("Starting optimization...")
-                snapshotter = OptimizationSnapshotter(molecule, kwargs, qm_input=qm_input)
+                snapshotter = OptimizationSnapshotter(
+                    molecule, kwargs, qm_input=qm_input, qm_result=qm_result
+                )
                 with snapshotter:
                     energy, wfn = psi4.optimize(method, return_wfn=True, ref_wfn=restart_wfn)
                 attach_optimizer_timings(node_runner, snapshotter)
@@ -1922,6 +1931,12 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         error_message = _meaningful_psi4_error(e, snapshotter, output_path)
         node_runner.log(error_message)
         node_runner.error(error_message)
+        if snapshotter is not None:
+            qm_result.structures = optimization_structure_list(
+                snapshotter.opt_geometries, None, snapshotter.geom_iter
+            )
+            if qm_result.structures is not None:
+                node_runner.qm_result = qm_result
         if qm_input.tolerate_failure:
             node_runner.warning(f"Psi4 failed but failure is tolerated: {error_message}")
             return node_runner.succeed()

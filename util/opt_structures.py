@@ -18,3 +18,20 @@ def optimization_structure_list(geometries, final_molecule, last_iteration):
     for mol in molecules:
         table.add_molecule(mol)
     return table
+
+
+def write_optimization_structure(qm_result, molecule, kwargs):
+    """Append current coordinates to QMResult.structures for the node result."""
+    if qm_result is None:
+        raise ValueError("qm_result is required")
+    if molecule is None:
+        raise ValueError("molecule is required")
+    if kwargs is None:
+        raise ValueError("kwargs is required")
+    if qm_result.structures is None:
+        qm_result.structures = MoleculeList()
+    qm_result.structures.add_molecule(molecule)
+    node_runner = kwargs.get("node_runner")
+    if node_runner is not None:
+        node_runner.qm_result = qm_result
+    return qm_result
