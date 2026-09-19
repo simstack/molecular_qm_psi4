@@ -742,11 +742,13 @@ def test_log_energy_gradient_summary_writes_history_and_findif(tmp_path):
     assert "Last Psi4 stopped on: Wednesday, 02 September 2026 02:29AM" in logged
 
 
-def test_attach_psi4_result_files_not_in_memory(tmp_path, monkeypatch):
+def _attach_result_files(tmp_path, monkeypatch, *, with_result_wfn):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "psi4.out").write_text("psi4 output", encoding="utf-8")
     (tmp_path / "psi4.log").write_text("psi4 log", encoding="utf-8")
     (tmp_path / "snapshot.wfn.npy").write_bytes(b"npy")
+    if with_result_wfn:
+        (tmp_path / "result.wfn.npy").write_bytes(b"npy")
     created = []
 
     def fake_from_local_file(path, **kwargs):
@@ -769,6 +771,11 @@ def test_attach_psi4_result_files_not_in_memory(tmp_path, monkeypatch):
         side_effect=fake_from_local_file,
     ):
         _attach_psi4_result_files(node_runner, psi4_result)
+    return created, node_runner
+
+
+def test_attach_psi4_result_files_not_in_memory(tmp_path, monkeypatch):
+    created, node_runner = _attach_result_files(tmp_path, monkeypatch, with_result_wfn=False)
 
     by_name = {fs.name: fs for fs in created}
     assert by_name["psi4.out"].in_memory is False
@@ -782,6 +789,20 @@ def test_attach_psi4_result_files_not_in_memory(tmp_path, monkeypatch):
     assert "psi4.out" in info_names
     assert "snapshot.wfn.npy" in info_names
     assert "psi4.log" in info_names
+
+
+def test_attach_psi4_result_files_skips_snapshot_when_result_wfn_exists(tmp_path, monkeypatch):
+    created, node_runner = _attach_result_files(tmp_path, monkeypatch, with_result_wfn=True)
+
+    created_names = [fs.name for fs in created]
+    assert "snapshot.wfn.npy" not in created_names
+    result_names = [fs.name for fs in node_runner.files]
+    assert "psi4.out" in result_names
+    assert "snapshot.wfn.npy" not in result_names
+    info_names = [fs.name for fs in node_runner.info_files]
+    assert "snapshot.wfn.npy" not in info_names
+    assert not (tmp_path / "snapshot.wfn.npy").exists()
+    assert (tmp_path / "result.wfn.npy").exists()
 
 
 def test_append_artifact_file_skips_duplicates(tmp_path, monkeypatch):

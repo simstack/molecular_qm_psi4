@@ -71,6 +71,17 @@ _FREQ_KEY = "frequency_analysis"
 _HEARTBEAT_INTERVAL_S = 1800.0
 
 
+def _cleanup_snapshot_files(directory: Path | None = None):
+    base_dir = Path(".") if directory is None else Path(directory)
+    for file_path in base_dir.glob("snapshot*.wfn.npy"):
+        try:
+            file_path.unlink()
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            logger.warning("Failed to delete snapshot file %s: %s", file_path, exc)
+
+
 def _run_async(coro):
     try:
         import nest_asyncio
@@ -1020,13 +1031,13 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             were computed.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
             Frequency jobs add a separate ``frequencies`` row.
-        thermodynamics_table (SimpleTable): Component thermochemistry (S, Cv, Cp, E, H, G, ZPE)
-            when frequencies were computed. Older stored nodes may still expose
-            ``thermo_result`` (QMThermoResult) instead.
+        thermodynamics_table (SimpleTable): Component thermochemistry (S in kcal/mol/K;
+            Cv, Cp, E, H, G, ZPE in engine units) when frequencies were computed.
+            Older stored nodes may still expose ``thermo_result`` (QMThermoResult) instead.
         G_tot (FloatData): Total Gibbs free energy (Hartree) when thermochemistry was computed.
         ZPE_tot (FloatData): Total zero-point energy (Hartree) when thermochemistry was computed.
         E_tot (FloatData): Total thermal internal energy (Hartree) when thermochemistry was computed.
-        S_tot (FloatData): Total entropy when thermochemistry was computed.
+        S_tot (FloatData): Total entropy (kcal/mol/K) when thermochemistry was computed.
     """
     node_runner = kwargs.get("node_runner")
     try:
@@ -1249,6 +1260,7 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 if chk_path.exists():
                     chk_fs = FileStack.from_local_file(chk_path, in_memory=False, is_hashable=True, secure_source=True)
                     qm_result.files.append(chk_fs)
+                _cleanup_snapshot_files()
                 node_runner.info(
                     f"Saved reusable PySCF wavefunction to {saved} "
                     f"(frequency_analysis={'yes' if freq_info else 'no'})"
@@ -1286,6 +1298,20 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 node_runner.info(f"PySCF output file: {pyscf_result.output_path}")
         except Exception as exc:
             node_runner.warning(f"Failed to collect PySCF output file: {exc}")
+        try:
+            if Path(_WFN_NPY_NAME).is_file():
+                _cleanup_snapshot_files()
+            else:
+                snapshot_path = Path(_SNAPSHOT_WFN_NAME)
+                if snapshot_path.is_file():
+                    snapshot_fs = FileStack.from_local_file(
+                        snapshot_path, in_memory=False, is_hashable=True, secure_source=True
+                    )
+                    node_runner.files.append(snapshot_fs)
+                    node_runner.info_files.append(snapshot_fs)
+                    node_runner.info(f"Added {snapshot_path.name} to results (in_memory=False)")
+        except Exception as exc:
+            node_runner.warning(f"Failed to collect PySCF snapshot wavefunction: {exc}")
 
 
 @node
@@ -1294,12 +1320,13 @@ async def pyscf_thermochemistry(qm_result: QMResult, temperature: FloatData, pre
     Thermochemistry from a saved PySCF wavefunction (requires frequency analysis).
 
     SimstackResult:
-        result (SimpleTable): Component thermochemistry table (S, Cv, Cp, E, H, G, ZPE).
+        result (SimpleTable): Component thermochemistry table (S in kcal/mol/K;
+            Cv, Cp, E, H, G, ZPE in engine units).
             Older stored nodes may still expose ``result`` as QMThermoResult.
         G_tot (FloatData): Total Gibbs free energy (Hartree).
         ZPE_tot (FloatData): Total zero-point energy (Hartree).
         E_tot (FloatData): Total thermal internal energy (Hartree).
-        S_tot (FloatData): Total entropy.
+        S_tot (FloatData): Total entropy (kcal/mol/K).
     """
     node_runner: NodeRunner = kwargs.get("node_runner")
     try:
