@@ -73,7 +73,7 @@ class CompareConformersResult(Model):
         default=None, description="Thermochemistry E tot difference in kcal/mol"
     )
     delta_s: Optional[float] = Field(
-        default=None, description="Entropy difference (S tot) in cal/mol-K"
+        default=None, description="Entropy difference (S tot) in kcal/mol/K"
     )
     final_molecule1: Optional[Molecule] = None
     final_molecule2: Optional[Molecule] = None
@@ -471,7 +471,7 @@ def _compare_conformers_outputs(
     if delta_e_thermo is not None:
         node_runner.info(f"Computed Delta E (thermochemistry): {delta_e_thermo} kcal/mol")
     if delta_s is not None:
-        node_runner.info(f"Computed Delta S: {delta_s} cal/mol-K")
+        node_runner.info(f"Computed Delta S: {delta_s} kcal/mol/K")
 
     row_molecule = (
         arg.qm_input.molecule

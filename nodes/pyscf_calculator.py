@@ -1028,9 +1028,8 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     SimstackResult:
         qm_result (QMResult): Parsed result from the PySCF calculation.
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
-            were computed.
+            were computed. Frequency jobs run as a child ``pyscf_hessian`` node.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
-            Frequency jobs add a separate ``frequencies`` row.
         thermodynamics_table (SimpleTable): Component thermochemistry (S in kcal/mol/K;
             Cv, Cp, E, H, G, ZPE in engine units) when frequencies were computed.
             Older stored nodes may still expose ``thermo_result`` (QMThermoResult) instead.
@@ -1038,6 +1037,9 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         ZPE_tot (FloatData): Total zero-point energy (Hartree) when thermochemistry was computed.
         E_tot (FloatData): Total thermal internal energy (Hartree) when thermochemistry was computed.
         S_tot (FloatData): Total entropy (kcal/mol/K) when thermochemistry was computed.
+
+    Called Nodes:
+
     """
     node_runner = kwargs.get("node_runner")
     try:
@@ -1113,29 +1115,25 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
 
             method = method_name_from_qm_input(qm_input)
             node_runner.info(f"Starting PySCF calculation with method {method}")
-            if qm_input.frequencies:
-                hess_info = df_hessian_memory(mf, mol, calculator.max_memory)
-                if hess_info["density_fit"] and not hess_info["fits"]:
-                    preflight = (
-                        f"DF Hessian needs {hess_info['required_mb'] / 1000:.1f} GB "
-                        f"(naux={hess_info['naux']}, nao={hess_info['nao']}, "
-                        f"nocc={hess_info['nocc']}) vs budget "
-                        f"{calculator.max_memory / 1000:.1f} GB; "
-                        "will use conventional Hessian after SCF/optimization"
-                    )
-                    node_runner.warning(preflight)
-                    print(preflight, file=sys.stderr, flush=True)
-                else:
-                    preflight = (
-                        f"Hessian memory estimate required_mb={hess_info['required_mb']:.0f} "
-                        f"budget_mb={calculator.max_memory:.0f} fits={hess_info['fits']} "
-                        f"density_fit={hess_info['density_fit']}"
-                    )
-                    node_runner.info(preflight)
-                    print(preflight, file=sys.stderr, flush=True)
             freq_info = None
             hessian = None
-            if restart_payload and restart_payload.get(_FREQ_KEY) and qm_input.frequencies and not qm_input.optimization:
+            need_external_hessian = False
+            restart_has_frequencies = bool(
+                restart_payload
+                and restart_payload.get(_FREQ_KEY)
+                and qm_input.frequencies
+                and not qm_input.optimization
+            )
+            if qm_input.frequencies and not restart_has_frequencies:
+                from molecular_qm_psi4.util.pyscf_hessian_analytical import analytical_hessian_plan
+
+                hessian_plan = analytical_hessian_plan(mf, mol, kwargs.get("parent_parameters"))
+                node_runner.info(
+                    f"Analytical Hessian lower bound {hessian_plan['seconds_full']:.0f} s "
+                    f"({hessian_plan['seconds_per_atom']:.0f} s/atom) vs "
+                    f"Slurm time {hessian_plan['time_limit_seconds']} s"
+                )
+            if restart_has_frequencies:
                 node_runner.info("Restart payload already contains frequency analysis. Skipping frequency calculation.")
                 freq_info = restart_payload.get(_FREQ_KEY)
                 hessian = restart_payload.get("hessian")
@@ -1178,34 +1176,10 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 calculator.apply_max_memory(mol, mf)
                 energy = mf.kernel()
                 if qm_input.frequencies:
-                    freq_wall_start = time.monotonic()
-                    freq_cpu_start = time.process_time()
-                    hessian = _kernel_hessian(mf, mol, node_runner, calculator.max_memory)
-                    from pyscf.hessian import thermo as pyscf_thermo
-
-                    freq_info = pyscf_thermo.harmonic_analysis(mol, hessian)
-                    attach_optimizer_timings(
-                        node_runner,
-                        snapshotter,
-                        freq_wall_s=time.monotonic() - freq_wall_start,
-                        freq_cpu_s=time.process_time() - freq_cpu_start,
-                    )
-                    node_runner.log("Frequency calculation finished")
-                    node_runner.info("Frequency calculation finished")
+                    need_external_hessian = True
             elif qm_input.frequencies:
                 energy = mf.kernel()
-                freq_wall_start = time.monotonic()
-                freq_cpu_start = time.process_time()
-                hessian = _kernel_hessian(mf, mol, node_runner, calculator.max_memory)
-                from pyscf.hessian import thermo as pyscf_thermo
-
-                freq_info = pyscf_thermo.harmonic_analysis(mol, hessian)
-                attach_optimizer_timings(
-                    node_runner,
-                    snapshotter,
-                    freq_wall_s=time.monotonic() - freq_wall_start,
-                    freq_cpu_s=time.process_time() - freq_cpu_start,
-                )
+                need_external_hessian = True
             else:
                 post = calculator.post_scf_method(mf)
                 if post is mf:
@@ -1252,9 +1226,13 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             if freq_info and qm_input.frequencies:
                 thermodynamics_table = run_pyscf_thermo(mf, freq_info, 298.15, 101325.0, node_runner)
 
+            wfn_fs = None
+            wavefunction_saved = False
             try:
                 saved = _write_payload(payload, Path(_WFN_NPY_NAME))
                 wfn_fs = FileStack.from_local_file(saved, in_memory=False, is_hashable=True, secure_source=True)
+                await context.db.save(wfn_fs)
+                wavefunction_saved = True
                 qm_result.files.append(wfn_fs)
                 chk_path = Path(_CHK_NAME)
                 if chk_path.exists():
@@ -1267,6 +1245,35 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 )
             except Exception as exc:
                 node_runner.warning(f"Failed to save wavefunction for reuse: {exc}")
+
+            if need_external_hessian:
+                if not wavefunction_saved:
+                    raise ValueError("wavefunction file is required before the Hessian")
+                from molecular_qm_psi4.models.pyscf_hessian import PySCFHessianInput
+                from molecular_qm_psi4.nodes.pyscf_hessian import pyscf_hessian
+
+                node_runner.info("Starting pyscf_hessian for frequencies")
+                hess_result = await pyscf_hessian(
+                    PySCFHessianInput(qm_input=qm_input, wavefunction=wfn_fs),
+                    **kwargs,
+                )
+                for name in (
+                    "vibrational_frequencies",
+                    "thermodynamics_table",
+                    "G_tot",
+                    "ZPE_tot",
+                    "E_tot",
+                    "S_tot",
+                ):
+                    value = getattr(hess_result, name, None)
+                    if value is not None:
+                        setattr(node_runner, name, value)
+                if getattr(node_runner, "vibrational_frequencies", None) is not None:
+                    qm_result.vibrational_frequencies = node_runner.vibrational_frequencies
+                updated = getattr(hess_result, "wavefunction", None)
+                if updated is not None:
+                    qm_result.files.append(updated)
+                thermodynamics_table = getattr(node_runner, "thermodynamics_table", thermodynamics_table)
 
             node_runner.info("PySCF calculation finished successfully")
             node_runner.qm_result = qm_result

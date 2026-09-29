@@ -1,5 +1,12 @@
 from molecular_qm_psi4.nodes.psi4_calculator import psi4_calculator
 from molecular_qm_psi4.nodes.pyscf_calculator import pyscf_calculator, pyscf_thermochemistry
+from molecular_qm_psi4.nodes.pyscf_hessian import pyscf_hessian, pyscf_hessian_for_atoms
+from molecular_qm_psi4.models.int_list import IntList
+from molecular_qm_psi4.models.pyscf_hessian import (
+    PySCFHessianAtomContribution,
+    PySCFHessianAtomsInput,
+    PySCFHessianInput,
+)
 from molecular_qm_psi4.nodes.qm_calculator import qm_calculator
 from molecular_qm_psi4.util.qm_engine import QMEngine, QMEngineInput
 from molecular_qm_psi4.nodes.molecule_snapshot_inspector import molecule_snapshot_inspector
@@ -63,6 +70,12 @@ __all__ = [
     "psi4_calculator",
     "pyscf_calculator",
     "pyscf_thermochemistry",
+    "pyscf_hessian",
+    "pyscf_hessian_for_atoms",
+    "IntList",
+    "PySCFHessianInput",
+    "PySCFHessianAtomsInput",
+    "PySCFHessianAtomContribution",
     "qm_calculator",
     "QMEngine",
     "QMEngineInput",
