@@ -33,6 +33,9 @@ from simstack.core.node import node
 from simstack.core.simstack_result import SimstackResult
 from simstack.models import FileStack
 
+# The master VM plus at most two pyscf_hessian_for_atoms_ext VMs.
+_MAX_HESSIAN_VMS = 3
+
 _ARRAY_NAMES = ("mo1", "mo_e1", "h1ao", "rhoj1", "wj1")
 _ARRAY_SHAPES = {
     "mo1": lambda nao, nocc, naux: (3, nao, nocc),
@@ -427,10 +430,11 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
     Packs atoms into batches that fit in ``SlurmParameters.time``. One batch is
     ``pyscf_hessian_for_atoms``. Each further batch is
     ``pyscf_hessian_for_atoms_ext``. Resource assignment rules place the first
-    on self and the others on cloud. All of those calls are started together;
-    this task waits until every one has finished, then contracts the responses,
-    runs the full DF RKS partial Hessian once, and writes frequencies and
-    thermochemistry.
+    on self and the others on cloud. At most three VMs run at once, counting
+    this one, so at most two extra VMs are called together. When one extra VM
+    finishes, the next batch starts. This task waits until every batch has
+    finished, then contracts the responses, runs the full DF RKS partial
+    Hessian once, and writes frequencies and thermochemistry.
 
     One atom whose estimated cost exceeds the time limit raises ValueError
     before a batch VM is started.
@@ -508,36 +512,47 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
             pending[start : start + batch_size]
             for start in range(0, len(pending), batch_size)
         ]
-        calls = []
-        for index, batch in enumerate(batches):
+        if _MAX_HESSIAN_VMS < 1:
+            raise ValueError("Hessian VM cap must include the master VM")
+        ext_slots = asyncio.Semaphore(_MAX_HESSIAN_VMS - 1)
+        ext_failed = False
+
+        async def run_batch(index, batch):
+            nonlocal ext_failed
             on_this_vm = len(batches) == 1 or index == 0
             atom_name = f"atoms-{batch[0]}-{batch[-1]}"
             if parent_name:
                 atom_name = f"{parent_name}-{atom_name}"
             child_kwargs = dict(kwargs)
             child_kwargs["custom_name"] = atom_name
-            node_name = (
-                "pyscf_hessian_for_atoms"
-                if on_this_vm
-                else "pyscf_hessian_for_atoms_ext"
-            )
-            node_runner.info(
-                f"Calling {node_name} for atoms {batch} of task {hessian_task_id}"
-            )
-            call = (
-                pyscf_hessian_for_atoms
-                if on_this_vm
-                else pyscf_hessian_for_atoms_ext
-            )
-            calls.append(
-                call(
-                    IntList(elements=batch),
-                    atoms_input,
-                    **child_kwargs,
+            atoms = IntList(elements=batch)
+            if on_this_vm:
+                node_runner.info(
+                    f"Calling pyscf_hessian_for_atoms for atoms {batch} "
+                    f"of task {hessian_task_id}"
                 )
-            )
-        if calls:
-            await asyncio.gather(*calls)
+                return await pyscf_hessian_for_atoms(atoms, atoms_input, **child_kwargs)
+            async with ext_slots:
+                if ext_failed:
+                    raise RuntimeError(
+                        "Skipped a Hessian cloud batch because an earlier extra VM failed"
+                    )
+                node_runner.info(
+                    f"Calling pyscf_hessian_for_atoms_ext for atoms {batch} "
+                    f"of task {hessian_task_id}"
+                )
+                try:
+                    return await pyscf_hessian_for_atoms_ext(
+                        atoms, atoms_input, **child_kwargs
+                    )
+                except Exception:
+                    ext_failed = True
+                    raise
+
+        if batches:
+            async with asyncio.TaskGroup() as tg:
+                for index, batch in enumerate(batches):
+                    tg.create_task(run_batch(index, batch))
         loaded = []
         for atom_index in range(n_atoms):
             record = await find_hessian_atom_contribution(hessian_task_id, atom_index)
