@@ -299,20 +299,6 @@ def _atom_indexes(atoms, n_atoms):
     return indexes
 
 
-def _batch_parameters(kwargs):
-    parent_parameters = kwargs.get("parent_parameters")
-    if parent_parameters is None or not hasattr(parent_parameters, "model_copy"):
-        raise ValueError("parent_parameters are required")
-    if "separate_cloud_vm" not in type(parent_parameters).model_fields:
-        raise ValueError(
-            "Parameters.separate_cloud_vm is required to place Hessian batches on their own cloud VMs"
-        )
-    parameters = parent_parameters.model_copy(deep=True)
-    parameters.force_rerun = True
-    parameters.separate_cloud_vm = True
-    return parameters
-
-
 @node
 async def pyscf_hessian_for_atoms(
     atoms: IntList, opts: PySCFHessianAtomsInput, **kwargs
@@ -325,8 +311,8 @@ async def pyscf_hessian_for_atoms(
     stored. ``Hessian.kernel(atmlst=...)`` is not used: it returns only the
     sub-block among the listed atoms.
 
-    Disjoint batches can run on separate cloud VMs. The parent sets
-    ``separate_cloud_vm`` so a same-image child is not executed inline.
+    A resource assignment rule places this node on resource self. Further
+    batches are ``pyscf_hessian_for_atoms_ext``, placed on cloud by its rule.
     """
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
@@ -418,14 +404,33 @@ async def pyscf_hessian_for_atoms(
 
 
 @node
+async def pyscf_hessian_for_atoms_ext(
+    atoms: IntList, opts: PySCFHessianAtomsInput, **kwargs
+) -> SimstackResult:
+    """
+    One Hessian atom batch whose resource assignment rule is cloud.
+
+    The body calls ``pyscf_hessian_for_atoms``. That inner call matches the
+    self rule and runs on the VM this node was given.
+
+    Called Nodes:
+        pyscf_hessian_for_atoms
+    """
+    return await pyscf_hessian_for_atoms(atoms, opts, **kwargs)
+
+
+@node
 async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
     """
     Analytical Hessian and harmonic frequencies for an optimized PySCF wavefunction.
 
-    Packs atoms into batches that fit in ``SlurmParameters.time`` and calls
-    ``pyscf_hessian_for_atoms`` for each batch on its own cloud VM. When every
-    atom is stored, this task contracts the responses, runs the full DF RKS
-    partial Hessian once, and writes frequencies and thermochemistry.
+    Packs atoms into batches that fit in ``SlurmParameters.time``. One batch is
+    ``pyscf_hessian_for_atoms``. Each further batch is
+    ``pyscf_hessian_for_atoms_ext``. Resource assignment rules place the first
+    on self and the others on cloud. All of those calls are started together;
+    this task waits until every one has finished, then contracts the responses,
+    runs the full DF RKS partial Hessian once, and writes frequencies and
+    thermochemistry.
 
     One atom whose estimated cost exceeds the time limit raises ValueError
     before a batch VM is started.
@@ -442,6 +447,7 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
             frequency analysis.
     Called Nodes:
         pyscf_hessian_for_atoms
+        pyscf_hessian_for_atoms_ext
 
     """
     node_runner = kwargs.get("node_runner")
@@ -477,7 +483,6 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
         )
         n_atoms = int(mol.natm)
         row_dir = hessian_contribution_directory(hessian_task_id)
-        parameters = _batch_parameters(kwargs)
         atoms_input = PySCFHessianAtomsInput(
             hessian_task_id=hessian_task_id,
             qm_input=opts.qm_input,
@@ -499,21 +504,33 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
                 continue
             pending.append(atom_index)
         batch_size = int(plan["batch_size"])
+        batches = [
+            pending[start : start + batch_size]
+            for start in range(0, len(pending), batch_size)
+        ]
         calls = []
-        for start in range(0, len(pending), batch_size):
-            batch = pending[start : start + batch_size]
+        for index, batch in enumerate(batches):
+            on_this_vm = len(batches) == 1 or index == 0
             atom_name = f"atoms-{batch[0]}-{batch[-1]}"
             if parent_name:
                 atom_name = f"{parent_name}-{atom_name}"
             child_kwargs = dict(kwargs)
-            child_kwargs["parameters"] = parameters
             child_kwargs["custom_name"] = atom_name
+            node_name = (
+                "pyscf_hessian_for_atoms"
+                if on_this_vm
+                else "pyscf_hessian_for_atoms_ext"
+            )
             node_runner.info(
-                f"Calling pyscf_hessian_for_atoms for atoms {batch} "
-                f"of task {hessian_task_id}"
+                f"Calling {node_name} for atoms {batch} of task {hessian_task_id}"
+            )
+            call = (
+                pyscf_hessian_for_atoms
+                if on_this_vm
+                else pyscf_hessian_for_atoms_ext
             )
             calls.append(
-                pyscf_hessian_for_atoms(
+                call(
                     IntList(elements=batch),
                     atoms_input,
                     **child_kwargs,
