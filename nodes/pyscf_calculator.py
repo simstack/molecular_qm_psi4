@@ -1039,7 +1039,7 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         S_tot (FloatData): Total entropy (kcal/mol/K) when thermochemistry was computed.
 
     Called Nodes:
-
+        pyscf_hessian
     """
     node_runner = kwargs.get("node_runner")
     try:

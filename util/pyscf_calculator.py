@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 
 from molecular_qm_models import QMInput
@@ -279,6 +280,14 @@ class PySCFCalculator:
         lib.param.MAX_MEMORY = max_memory
         self.max_memory = max_memory
         self.num_threads = threads
+        # chdir=False keeps outputs in the task directory. Scratch itself must
+        # not sit on the workdir mount (/mnt is the orchestrator NFS volume).
+        scratch = None
+        if self.node_runner is not None and hasattr(self.node_runner, "enter_scratch"):
+            scratch = self.node_runner.enter_scratch(chdir=False)
+        if scratch is not None:
+            os.environ["PYSCF_TMPDIR"] = str(scratch)
+            lib.param.TMPDIR = os.environ["PYSCF_TMPDIR"]
 
     def apply_max_memory(self, mol=None, mf=None):
         if not hasattr(self, "max_memory"):

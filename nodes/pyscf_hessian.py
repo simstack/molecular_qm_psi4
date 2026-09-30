@@ -440,6 +440,9 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
         S_tot (FloatData): Total entropy (kcal/mol/K).
         wavefunction (FileStack): Wavefunction payload including the Hessian and
             frequency analysis.
+    Called Nodes:
+        pyscf_hessian_for_atoms
+
     """
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
