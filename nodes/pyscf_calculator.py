@@ -1018,6 +1018,191 @@ def _optimize(mf, qm_input, snapshotter):
 
 
 @node
+async def pyscf_optimization(qm_input: QMInput, **kwargs) -> SimstackResult:
+    """
+    Optimize a PySCF geometry and store the wavefunction at that geometry.
+
+    ``pyscf_calculator`` calls this when ``qm_input.optimization`` is set. A
+    completed run is reused if a later step, such as the Hessian, fails and the
+    calculator is submitted again with the same input.
+
+    SimstackResult:
+        qm_result (QMResult): Optimized PySCF result, including structures.
+        wavefunction (FileStack): SCF wavefunction at the optimized geometry.
+        optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
+    """
+    node_runner = kwargs.get("node_runner")
+    if node_runner is None:
+        raise ValueError("node_runner is required")
+    if qm_input is None or qm_input.molecule is None:
+        raise ValueError("qm_input with a molecule is required")
+    if not qm_input.optimization:
+        raise ValueError("pyscf_optimization requires qm_input.optimization")
+    try:
+        budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
+    except ValueError as exc:
+        return node_runner.fail(str(exc))
+    node_runner.info(resource_log)
+
+    try:
+        import pyscf  # noqa: F401
+    except ImportError:
+        return node_runner.fail("PySCF is not installed in the current environment.")
+
+    molecule = qm_input.molecule
+    molecule_changed = False
+    if molecule.smiles is None:
+        try:
+            molecule.smiles = molecule.make_smiles()
+            molecule_changed = True
+        except Exception as exc:
+            return node_runner.fail(f"Failed to generate SMILES: {exc}")
+    if molecule.formula is None:
+        try:
+            molecule.formula = molecule.make_formula()
+            molecule_changed = True
+        except Exception as exc:
+            return node_runner.fail(f"Failed to generate formula: {exc}")
+    if molecule_changed:
+        await context.db.save(molecule)
+        node_runner.info(
+            f"Generated SMILES and formula from molecule: {molecule.smiles} ({molecule.formula})"
+        )
+
+    pyscf_result = PySCFResult(qm_input)
+    qm_result = pyscf_result.qm_result
+    snapshotter = None
+    cycle_reporter = PySCFOptCycleReporter(node_runner)
+    try:
+        with redirect_pyscf_logs(
+            getattr(qm_input, "print_level", 1),
+            node_runner=node_runner,
+            cycle_reporter=cycle_reporter,
+        ):
+            calculator = PySCFCalculator(qm_input, node_runner=node_runner)
+            calculator.set_resources(budget_mb, num_threads)
+            mol = calculator.build_molecule(pyscf_result.output_path)
+            stdout_tee = None
+            if mol.stdout is not None and mol.stdout not in (sys.stdout, sys.stderr):
+                stdout_tee = _TeeStdout(mol.stdout, cycle_reporter)
+                mol.stdout = stdout_tee
+            mf = calculator.build_mean_field(mol)
+            if stdout_tee is not None:
+                mf.stdout = stdout_tee
+            if getattr(qm_input, "restart_files", None):
+                for fs in qm_input.restart_files:
+                    if not _is_wavefunction_artifact(getattr(fs, "name", "")):
+                        continue
+                    if str(getattr(fs, "name", "")).endswith(".npy") or str(
+                        getattr(fs, "name", "")
+                    ).endswith(".wfn.npy"):
+                        continue
+                    try:
+                        restart_path = Path(fs.get(local_dir=Path(".")))
+                        calculator.apply_restart(mf, restart_path)
+                    except Exception as exc:
+                        node_runner.warning(f"Failed to load restart file {fs.name}: {exc}")
+
+            method = method_name_from_qm_input(qm_input)
+            node_runner.info(f"Starting PySCF optimization with method {method}")
+            snapshotter = OptimizationSnapshotter(
+                molecule, kwargs, qm_input=qm_input, calculator=calculator, qm_result=qm_result
+            )
+            cycle_reporter.snapshotter = snapshotter
+            snapshotter.stdout_tee = stdout_tee
+            try:
+                mol_eq = _optimize(mf, qm_input, snapshotter)
+            except Exception:
+                snapshotter.finish(exc_type=Exception)
+                attach_optimizer_timings(node_runner, snapshotter)
+                raise
+            snapshotter.finish()
+            attach_optimizer_timings(node_runner, snapshotter)
+            if snapshotter.last_payload is not None:
+                try:
+                    await _persist_molecule_snapshot(
+                        snapshotter.last_payload,
+                        molecule,
+                        kwargs,
+                        geom_iter=snapshotter.geom_iter or 1,
+                        scf_iter=snapshotter.geom_iter or 1,
+                        final_structure=not bool(qm_input.frequencies),
+                        qm_input=qm_input,
+                    )
+                except Exception as exc:
+                    node_runner.warning(
+                        f"Failed to store optimized MoleculeSnapshot before frequencies: {exc}"
+                    )
+            mol = mol_eq
+            calculator.apply_max_memory(mol)
+            mf.reset(mol)
+            calculator.apply_max_memory(mol, mf)
+            energy = mf.kernel()
+            payload = _payload_from_mf(mf, mol, energy)
+            try:
+                await _persist_molecule_snapshot(
+                    payload,
+                    molecule,
+                    kwargs,
+                    geom_iter=snapshotter.geom_iter or 1,
+                    scf_iter=snapshotter.geom_iter or 1,
+                    final_structure=True,
+                    qm_input=qm_input,
+                )
+            except Exception as exc:
+                node_runner.warning(f"Failed to store final MoleculeSnapshot: {exc}")
+            qm_result = pyscf_result.parse_mf(
+                energy, mol, mf, node_runner, optimized=True
+            )
+            geometries = snapshotter.opt_geometries
+            qm_result.structures = optimization_structure_list(
+                geometries, qm_result.final_structure, snapshotter.geom_iter
+            )
+            saved = _write_payload(payload, Path(_WFN_NPY_NAME))
+            wfn_fs = FileStack.from_local_file(
+                saved, in_memory=False, is_hashable=True, secure_source=True
+            )
+            await context.db.save(wfn_fs)
+            qm_result.files.append(wfn_fs)
+            chk_path = Path(_CHK_NAME)
+            if chk_path.exists():
+                chk_fs = FileStack.from_local_file(
+                    chk_path, in_memory=False, is_hashable=True, secure_source=True
+                )
+                qm_result.files.append(chk_fs)
+            _cleanup_snapshot_files()
+            node_runner.info(f"Saved optimized PySCF wavefunction to {saved}")
+            node_runner.qm_result = qm_result
+            node_runner.wavefunction = wfn_fs
+            current_name = kwargs.get("custom_name", None)
+            if (current_name is None or current_name == "") and molecule.formula is not None:
+                node_runner.custom_name = molecule.formula
+            return node_runner.succeed()
+    except Exception as exc:
+        error_message = _report_pyscf_failure(node_runner, exc)
+        if snapshotter is not None:
+            qm_result.structures = optimization_structure_list(
+                snapshotter.opt_geometries, None, snapshotter.geom_iter
+            )
+            if qm_result.structures is not None:
+                node_runner.qm_result = qm_result
+        if qm_input.tolerate_failure:
+            node_runner.warning(f"PySCF optimization failed but failure is tolerated: {exc}")
+            return node_runner.succeed()
+        return node_runner.fail(error_message)
+    finally:
+        try:
+            if pyscf_result.output_path.exists():
+                out_fs = FileStack.from_local_file(
+                    pyscf_result.output_path, in_memory=True, is_hashable=True, secure_source=True
+                )
+                node_runner.info_files.append(out_fs)
+                node_runner.info(f"PySCF output file: {pyscf_result.output_path}")
+        except Exception as exc:
+            node_runner.warning(f"Failed to collect PySCF output file: {exc}")
+
+
+@node
 async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     """
     PySCF node using the same QMInput as psi4_calculator.
@@ -1029,6 +1214,8 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         qm_result (QMResult): Parsed result from the PySCF calculation.
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
             were computed. Frequency jobs run as a child ``pyscf_hessian`` node.
+            Optimization runs as a child ``pyscf_optimization`` node and is reused
+            when that Hessian fails.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
         thermodynamics_table (SimpleTable): Component thermochemistry (S in kcal/mol/K;
             Cv, Cp, E, H, G, ZPE in engine units) when frequencies were computed.
@@ -1039,6 +1226,7 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         S_tot (FloatData): Total entropy (kcal/mol/K) when thermochemistry was computed.
 
     Called Nodes:
+        pyscf_optimization
         pyscf_hessian
     """
     node_runner = kwargs.get("node_runner")
@@ -1118,6 +1306,7 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             freq_info = None
             hessian = None
             need_external_hessian = False
+            optimized_wavefunction = None
             restart_has_frequencies = bool(
                 restart_payload
                 and restart_payload.get(_FREQ_KEY)
@@ -1141,40 +1330,17 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 if mf.e_tot is None:
                     energy = mf.kernel()
             elif qm_input.optimization:
-                node_runner.log("Starting optimization...")
-                snapshotter = OptimizationSnapshotter(
-                    molecule, kwargs, qm_input=qm_input, calculator=calculator, qm_result=qm_result
-                )
-                cycle_reporter.snapshotter = snapshotter
-                snapshotter.stdout_tee = stdout_tee
-                try:
-                    mol_eq = _optimize(mf, qm_input, snapshotter)
-                except Exception:
-                    snapshotter.finish(exc_type=Exception)
-                    attach_optimizer_timings(node_runner, snapshotter)
-                    raise
-                snapshotter.finish()
-                attach_optimizer_timings(node_runner, snapshotter)
-                if snapshotter.last_payload is not None:
-                    try:
-                        await _persist_molecule_snapshot(
-                            snapshotter.last_payload,
-                            molecule,
-                            kwargs,
-                            geom_iter=snapshotter.geom_iter or 1,
-                            scf_iter=snapshotter.geom_iter or 1,
-                            final_structure=not bool(qm_input.frequencies),
-                            qm_input=qm_input,
-                        )
-                    except Exception as exc:
-                        node_runner.warning(
-                            f"Failed to store optimized MoleculeSnapshot before frequencies: {exc}"
-                        )
-                mol = mol_eq
-                calculator.apply_max_memory(mol)
-                mf.reset(mol)
-                calculator.apply_max_memory(mol, mf)
-                energy = mf.kernel()
+                node_runner.info("Starting pyscf_optimization")
+                opt_result = await pyscf_optimization(qm_input, **kwargs)
+                qm_result = getattr(opt_result, "qm_result", None)
+                if qm_result is None:
+                    raise ValueError("pyscf_optimization did not return qm_result")
+                timing = getattr(opt_result, "optimization_timing", None)
+                if timing is not None:
+                    node_runner.optimization_timing = timing
+                optimized_wavefunction = getattr(opt_result, "wavefunction", None)
+                if optimized_wavefunction is None:
+                    raise ValueError("pyscf_optimization did not return a wavefunction")
                 if qm_input.frequencies:
                     need_external_hessian = True
             elif qm_input.frequencies:
@@ -1196,55 +1362,54 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                     else:
                         energy = mf.e_tot
 
-            payload = _payload_from_mf(mf, mol, energy, hessian=hessian, freq_info=freq_info)
-            try:
-                await _persist_molecule_snapshot(
-                    payload,
-                    molecule,
-                    kwargs,
-                    geom_iter=(snapshotter.geom_iter if snapshotter is not None else 1) or 1,
-                    scf_iter=(snapshotter.geom_iter if snapshotter is not None else 1) or 1,
-                    final_structure=True,
-                    qm_input=qm_input,
-                )
-            except Exception as exc:
-                node_runner.warning(f"Failed to store final MoleculeSnapshot: {exc}")
-
-            qm_result = pyscf_result.parse_mf(
-                energy, mol, mf, node_runner, optimized=bool(qm_input.optimization)
-            )
-            if qm_input.optimization:
-                geometries = [] if snapshotter is None else snapshotter.opt_geometries
-                last_iter = None if snapshotter is None else snapshotter.geom_iter
-                qm_result.structures = optimization_structure_list(
-                    geometries, qm_result.final_structure, last_iter
-                )
-            if freq_info:
-                n_atoms = mol.natm if hasattr(mol, "natm") else None
-                pyscf_result.frequency_tables(freq_info, node_runner, n_atoms)
-            thermodynamics_table = None
-            if freq_info and qm_input.frequencies:
-                thermodynamics_table = run_pyscf_thermo(mf, freq_info, 298.15, 101325.0, node_runner)
-
-            wfn_fs = None
-            wavefunction_saved = False
-            try:
-                saved = _write_payload(payload, Path(_WFN_NPY_NAME))
-                wfn_fs = FileStack.from_local_file(saved, in_memory=False, is_hashable=True, secure_source=True)
-                await context.db.save(wfn_fs)
+            if optimized_wavefunction is not None:
+                wfn_fs = optimized_wavefunction
                 wavefunction_saved = True
-                qm_result.files.append(wfn_fs)
-                chk_path = Path(_CHK_NAME)
-                if chk_path.exists():
-                    chk_fs = FileStack.from_local_file(chk_path, in_memory=False, is_hashable=True, secure_source=True)
-                    qm_result.files.append(chk_fs)
-                _cleanup_snapshot_files()
-                node_runner.info(
-                    f"Saved reusable PySCF wavefunction to {saved} "
-                    f"(frequency_analysis={'yes' if freq_info else 'no'})"
+                thermodynamics_table = None
+            else:
+                payload = _payload_from_mf(mf, mol, energy, hessian=hessian, freq_info=freq_info)
+                try:
+                    await _persist_molecule_snapshot(
+                        payload,
+                        molecule,
+                        kwargs,
+                        geom_iter=(snapshotter.geom_iter if snapshotter is not None else 1) or 1,
+                        scf_iter=(snapshotter.geom_iter if snapshotter is not None else 1) or 1,
+                        final_structure=True,
+                        qm_input=qm_input,
+                    )
+                except Exception as exc:
+                    node_runner.warning(f"Failed to store final MoleculeSnapshot: {exc}")
+
+                qm_result = pyscf_result.parse_mf(
+                    energy, mol, mf, node_runner, optimized=bool(qm_input.optimization)
                 )
-            except Exception as exc:
-                node_runner.warning(f"Failed to save wavefunction for reuse: {exc}")
+                if freq_info:
+                    n_atoms = mol.natm if hasattr(mol, "natm") else None
+                    pyscf_result.frequency_tables(freq_info, node_runner, n_atoms)
+                thermodynamics_table = None
+                if freq_info and qm_input.frequencies:
+                    thermodynamics_table = run_pyscf_thermo(mf, freq_info, 298.15, 101325.0, node_runner)
+
+                wfn_fs = None
+                wavefunction_saved = False
+                try:
+                    saved = _write_payload(payload, Path(_WFN_NPY_NAME))
+                    wfn_fs = FileStack.from_local_file(saved, in_memory=False, is_hashable=True, secure_source=True)
+                    await context.db.save(wfn_fs)
+                    wavefunction_saved = True
+                    qm_result.files.append(wfn_fs)
+                    chk_path = Path(_CHK_NAME)
+                    if chk_path.exists():
+                        chk_fs = FileStack.from_local_file(chk_path, in_memory=False, is_hashable=True, secure_source=True)
+                        qm_result.files.append(chk_fs)
+                    _cleanup_snapshot_files()
+                    node_runner.info(
+                        f"Saved reusable PySCF wavefunction to {saved} "
+                        f"(frequency_analysis={'yes' if freq_info else 'no'})"
+                    )
+                except Exception as exc:
+                    node_runner.warning(f"Failed to save wavefunction for reuse: {exc}")
 
             if need_external_hessian:
                 if not wavefunction_saved:

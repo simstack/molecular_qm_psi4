@@ -427,14 +427,13 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
     """
     Analytical Hessian and harmonic frequencies for an optimized PySCF wavefunction.
 
-    Packs atoms into batches that fit in ``SlurmParameters.time``. One batch is
-    ``pyscf_hessian_for_atoms``. Each further batch is
-    ``pyscf_hessian_for_atoms_ext``. Resource assignment rules place the first
-    on self and the others on cloud. At most three VMs run at once, counting
-    this one, so at most two extra VMs are called together. When one extra VM
-    finishes, the next batch starts. This task waits until every batch has
-    finished, then contracts the responses, runs the full DF RKS partial
-    Hessian once, and writes frequencies and thermochemistry.
+    Packs atoms into batches that fit in ``SlurmParameters.time``. One worker
+    on this VM calls ``pyscf_hessian_for_atoms``. Up to two workers call
+    ``pyscf_hessian_for_atoms_ext``, which the cloud assignment rule places on
+    its own VM. The three workers share one queue. A worker takes the next
+    batch only after its previous batch has finished. This task waits until
+    every batch has finished, then contracts the responses, runs the full DF
+    RKS partial Hessian once, and writes frequencies and thermochemistry.
 
     One atom whose estimated cost exceeds the time limit raises ValueError
     before a batch VM is started.
@@ -514,45 +513,40 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
         ]
         if _MAX_HESSIAN_VMS < 1:
             raise ValueError("Hessian VM cap must include the master VM")
-        ext_slots = asyncio.Semaphore(_MAX_HESSIAN_VMS - 1)
-        ext_failed = False
+        batch_queue = asyncio.Queue()
+        for batch in batches:
+            batch_queue.put_nowait(batch)
 
-        async def run_batch(index, batch):
-            nonlocal ext_failed
-            on_this_vm = len(batches) == 1 or index == 0
-            atom_name = f"atoms-{batch[0]}-{batch[-1]}"
-            if parent_name:
-                atom_name = f"{parent_name}-{atom_name}"
-            child_kwargs = dict(kwargs)
-            child_kwargs["custom_name"] = atom_name
-            atoms = IntList(elements=batch)
-            if on_this_vm:
-                node_runner.info(
-                    f"Calling pyscf_hessian_for_atoms for atoms {batch} "
-                    f"of task {hessian_task_id}"
-                )
-                return await pyscf_hessian_for_atoms(atoms, atoms_input, **child_kwargs)
-            async with ext_slots:
-                if ext_failed:
-                    raise RuntimeError(
-                        "Skipped a Hessian cloud batch because an earlier extra VM failed"
-                    )
-                node_runner.info(
-                    f"Calling pyscf_hessian_for_atoms_ext for atoms {batch} "
-                    f"of task {hessian_task_id}"
-                )
+        async def run_worker(on_this_vm):
+            node_name = (
+                "pyscf_hessian_for_atoms"
+                if on_this_vm
+                else "pyscf_hessian_for_atoms_ext"
+            )
+            call = (
+                pyscf_hessian_for_atoms if on_this_vm else pyscf_hessian_for_atoms_ext
+            )
+            while True:
                 try:
-                    return await pyscf_hessian_for_atoms_ext(
-                        atoms, atoms_input, **child_kwargs
-                    )
-                except Exception:
-                    ext_failed = True
-                    raise
+                    batch = batch_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                atom_name = f"atoms-{batch[0]}-{batch[-1]}"
+                if parent_name:
+                    atom_name = f"{parent_name}-{atom_name}"
+                child_kwargs = dict(kwargs)
+                child_kwargs["custom_name"] = atom_name
+                node_runner.info(
+                    f"Calling {node_name} for atoms {batch} of task {hessian_task_id}"
+                )
+                await call(IntList(elements=batch), atoms_input, **child_kwargs)
 
         if batches:
+            n_ext = min(_MAX_HESSIAN_VMS - 1, max(0, len(batches) - 1))
             async with asyncio.TaskGroup() as tg:
-                for index, batch in enumerate(batches):
-                    tg.create_task(run_batch(index, batch))
+                tg.create_task(run_worker(True))
+                for _ext_index in range(n_ext):
+                    tg.create_task(run_worker(False))
         loaded = []
         for atom_index in range(n_atoms):
             record = await find_hessian_atom_contribution(hessian_task_id, atom_index)
