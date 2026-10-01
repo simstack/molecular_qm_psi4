@@ -2,6 +2,58 @@
 
 <!-- version list -->
 
+## v0.9.0 (2026-10-01)
+
+### Bug Fixes
+
+- Adding missing files for frequency
+  ([`9b0b4fa`](https://github.com/simstack/molecular_qm_psi4/commit/9b0b4fa6038db89c808aa60609f564a821fca5ac))
+
+- Drop snapshot.wfn.npy from successful Psi4 and PySCF jobs.
+  ([`016d1ff`](https://github.com/simstack/molecular_qm_psi4/commit/016d1ff7bb3f3be61ea96a763cca17e78ce308bc))
+
+Keep result.wfn.npy as the reusable wavefunction and attach the snapshot only when that result file
+  was not produced.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+### Features
+
+- Add `pyscf_hessian_for_atoms_ext` node and improve batch resource assignment
+  ([`85d3bef`](https://github.com/simstack/molecular_qm_psi4/commit/85d3bef7831f122198a663124259a0c825453a01))
+
+- Introduce `pyscf_hessian_for_atoms_ext` node for cloud-based Hessian atom batch computation. -
+  Modify resource assignment rules to distinguish between local and cloud resources for Hessian
+  batches. - Refactor batch handling logic, removing `_batch_parameters` for streamlined workflow. -
+  Update export list and docstrings to reflect new node and functionality.
+
+- Add entropy unit conversion, max geometry optimization iterations, and PySCF Hessian support
+  ([`8812bf0`](https://github.com/simstack/molecular_qm_psi4/commit/8812bf021dc93f731affdd730607c72aa2f9b2dc))
+
+- Introduce `entropy_to_kcal_per_mol_k` for converting entropy units (Hartree/K or mHartree/K) to
+  kcal/(mol·K). - Add `max_iters` field for controlling xTB geometry optimization iterations. -
+  Implement `pyscf_hessian` and `pyscf_hessian_for_atoms` nodes for analytical Hessian and frequency
+  analysis. - Enhance `compare_conformers` to compute entropy differences in kcal/mol/K. - Extend
+  `crest_input` and `__init__.py` to support new features and models. - Update dependencies with
+  added support for `molecular-qm-dftb`.
+
+- Cap concurrent Hessian cloud VMs at three, including the master.
+  ([`c44191e`](https://github.com/simstack/molecular_qm_psi4/commit/c44191e796dcdb345f7c691b28d04e18a191d62c))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+- Reuse a finished PySCF optimization and assign Hessian batches to free VMs.
+  ([`f9a141f`](https://github.com/simstack/molecular_qm_psi4/commit/f9a141f1249e0925355074459d5aefb0d113df81))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+- Support configurable PySCF scratch directory and enhance Hessian node documentation
+  ([`c6a1a8c`](https://github.com/simstack/molecular_qm_psi4/commit/c6a1a8c1ca6154b73367c7a82684294acde394e2))
+
+- Add `PYSCF_TMPDIR` handling to isolate PySCF scratch files from orchestrator NFS volume. - Extend
+  `pyscf_hessian` and `pyscf_hessian_for_atoms` node docstrings with called node references.
+
+
 ## v0.8.1 (2026-09-17)
 
 ### Bug Fixes
