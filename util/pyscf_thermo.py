@@ -1,4 +1,4 @@
-from molecular_qm_psi4.util.psi4_thermo import attach_thermo_totals
+from molecular_qm_psi4.util.psi4_thermo import attach_thermo_totals, entropy_to_kcal_per_mol_k
 from simstack.core.node_runner import NodeRunner
 from simstack.models.simple_table import SimpleTable, SimpleTableColumnType
 
@@ -39,7 +39,10 @@ def run_pyscf_thermo(mf, freq_info, temperature, pressure, node_runner: NodeRunn
         if suffix not in suffixes:
             continue
         row_data.setdefault(prefix, {"Label": prefix})
-        row_data[prefix][suffix] = _scalar(val)
+        if prefix == "S":
+            row_data[prefix][suffix] = entropy_to_kcal_per_mol_k(val)
+        else:
+            row_data[prefix][suffix] = _scalar(val)
     zpe = _scalar(info.get("ZPE"))
     if zpe is not None:
         row_data.setdefault("ZPE", {"Label": "ZPE"})

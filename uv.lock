@@ -4,6 +4,7 @@ requires-python = ">=3.12"
 
 [manifest]
 overrides = [
+    { name = "molecular-qm-dftb", git = "https://github.com/simstack/molecular_qm_dftb.git" },
     { name = "molecular-qm-models", git = "https://github.com/simstack/molecular_qm_models.git" },
     { name = "molecular-qm-util", git = "https://github.com/simstack/molecular_qm_util.git" },
     { name = "simstack", git = "https://github.com/simstack/simstack.git?rev=ww%2Fnew-features" },

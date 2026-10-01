@@ -455,7 +455,10 @@ def _attach_psi4_result_files(node_runner, psi4_result):
             )
             node_runner.info_files.append(log_fs)
             node_runner.info(f"Psi4 log file: {log_path}")
-    _append_artifact_file(node_runner, Path(_SNAPSHOT_WFN_NAME), in_memory=False)
+    if Path(_WFN_NPY_NAME).is_file():
+        _cleanup_snapshot_files()
+    else:
+        _append_artifact_file(node_runner, Path(_SNAPSHOT_WFN_NAME), in_memory=False)
 
 
 def _log_energy_gradient_summary(node_runner, snapshotter, output_path: Path | None):
@@ -1719,15 +1722,16 @@ async def psi4_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             were computed.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
             Frequency jobs add a separate ``frequencies`` row.
-        files (FileListModel): result.wfn.npy on success; psi4.out and snapshot.wfn.npy
-            always attached, including on failure. Wavefunction FileStacks are not in_memory.
-        thermodynamics_table (SimpleTable): Component thermochemistry (S, Cv, Cp, E, H, G, ZPE)
-            when frequencies were computed. Older stored nodes may still expose
-            ``thermo_result`` (QMThermoResult) instead.
+        files (FileListModel): result.wfn.npy on success; psi4.out always attached.
+            snapshot.wfn.npy is attached only when result.wfn.npy was not produced.
+            Wavefunction FileStacks are not in_memory.
+        thermodynamics_table (SimpleTable): Component thermochemistry (S in kcal/mol/K;
+            Cv, Cp, E, H, G, ZPE in engine units) when frequencies were computed.
+            Older stored nodes may still expose ``thermo_result`` (QMThermoResult) instead.
         G_tot (FloatData): Total Gibbs free energy (Hartree) when thermochemistry was computed.
         ZPE_tot (FloatData): Total zero-point energy (Hartree) when thermochemistry was computed.
         E_tot (FloatData): Total thermal internal energy (Hartree) when thermochemistry was computed.
-        S_tot (FloatData): Total entropy when thermochemistry was computed.
+        S_tot (FloatData): Total entropy (kcal/mol/K) when thermochemistry was computed.
     """
     node_runner = kwargs.get("node_runner")
 
@@ -1979,12 +1983,13 @@ async def psi4_thermochemistry(qm_result: QMResult, temperature: FloatData, pres
         including enthalpy, Gibbs free energy, entropy, and internal energy. It also includes
         a reference to the original wavefunction file and the associated vibrational frequency
         table if available.
-            result (SimpleTable): Component thermochemistry table (S, Cv, Cp, E, H, G, ZPE).
+            result (SimpleTable): Component thermochemistry table (S in kcal/mol/K;
+                Cv, Cp, E, H, G, ZPE in engine units).
                 Older stored nodes may still expose ``result`` as QMThermoResult.
             G_tot (FloatData): Total Gibbs free energy (Hartree).
             ZPE_tot (FloatData): Total zero-point energy (Hartree).
             E_tot (FloatData): Total thermal internal energy (Hartree).
-            S_tot (FloatData): Total entropy.
+            S_tot (FloatData): Total entropy (kcal/mol/K).
 
     Raises:
         ValueError: If Psi4 is not installed in the current environment.

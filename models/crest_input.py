@@ -322,6 +322,7 @@ class XTBInput(Model):
     level_of_theory: CrestLevelOfTheory = Field(default_factory=CrestLevelOfTheory)
     compute_gradients: bool = Field(False, description="Whether to compute gradients")
     optimize: bool = Field(False, description="Whether to perform geometry optimization")
+    max_iters: int = Field(500, ge=0, description="Maximum xTB geometry optimization iterations")
     additional_keywords: Optional[str] = Field(None, description="Any additional CREST command line arguments")
 
     @classmethod
@@ -346,6 +347,7 @@ class XTBInput(Model):
             "level_of_theory",
             "compute_gradients",
             "optimize",
+            "max_iters",
             "additional_keywords"
         ]
         return ui_schema

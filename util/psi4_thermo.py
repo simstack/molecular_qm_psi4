@@ -1,5 +1,6 @@
 import numpy as np
 
+from molecular_qm_models.energy_units import MolecularEnergyUnitEnum, convert_energy_unit
 from simstack.models.simple_table import SimpleTable, SimpleTableColumnType
 
 try:
@@ -16,6 +17,45 @@ _THERMO_TOTAL_OUTPUTS = {
     "E": "E_tot",
     "S": "S_tot",
 }
+_HARTREE_PER_K_UNITS = frozenset({"eh/k", "hartree/k"})
+_MILLIHARTREE_PER_K_UNITS = frozenset({"meh/k", "millihartree/k"})
+MEH_PER_EH = 1000.0
+
+
+def entropy_to_kcal_per_mol_k(value, unit=None) -> float:
+    """Convert engine entropy (Hartree/K or mEh/K) to kcal/(mol·K).
+
+    PySCF ``hessian.thermo`` stores S as ``(value, 'Eh/K')``. Psi4
+    ``qcdb.vib.thermo`` stores S Datum values in ``mEh/K`` (0.001 Eh/K).
+    """
+    if value is None:
+        raise ValueError("entropy value is required")
+    resolved_unit = unit
+    number = value
+    if isinstance(value, tuple):
+        if resolved_unit is None:
+            if len(value) < 2:
+                raise ValueError("entropy unit is required")
+            number, resolved_unit = value[0], value[1]
+        else:
+            number = value[0]
+    elif resolved_unit is None and hasattr(value, "units"):
+        resolved_unit = value.units
+        number = value.data
+    if resolved_unit is None:
+        raise ValueError("entropy unit is required")
+    normalized = "".join(str(resolved_unit).strip().lower().split())
+    if normalized in _HARTREE_PER_K_UNITS:
+        eh_per_k = float(number)
+    elif normalized in _MILLIHARTREE_PER_K_UNITS:
+        eh_per_k = float(number) / MEH_PER_EH
+    else:
+        raise ValueError(f"unsupported entropy unit {resolved_unit!r}")
+    return convert_energy_unit(
+        MolecularEnergyUnitEnum.HARTREE,
+        eh_per_k,
+        MolecularEnergyUnitEnum.KCAL_PER_MOL,
+    )
 
 
 def attach_thermo_totals(node_runner: NodeRunner, table: SimpleTable) -> None:
@@ -93,7 +133,12 @@ def run_manual_thermo(wfn, energy: float, node_runner: NodeRunner) -> SimpleTabl
                 continue
             if prefix not in row_data:
                 row_data[prefix] = {"Label": prefix}
-            row_data[prefix][suffix] = val.data if hasattr(val, "data") else val
+            if prefix == "S":
+                row_data[prefix][suffix] = entropy_to_kcal_per_mol_k(val)
+            elif hasattr(val, "data"):
+                row_data[prefix][suffix] = val.data
+            else:
+                row_data[prefix][suffix] = val
             node_runner.log(f"Added {prefix} {suffix} to row_data")
 
         common_order = ["S", "Cv", "Cp", "E", "H", "G", "ZPE"]

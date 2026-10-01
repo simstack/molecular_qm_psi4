@@ -280,12 +280,16 @@ async def xtb_optimize_molecule_list(xtb_input: XTBInput, **kwargs) -> SimstackR
                 return r.get_energy(), r.get_gradient().flatten()
 
             e0, _ = func(positions.flatten())
-            res_opt = minimize(func, positions.flatten(), jac=True, method='L-BFGS-B')
+            res_opt = minimize(
+                func, positions.flatten(), jac=True, method='L-BFGS-B',
+                options={'maxiter': xtb_input.max_iters},
+            )
             opt_positions = res_opt.x.reshape(-1, 3)
             calc.update(opt_positions)
             res = calc.singlepoint()
 
             mol.properties["energy"] = res.get_energy()
+            mol.properties["optimization_converged"] = bool(res_opt.success)
             new_positions = opt_positions / ANGSTROM_TO_BOHR
             for i, atom in enumerate(mol.atoms):
                 atom.x = float(new_positions[i, 0])
