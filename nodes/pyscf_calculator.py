@@ -1311,15 +1311,6 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 and qm_input.frequencies
                 and not qm_input.optimization
             )
-            if qm_input.frequencies and not restart_has_frequencies:
-                from molecular_qm_psi4.util.pyscf_hessian_analytical import analytical_hessian_plan
-
-                hessian_plan = analytical_hessian_plan(mf, mol, kwargs.get("parent_parameters"))
-                node_runner.info(
-                    f"Analytical Hessian lower bound {hessian_plan['seconds_full']:.0f} s "
-                    f"({hessian_plan['seconds_per_atom']:.0f} s/atom) vs "
-                    f"Slurm time {hessian_plan['time_limit_seconds']} s"
-                )
             if restart_has_frequencies:
                 node_runner.info("Restart payload already contains frequency analysis. Skipping frequency calculation.")
                 freq_info = restart_payload.get(_FREQ_KEY)
