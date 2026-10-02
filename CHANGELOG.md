@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.9.1 (2026-10-02)
+
+### Bug Fixes
+
+- Check DF Hessian memory on the Hessian node, not the cloud calculator.
+  ([`4baf7f4`](https://github.com/simstack/molecular_qm_psi4/commit/4baf7f4f1681b6b3a4ee8d537ae7f8cef3f76601))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.9.0 (2026-10-01)
 
 ### Bug Fixes
