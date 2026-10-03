@@ -8,12 +8,15 @@ from molecular_qm_psi4.nodes.pyscf_hessian import (
     pyscf_hessian,
     pyscf_hessian_for_atoms,
     pyscf_hessian_for_atoms_ext,
+    pyscf_hessian_partial_ext,
 )
 from molecular_qm_psi4.models.int_list import IntList
 from molecular_qm_psi4.models.pyscf_hessian import (
     PySCFHessianAtomContribution,
     PySCFHessianAtomsInput,
     PySCFHessianInput,
+    PySCFHessianPartialContribution,
+    PySCFHessianPartialInput,
 )
 from molecular_qm_psi4.nodes.qm_calculator import qm_calculator
 from molecular_qm_psi4.util.qm_engine import QMEngine, QMEngineInput
@@ -82,10 +85,13 @@ __all__ = [
     "pyscf_hessian",
     "pyscf_hessian_for_atoms",
     "pyscf_hessian_for_atoms_ext",
+    "pyscf_hessian_partial_ext",
     "IntList",
     "PySCFHessianInput",
     "PySCFHessianAtomsInput",
     "PySCFHessianAtomContribution",
+    "PySCFHessianPartialInput",
+    "PySCFHessianPartialContribution",
     "qm_calculator",
     "QMEngine",
     "QMEngineInput",

@@ -11,6 +11,8 @@ from molecular_qm_psi4.models.pyscf_hessian import (
     PySCFHessianAtomContribution,
     PySCFHessianAtomsInput,
     PySCFHessianInput,
+    PySCFHessianPartialContribution,
+    PySCFHessianPartialInput,
 )
 from molecular_qm_psi4.nodes.pyscf_calculator import (
     _FREQ_KEY,
@@ -19,11 +21,21 @@ from molecular_qm_psi4.nodes.pyscf_calculator import (
     _write_payload,
 )
 from molecular_qm_psi4.util.process_heartbeat import ProcessHeartbeat
-from molecular_qm_psi4.util.pyscf_calculator import PySCFCalculator
+from molecular_qm_psi4.util.pyscf_calculator import PySCFCalculator, largest_aux_blk
 from molecular_qm_psi4.util.pyscf_hessian_analytical import (
     analytical_hessian_plan,
     contract_df_coulomb,
     contract_h1ao_mo1,
+)
+from molecular_qm_psi4.util.pyscf_hessian_partial import (
+    aux_blocks_cover,
+    aux_shell_groups,
+    partial_jk_span,
+    partial_nlc,
+    partial_response2_cross,
+    partial_xc_and_e1,
+    shell_blocks,
+    stack_aux_response,
 )
 from molecular_qm_psi4.util.pyscf_result import PySCFResult
 from molecular_qm_psi4.util.pyscf_thermo import run_pyscf_thermo
@@ -149,6 +161,100 @@ async def store_hessian_contribution(
         h1ao_file=files["h1ao"],
         rhoj1_file=files["rhoj1"],
         wj1_file=files["wj1"],
+    )
+    await db.save(record)
+    return record
+
+
+async def find_partial_contributions(hessian_task_id: str):
+    db = context.db
+    if db is None:
+        raise ValueError("database is required to store Hessian contributions")
+    found = await db.find(
+        PySCFHessianPartialContribution,
+        {"hessian_task_id": str(hessian_task_id)},
+    )
+    return list(found or [])
+
+
+def _load_partial_archive(path: Path, expected):
+    if np is None:
+        raise ValueError("numpy is required to read a Hessian contribution")
+    if not path.is_file():
+        raise ValueError(f"Hessian contribution file is missing: {path}")
+    with np.load(path) as loaded:
+        if not isinstance(loaded, np.lib.npyio.NpzFile):
+            raise ValueError(f"Hessian partial {path} is not an npz archive")
+        if "partial" not in loaded.files:
+            raise ValueError(f"Hessian partial {path} has no partial array")
+        array = np.array(loaded["partial"], dtype=float, copy=True)
+        extras = {}
+        for name in loaded.files:
+            if name == "partial":
+                continue
+            if name not in {"wj_ip2", "wk_ip2", "wk_ip2_lr"}:
+                raise ValueError(f"unknown array {name!r} in {path}")
+            extras[name] = np.array(loaded[name], dtype=float, copy=True)
+    if tuple(array.shape) != tuple(expected):
+        raise ValueError(f"Hessian contribution {path} has shape {array.shape}, expected {expected}")
+    return array, extras
+
+
+async def load_partial_contribution(record, row_dir: Path):
+    piece_dir = row_dir / (
+        f"partial_{record.piece}_{int(record.shell_start)}_{int(record.shell_end)}"
+    )
+    piece_dir.mkdir(parents=True, exist_ok=True)
+    path = piece_dir / "partial.npy"
+    expected = (int(record.n_atoms), int(record.n_atoms), 3, 3)
+    if not path.is_file():
+        stored = await _file_stack(record.partial_file)
+        downloaded = Path(stored.get(local_dir=piece_dir))
+        if not downloaded.is_file():
+            raise ValueError(
+                f"Hessian {record.piece} partial "
+                f"{record.shell_start}:{record.shell_end} is missing"
+            )
+        if downloaded.resolve() != path.resolve():
+            path.write_bytes(downloaded.read_bytes())
+    return _load_partial_archive(path, expected)
+
+
+async def store_partial_contribution(
+    hessian_task_id, piece, shell_start, shell_end, n_atoms, array, response_arrays, row_dir: Path
+):
+    if np is None:
+        raise ValueError("numpy is required to store a Hessian contribution")
+    if response_arrays is None:
+        raise ValueError("response_arrays is required")
+    db = context.db
+    if db is None:
+        raise ValueError("database is required to store Hessian contributions")
+    piece_dir = row_dir / f"partial_{piece}_{int(shell_start)}_{int(shell_end)}"
+    piece_dir.mkdir(parents=True, exist_ok=True)
+    path = piece_dir / "partial.npy"
+    expected = (int(n_atoms), int(n_atoms), 3, 3)
+    payload = {"partial": np.asarray(array, dtype=float)}
+    for key, value in response_arrays.items():
+        if key not in {"wj_ip2", "wk_ip2", "wk_ip2_lr"}:
+            raise ValueError(f"unknown aux response array {key!r}")
+        if value is None:
+            raise ValueError(f"{key} is required")
+        payload[key] = np.asarray(value, dtype=float)
+    with path.open("wb") as handle:
+        np.savez(handle, **payload)
+    _load_partial_archive(path, expected)
+    stack = FileStack.from_local_file(
+        path, in_memory=False, is_hashable=True, secure_source=True
+    )
+    await db.save(stack)
+    record = PySCFHessianPartialContribution(
+        hessian_task_id=str(hessian_task_id),
+        piece=str(piece),
+        shell_start=int(shell_start),
+        shell_end=int(shell_end),
+        n_atoms=int(n_atoms),
+        partial_file=stack,
     )
     await db.save(record)
     return record
@@ -423,6 +529,205 @@ async def pyscf_hessian_for_atoms_ext(
 
 
 @node
+async def pyscf_hessian_partial_ext(
+    opts: PySCFHessianPartialInput, **kwargs
+) -> SimstackResult:
+    """
+    One cloud chunk of the density-fitted partial Hessian.
+
+    ``piece`` ``aux`` evaluates the JK partial on an aux-shell span and stores
+    each memory-sized block. ``xc`` stores the one-electron term plus the XC
+    grid. ``nlc`` stores the VV10 second derivative. A block that is already
+    stored is left in place.
+
+    The resource assignment rule for this node is cloud. Its Slurm memory
+    sizes the aux block, and its ``cpus_per_task`` is the PySCF thread count.
+    """
+    node_runner = kwargs.get("node_runner")
+    if node_runner is None:
+        raise ValueError("node_runner is required")
+    try:
+        if opts is None or not str(getattr(opts, "hessian_task_id", "") or "").strip():
+            raise ValueError("hessian_task_id is required")
+        if opts.qm_input is None:
+            raise ValueError("qm_input is required")
+        if opts.wavefunction is None:
+            raise ValueError("wavefunction is required")
+        piece = opts.piece
+        if piece not in {"aux", "xc", "nlc"}:
+            raise ValueError(f"Hessian partial piece must be aux, xc or nlc, got {piece!r}")
+        try:
+            shell_start = int(opts.shell_start)
+            shell_end = int(opts.shell_end)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"aux shell bounds must be ints, got {opts.shell_start!r}, {opts.shell_end!r}"
+            ) from exc
+        if piece == "aux":
+            if shell_start < 0 or shell_end <= shell_start:
+                raise ValueError(f"aux shell range {shell_start}:{shell_end} is empty")
+        elif shell_start != 0 or shell_end != 0:
+            raise ValueError(
+                f"{piece} partial does not take aux shells, got {shell_start}:{shell_end}"
+            )
+        hessian_task_id = str(opts.hessian_task_id)
+        budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
+        node_runner.info(resource_log)
+        downloaded = Path(opts.wavefunction.get(local_dir=Path(".")))
+        payload = _load_payload(downloaded)
+        mol = molecule_from_payload(opts.qm_input, payload)
+        n_atoms = int(mol.natm)
+        row_dir = hessian_contribution_directory(hessian_task_id)
+        existing = await find_partial_contributions(hessian_task_id)
+        mf = equilibrium_mean_field(
+            opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
+        )
+        hessian = require_df_rks_hessian(mf)
+        hessian.max_memory = float(budget_mb)
+        if piece == "xc":
+            if any(record.piece == "xc" for record in existing):
+                node_runner.info(f"XC partial for task {hessian_task_id} is already stored")
+                return node_runner.succeed()
+            heartbeat = ProcessHeartbeat(
+                "heartbeat.log",
+                "Hessian XC partial",
+                task_id=str(getattr(node_runner, "task_id", "") or ""),
+            )
+            heartbeat.start()
+            try:
+                array = partial_xc_and_e1(
+                    hessian, mf.mo_energy, mf.mo_coeff, mf.mo_occ, budget_mb
+                )
+            finally:
+                heartbeat.stop()
+            await store_partial_contribution(
+                hessian_task_id, "xc", 0, 0, n_atoms, array, {}, row_dir
+            )
+            node_runner.info(f"Stored XC partial for task {hessian_task_id}")
+            return node_runner.succeed()
+        if piece == "nlc":
+            if any(record.piece == "nlc" for record in existing):
+                node_runner.info(f"NLC partial for task {hessian_task_id} is already stored")
+                return node_runner.succeed()
+            heartbeat = ProcessHeartbeat(
+                "heartbeat.log",
+                "Hessian NLC partial",
+                task_id=str(getattr(node_runner, "task_id", "") or ""),
+            )
+            heartbeat.start()
+            try:
+                array = partial_nlc(hessian, mf.mo_coeff, mf.mo_occ, budget_mb)
+            finally:
+                heartbeat.stop()
+            await store_partial_contribution(
+                hessian_task_id, "nlc", 0, 0, n_atoms, array, {}, row_dir
+            )
+            node_runner.info(f"Stored NLC partial for task {hessian_task_id}")
+            return node_runner.succeed()
+        auxmol = mf.with_df.auxmol
+        if auxmol is None:
+            raise ValueError("density-fitted aux basis is required")
+        from pyscf import lib
+
+        nocc = int((mf.mo_occ > 0).sum())
+        blk = largest_aux_blk(
+            int(mol.nao),
+            int(auxmol.nao),
+            nocc,
+            budget_mb,
+            float(lib.current_memory()[0]),
+        )
+        blocks = shell_blocks(auxmol.ao_loc, shell_start, shell_end, blk)
+        rho_rows = []
+        weight_rows = []
+        for atom_index in range(n_atoms):
+            record = await find_hessian_atom_contribution(hessian_task_id, atom_index)
+            if record is None:
+                raise ValueError(
+                    f"Hessian contribution for atom {atom_index} of task {hessian_task_id} "
+                    "was not stored"
+                )
+            arrays = await materialize_hessian_contribution(record, row_dir)
+            rho_rows.append(arrays["rhoj1"])
+            weight_rows.append(arrays["wj1"])
+        rhoj1 = np.stack(rho_rows, axis=0)
+        wj1 = np.stack(weight_rows, axis=0)
+        for block_start, block_end in blocks:
+            matches = [
+                record
+                for record in existing
+                if record.piece == "aux"
+                and int(record.shell_start) == block_start
+                and int(record.shell_end) == block_end
+            ]
+            if len(matches) > 1:
+                raise ValueError(
+                    f"multiple Hessian aux partials for shells {block_start}:{block_end}"
+                )
+            if matches:
+                node_runner.info(
+                    f"Hessian aux shells {block_start}:{block_end} of task {hessian_task_id} "
+                    "are already stored"
+                )
+                continue
+            for record in existing:
+                if record.piece != "aux":
+                    continue
+                if int(record.shell_end) <= block_start or int(record.shell_start) >= block_end:
+                    continue
+                raise ValueError(
+                    f"stored aux shells {record.shell_start}:{record.shell_end} overlap "
+                    f"{block_start}:{block_end} without matching that block"
+                )
+            node_runner.info(
+                f"JK partial for aux shells {block_start}:{block_end} of task {hessian_task_id}"
+            )
+            heartbeat = ProcessHeartbeat(
+                "heartbeat.log",
+                f"Hessian aux shells {block_start}-{block_end}",
+                task_id=str(getattr(node_runner, "task_id", "") or ""),
+            )
+            heartbeat.start()
+            try:
+                array, wj_ip2, wk_ip2, wk_ip2_lr = partial_jk_span(
+                    hessian,
+                    mf.mo_energy,
+                    mf.mo_coeff,
+                    mf.mo_occ,
+                    block_start,
+                    block_end,
+                    rhoj1,
+                    wj1,
+                )
+            finally:
+                heartbeat.stop()
+            response_arrays = {}
+            if wj_ip2 is not None:
+                response_arrays["wj_ip2"] = wj_ip2
+            if wk_ip2 is not None:
+                response_arrays["wk_ip2"] = wk_ip2
+            if wk_ip2_lr is not None:
+                response_arrays["wk_ip2_lr"] = wk_ip2_lr
+            await store_partial_contribution(
+                hessian_task_id,
+                "aux",
+                block_start,
+                block_end,
+                n_atoms,
+                array,
+                response_arrays,
+                row_dir,
+            )
+            node_runner.info(
+                f"Stored JK partial for aux shells {block_start}:{block_end} "
+                f"of task {hessian_task_id}"
+            )
+        return node_runner.succeed()
+    except Exception as exc:
+        return node_runner.fail(str(exc))
+
+
+@node
 async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
     """
     Analytical Hessian and harmonic frequencies for an optimized PySCF wavefunction.
@@ -432,8 +737,9 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
     ``pyscf_hessian_for_atoms_ext``, which the cloud assignment rule places on
     its own VM. The three workers share one queue. A worker takes the next
     batch only after its previous batch has finished. This task waits until
-    every batch has finished, then contracts the responses, runs the full DF
-    RKS partial Hessian once, and writes frequencies and thermochemistry.
+    every batch has finished. Aux-shell, XC and NLC chunks then run through
+    ``pyscf_hessian_partial_ext`` on cloud. This task sums those chunks with
+    the stored CPHF response and writes frequencies and thermochemistry.
 
     One atom whose estimated cost exceeds the time limit raises ValueError
     before a batch VM is started.
@@ -451,6 +757,7 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
     Called Nodes:
         pyscf_hessian_for_atoms
         pyscf_hessian_for_atoms_ext
+        pyscf_hessian_partial_ext
 
     """
     node_runner = kwargs.get("node_runner")
@@ -563,7 +870,147 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
         if stored_j.shape != (n_atoms, n_atoms, 3, 3):
             raise ValueError(f"Coulomb slices assembled to {stored_j.shape}")
         hessian_obj = require_df_rks_hessian(mf)
-        partial = hessian_obj.partial_hess_elec()
+        auxmol = mf.with_df.auxmol
+        if auxmol is None:
+            raise ValueError("density-fitted aux basis is required")
+        existing_partials = await find_partial_contributions(hessian_task_id)
+        partial_jobs = []
+        for shell0, shell1 in aux_shell_groups(auxmol.ao_loc, _MAX_HESSIAN_VMS):
+            touching = []
+            for record in existing_partials:
+                if record.piece != "aux":
+                    continue
+                if int(record.shell_end) <= shell0 or int(record.shell_start) >= shell1:
+                    continue
+                if int(record.shell_start) < shell0 or int(record.shell_end) > shell1:
+                    raise ValueError(
+                        f"stored aux shells {record.shell_start}:{record.shell_end} "
+                        f"cross group {shell0}:{shell1}"
+                    )
+                touching.append((int(record.shell_start), int(record.shell_end)))
+            if touching and aux_blocks_cover(touching, shell0, shell1):
+                node_runner.info(
+                    f"Hessian aux shells {shell0}:{shell1} of task {hessian_task_id} are already stored"
+                )
+                continue
+            partial_jobs.append(("aux", shell0, shell1))
+        xc_rows = [record for record in existing_partials if record.piece == "xc"]
+        if len(xc_rows) > 1:
+            raise ValueError(f"multiple XC partials for task {hessian_task_id}")
+        if not xc_rows:
+            partial_jobs.append(("xc", 0, 0))
+        else:
+            node_runner.info(f"XC partial for task {hessian_task_id} is already stored")
+        if not hasattr(mf, "do_nlc"):
+            raise ValueError("mean field do_nlc is required")
+        nlc_rows = [record for record in existing_partials if record.piece == "nlc"]
+        if len(nlc_rows) > 1:
+            raise ValueError(f"multiple NLC partials for task {hessian_task_id}")
+        if mf.do_nlc():
+            if not nlc_rows:
+                partial_jobs.append(("nlc", 0, 0))
+            else:
+                node_runner.info(f"NLC partial for task {hessian_task_id} is already stored")
+        elif nlc_rows:
+            raise ValueError(f"stored NLC partial for xc {mf.xc!r}, which has no NLC")
+        partial_queue = asyncio.Queue()
+        for job in partial_jobs:
+            partial_queue.put_nowait(job)
+
+        async def run_partial_worker():
+            while True:
+                try:
+                    piece, shell0, shell1 = partial_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                partial_name = f"{piece}-{shell0}-{shell1}"
+                if parent_name:
+                    partial_name = f"{parent_name}-{partial_name}"
+                child_kwargs = dict(kwargs)
+                child_kwargs["custom_name"] = partial_name
+                node_runner.info(
+                    f"Calling pyscf_hessian_partial_ext {piece} shells {shell0}:{shell1} "
+                    f"of task {hessian_task_id}"
+                )
+                await pyscf_hessian_partial_ext(
+                    PySCFHessianPartialInput(
+                        hessian_task_id=hessian_task_id,
+                        qm_input=opts.qm_input,
+                        wavefunction=opts.wavefunction,
+                        piece=piece,
+                        shell_start=shell0,
+                        shell_end=shell1,
+                    ),
+                    **child_kwargs,
+                )
+
+        if partial_jobs:
+            n_partial = min(_MAX_HESSIAN_VMS, len(partial_jobs))
+            async with asyncio.TaskGroup() as tg:
+                for _partial_index in range(n_partial):
+                    tg.create_task(run_partial_worker())
+        partial_records = await find_partial_contributions(hessian_task_id)
+        partial = np.zeros((n_atoms, n_atoms, 3, 3))
+        aux_blocks = []
+        aux_response_blocks = []
+        saw_xc = False
+        saw_nlc = False
+        for record in partial_records:
+            array, extras = await load_partial_contribution(record, row_dir)
+            if record.piece == "aux":
+                shell_start = int(record.shell_start)
+                shell_end = int(record.shell_end)
+                aux_blocks.append((shell_start, shell_end))
+                if extras:
+                    aux_response_blocks.append((shell_start, shell_end, extras))
+            elif record.piece == "xc":
+                if extras:
+                    raise ValueError(f"XC partial for task {hessian_task_id} has aux response arrays")
+                if saw_xc:
+                    raise ValueError(f"multiple XC partials for task {hessian_task_id}")
+                saw_xc = True
+            elif record.piece == "nlc":
+                if extras:
+                    raise ValueError(f"NLC partial for task {hessian_task_id} has aux response arrays")
+                if saw_nlc:
+                    raise ValueError(f"multiple NLC partials for task {hessian_task_id}")
+                saw_nlc = True
+            else:
+                raise ValueError(f"unknown Hessian partial piece {record.piece!r}")
+            partial += array
+        response_level = getattr(hessian_obj, "auxbasis_response", None)
+        if response_level == 2:
+            if len(aux_response_blocks) != len(aux_blocks):
+                raise ValueError(
+                    f"aux response vectors are missing for task {hessian_task_id}"
+                )
+            stacked = stack_aux_response(auxmol.ao_loc, aux_response_blocks)
+            if "wj_ip2" not in stacked:
+                raise ValueError(f"stored aux response for task {hessian_task_id} has no wj_ip2")
+            wk_ip2 = stacked["wk_ip2"] if "wk_ip2" in stacked else None
+            wk_ip2_lr = stacked["wk_ip2_lr"] if "wk_ip2_lr" in stacked else None
+            partial = partial + partial_response2_cross(hessian_obj, stacked["wj_ip2"], wk_ip2, wk_ip2_lr)
+        elif response_level == 1:
+            if aux_response_blocks:
+                raise ValueError(
+                    f"aux response vectors were stored for task {hessian_task_id} "
+                    "with auxbasis_response 1"
+                )
+        else:
+            raise ValueError(
+                f"analytical Hessian aux chunks require auxbasis_response 1 or 2, got {response_level!r}"
+            )
+        n_aux_shells = len(list(auxmol.ao_loc)) - 1
+        if not aux_blocks_cover(aux_blocks, 0, n_aux_shells):
+            raise ValueError(
+                f"stored aux partials {aux_blocks} do not cover aux shells 0:{n_aux_shells}"
+            )
+        if not saw_xc:
+            raise ValueError(f"XC partial for task {hessian_task_id} was not stored")
+        if mf.do_nlc() and not saw_nlc:
+            raise ValueError(f"NLC partial for task {hessian_task_id} was not stored")
+        if not mf.do_nlc() and saw_nlc:
+            raise ValueError(f"stored NLC partial for xc {mf.xc!r}, which has no NLC")
         if tuple(partial.shape) != stored_j.shape:
             raise ValueError(
                 f"DF partial Hessian has shape {partial.shape}, Coulomb slices have {stored_j.shape}"

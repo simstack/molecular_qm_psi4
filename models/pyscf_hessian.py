@@ -48,3 +48,34 @@ class PySCFHessianAtomContribution(Model):
     h1ao_file: FileStack = Reference()
     rhoj1_file: FileStack = Reference()
     wj1_file: FileStack = Reference()
+
+
+@simstack_model
+class PySCFHessianPartialInput(Model):
+    """One cloud chunk of the density-fitted partial Hessian.
+
+    ``piece`` is ``aux``, ``xc`` or ``nlc``. An aux piece covers aux shells
+    ``[shell_start, shell_end)``. XC and NLC pieces are not aux ranges, so both
+    shell bounds are 0.
+    """
+
+    field_name: str = "PySCFHessianPartialInput"
+    hessian_task_id: str
+    qm_input: QMInput = Reference()
+    wavefunction: FileStack = Reference()
+    piece: str
+    shell_start: int
+    shell_end: int
+
+
+@simstack_model
+class PySCFHessianPartialContribution(Model):
+    """Stored ``(natm, natm, 3, 3)`` piece of one pyscf_hessian task."""
+
+    field_name: str = "PySCFHessianPartialContribution"
+    hessian_task_id: str = Field(index=True)
+    piece: str = Field(index=True)
+    shell_start: int = Field(index=True)
+    shell_end: int = Field(index=True)
+    n_atoms: int
+    partial_file: FileStack = Reference()

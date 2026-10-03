@@ -311,6 +311,48 @@ def df_hessian_memory(mf, mol, max_memory) -> dict:
     }
 
 
+def largest_aux_blk(nao, naux, nocc, max_memory_mb, current_mb) -> int:
+    """Largest aux-function block whose ``int3c2e_ipip1`` peak fits in memory.
+
+    PySCF's own ``0.3`` block heuristic assumes one ``(nao, nao, blk)`` slice.
+    The DF Hessian allocates nine Cartesian components and copies that tensor
+    for the GEMM, which is the peak counted by ``df_hessian_memory``.
+    """
+    if max_memory_mb is None:
+        raise ValueError("max_memory is required")
+    if current_mb is None:
+        raise ValueError("current_mb is required")
+    budget = float(max_memory_mb)
+    if budget <= 0:
+        raise ValueError(f"max_memory must be positive, got {max_memory_mb!r}")
+    resident = float(current_mb)
+    if resident < 0:
+        raise ValueError(f"current_mb must be >= 0, got {current_mb!r}")
+    orbitals = int(nao)
+    aux = int(naux)
+    occ = int(nocc)
+    if orbitals < 1 or aux < 1 or occ < 1:
+        raise ValueError(
+            f"nao, naux and nocc must be positive, got nao={nao!r}, naux={naux!r}, nocc={nocc!r}"
+        )
+    rhok0_mb = aux * orbitals * occ * 8 / 1e6
+    per_function_mb = 2.0 * (9 + 1) * orbitals * orbitals * 8 / 1e6
+    if per_function_mb <= 0:
+        raise ValueError("DF Hessian aux-block size is not defined for this basis")
+    remaining = budget - rhok0_mb - _DF_HESS_OVERHEAD_MB - resident
+    blk = int(remaining / per_function_mb)
+    if blk > _DF_HESS_AUX_BLK:
+        blk = _DF_HESS_AUX_BLK
+    if blk > aux:
+        blk = aux
+    if blk < 1:
+        raise ValueError(
+            f"DF Hessian aux block does not fit in max_memory={budget} MB "
+            f"(naux={aux}, nao={orbitals}, nocc={occ}, current={resident} MB)"
+        )
+    return blk
+
+
 class PySCFCalculator:
     def __init__(self, qm_input: QMInput, **kwargs):
         self.qm_input = qm_input
