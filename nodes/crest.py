@@ -357,10 +357,9 @@ async def xtb_molecule_list(xtb_input: XTBInput, **kwargs) -> SimstackResult:
         level of theory, and additional calculation needs.
         **kwargs: Optional arguments, including a `node_runner` instance used to manage the execution.
 
-    Results:
-        SimstackResult: The result of the xTB optimization.
-            result: A DataSet containing the results of the computation, each row of the DatasetSection results_section includes the molecule and its energy
-            molecule_list: A list of Molecule objects representing the input molecules. Their properties contain the energy
+    SimstackResult:
+        result (DataSet): One row per molecule with its energy, and gradients when they were requested.
+        molecule_list (MoleculeList): Input molecules with the computed energy stored on each molecule.
 
     Raises:
         Exception: Any exceptions raised during xTB Python computations are logged and captured for

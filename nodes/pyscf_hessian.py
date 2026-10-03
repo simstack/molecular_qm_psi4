@@ -422,6 +422,10 @@ async def pyscf_hessian_for_atoms(
 
     A resource assignment rule places this node on resource self. Further
     batches are ``pyscf_hessian_for_atoms_ext``, placed on cloud by its rule.
+
+    SimstackResult:
+        This node stores per-atom contributions on the Hessian task and does not
+        attach result models.
     """
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
@@ -524,6 +528,10 @@ async def pyscf_hessian_for_atoms_ext(
 
     Called Nodes:
         pyscf_hessian_for_atoms
+
+    SimstackResult:
+        This node stores per-atom contributions on the Hessian task and does not
+        attach result models.
     """
     return await pyscf_hessian_for_atoms(atoms, opts, **kwargs)
 
@@ -542,6 +550,10 @@ async def pyscf_hessian_partial_ext(
 
     The resource assignment rule for this node is cloud. Its Slurm memory
     sizes the aux block, and its ``cpus_per_task`` is the PySCF thread count.
+
+    SimstackResult:
+        This node stores a partial Hessian contribution on the task and does not
+        attach result models.
     """
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
