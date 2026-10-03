@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.10.0 (2026-10-03)
+
+### Features
+
+- Introduce `pyscf_hessian_partial` utility for density-fitted RKS partial Hessians
+  ([`34c00b1`](https://github.com/simstack/molecular_qm_psi4/commit/34c00b1f002477246c8bd62595f0c587b97e344d))
+
+- Implements functions for aux-shell grouping, memory handling, and Hessian computation. - Supports
+  hybrid and range-separated functionals for accurate calculations. - Enhances auxiliary response
+  handling and integration consistency checking.
+
+- Split the DF partial Hessian into memory-sized cloud chunks.
+  ([`8a7f75f`](https://github.com/simstack/molecular_qm_psi4/commit/8a7f75f98fd8dd45521d7da1f78753976e2b293d))
+
+Aux, XC, and NLC work leaves the parent, which only sums the stored pieces with the CPHF response.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.9.1 (2026-10-02)
 
 ### Bug Fixes
