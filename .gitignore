@@ -73,6 +73,7 @@ Thumbs.db
 *.log
 *.tmp
 .output.txt
+timer.dat
 
 # hatch-vcs (generated; do not commit)
 _version.py
