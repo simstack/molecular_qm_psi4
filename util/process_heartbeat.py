@@ -58,7 +58,7 @@ def _insert_mongo(collection, message: str, task_id: str):
         "timestamp": datetime.now(),
         "level": "INFO",
         "logger_name": "pyscf_heartbeat",
-        "message": f"Task pyscf_calculator: {message} task_id: {task}",
+        "message": f"{message} task_id: {task}",
         "module": "process_heartbeat",
         "function": "run_heartbeat",
         "line": 0,
@@ -150,6 +150,14 @@ class ProcessHeartbeat:
             stdout=subprocess.DEVNULL,
             start_new_session=True,
         )
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.stop()
+        return False
 
     def stop(self):
         proc = self._proc

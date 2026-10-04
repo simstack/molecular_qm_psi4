@@ -261,9 +261,7 @@ def df_hessian_memory(mf, mol, max_memory) -> dict:
         return empty
     auxmol = getattr(with_df, "auxmol", None)
     if auxmol is None:
-        from pyscf import df
-
-        auxmol = df.addons.make_auxmol(getattr(with_df, "mol", None) or mol, with_df.auxbasis)
+        auxmol = attach_df_auxmol(mf, mol)
     naux = int(auxmol.nao)
     blk = min(_DF_HESS_AUX_BLK, max(naux, 1))
     if nao > 0:
@@ -309,6 +307,29 @@ def df_hessian_memory(mf, mol, max_memory) -> dict:
         "density_fit": True,
         "summary": summary,
     }
+
+
+def attach_df_auxmol(mf, mol=None):
+    """Materialize ``with_df.auxmol`` and keep it on the density-fitting object.
+
+    ``density_fit()`` stores the aux basis name and leaves ``auxmol`` unset
+    until ``DF.build()``. The analytical Hessian groups aux shells from that
+    molecule, so a configured fit with a missing auxmol is not an absent basis.
+    """
+    with_df = getattr(mf, "with_df", None)
+    if with_df is None:
+        raise ValueError("density-fitted aux basis is required")
+    auxmol = getattr(with_df, "auxmol", None)
+    if auxmol is not None:
+        return auxmol
+    from pyscf import df
+
+    aux_mol = getattr(with_df, "mol", None) or mol or getattr(mf, "mol", None)
+    if aux_mol is None:
+        raise ValueError("density-fitted aux basis is required")
+    auxmol = df.addons.make_auxmol(aux_mol, getattr(with_df, "auxbasis", None))
+    with_df.auxmol = auxmol
+    return auxmol
 
 
 def largest_aux_blk(nao, naux, nocc, max_memory_mb, current_mb) -> int:

@@ -9,6 +9,26 @@ from molecular_qm_psi4.util.pyscf_hessian_partial import (
 )
 
 
+def test_density_fit_auxmol_is_attached_when_pyscf_leaves_it_unset():
+    from pyscf import dft, gto
+
+    from molecular_qm_psi4.util.pyscf_calculator import attach_df_auxmol
+
+    mol = gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g", verbose=0)
+    mf = dft.RKS(mol).density_fit()
+    if mf.with_df.auxmol is not None:
+        raise AssertionError("PySCF materialized auxmol before DF.build()")
+    attached = attach_df_auxmol(mf, mol)
+    if attached is not mf.with_df.auxmol:
+        raise AssertionError("auxmol was not stored on the density-fitting object")
+    if int(attached.nao) <= 0:
+        raise AssertionError("attached auxmol has no functions")
+    if attach_df_auxmol(mf, mol) is not attached:
+        raise AssertionError("a second attach rebuilt the auxmol")
+    with pytest.raises(ValueError, match="density-fitted aux basis is required"):
+        attach_df_auxmol(type("MF", (), {"with_df": None, "mol": mol})(), mol)
+
+
 def test_largest_aux_block_fits_the_nine_component_tensor():
     blk = largest_aux_blk(814, 2058, 80, 27200, 0)
     assert 200 <= blk <= 250

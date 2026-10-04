@@ -13,6 +13,8 @@ try:
 except ImportError:
     np = None
 
+from molecular_qm_psi4.util.pyscf_calculator import attach_df_auxmol
+
 
 def _require_numpy():
     if np is None:
@@ -155,9 +157,7 @@ def _closed_shell_df_rks(hessobj):
     with_df = getattr(hessobj.base, "with_df", None)
     if with_df is None:
         raise ValueError("analytical Hessian aux chunks require density fitting")
-    auxmol = with_df.auxmol
-    if auxmol is None:
-        raise ValueError("density-fitted aux basis is required")
+    auxmol = attach_df_auxmol(hessobj.base, mol)
     budget = getattr(hessobj, "max_memory", None)
     if budget is None or float(budget) <= 0:
         raise ValueError(f"Hessian max_memory is required, got {budget!r}")
@@ -278,10 +278,14 @@ def _partial_ejk_window(
         if not with_k:
             break
         solved = solved_ip1(shl0, shl1, p0, p1)
-        transformed = np.einsum("pykl,li->ikpy", solved, dm0)
-        ikp_atoms.append(transformed[:, :, ao0:ao1])
-        pki_atoms.append(transformed.transpose(2, 1, 0, 3)[ao0:ao1])
+        # A slice of the full-aux contraction is a view. Holding one per atom
+        # retains 3*nao*naux*nao floats and SIGKILLs a 32 GB VM (rc=137).
+        window_solved = np.copy(solved[ao0:ao1])
         del solved
+        transformed = np.einsum("pykl,li->ikpy", window_solved, dm0)
+        del window_solved
+        ikp_atoms.append(transformed)
+        pki_atoms.append(np.copy(transformed.transpose(2, 1, 0, 3)))
 
     ej = np.zeros((natm, natm, 3, 3))
     ek = np.zeros_like(ej)

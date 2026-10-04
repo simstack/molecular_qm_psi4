@@ -21,7 +21,11 @@ from molecular_qm_psi4.nodes.pyscf_calculator import (
     _write_payload,
 )
 from molecular_qm_psi4.util.process_heartbeat import ProcessHeartbeat
-from molecular_qm_psi4.util.pyscf_calculator import PySCFCalculator, largest_aux_blk
+from molecular_qm_psi4.util.pyscf_calculator import (
+    PySCFCalculator,
+    attach_df_auxmol,
+    largest_aux_blk,
+)
 from molecular_qm_psi4.util.pyscf_hessian_analytical import (
     analytical_hessian_plan,
     contract_df_coulomb,
@@ -47,6 +51,7 @@ from simstack.models import FileStack
 
 # The master VM plus at most two pyscf_hessian_for_atoms_ext VMs.
 _MAX_HESSIAN_VMS = 3
+_HEARTBEAT_INTERVAL_S = 60.0
 
 _ARRAY_NAMES = ("mo1", "mo_e1", "h1ao", "rhoj1", "wj1")
 _ARRAY_SHAPES = {
@@ -315,6 +320,8 @@ def equilibrium_mean_field(qm_input, mol, payload, node_runner, budget_mb, num_t
     mf.mo_energy = payload["mo_energy"]
     mf.e_tot = float(payload["energy"])
     mf.converged = True
+    if getattr(mf, "with_df", None) is not None:
+        attach_df_auxmol(mf, mol)
     return mf
 
 
@@ -340,12 +347,7 @@ def coulomb_j_slices(mf, atom_indexes):
     from pyscf.df.hessian.rhf import _gen_metric_solver, _int3c_wrapper
 
     mol = mf.mol
-    with_df = mf.with_df
-    auxmol = with_df.auxmol
-    if auxmol is None:
-        from pyscf import df
-
-        auxmol = df.addons.make_auxmol(with_df.mol, with_df.auxbasis)
+    auxmol = attach_df_auxmol(mf, mol)
     mo_occ = mf.mo_occ
     mocc = mf.mo_coeff[:, mo_occ > 0]
     dm0 = mocc @ mocc.T * 2
@@ -424,8 +426,8 @@ async def pyscf_hessian_for_atoms(
     batches are ``pyscf_hessian_for_atoms_ext``, placed on cloud by its rule.
 
     SimstackResult:
-        This node stores per-atom contributions on the Hessian task and does not
-        attach result models.
+        record (PySCFHessianAtomContribution): the computed contribution
+
     """
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
@@ -440,6 +442,10 @@ async def pyscf_hessian_for_atoms(
         hessian_task_id = str(opts.hessian_task_id)
         budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
         node_runner.info(resource_log)
+        heartbeat_task_id = str(getattr(node_runner, "task_id", "") or "")
+        node_runner.info(
+            f"Loading wavefunction for Hessian atoms of task {hessian_task_id}"
+        )
         downloaded = Path(opts.wavefunction.get(local_dir=Path(".")))
         payload = _load_payload(downloaded)
         mol = molecule_from_payload(opts.qm_input, payload)
@@ -463,27 +469,53 @@ async def pyscf_hessian_for_atoms(
                 continue
             pending.append(atom_index)
         if pending:
-            mf = equilibrium_mean_field(
-                opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
+            node_runner.info(
+                f"Building the equilibrium mean field for atoms {pending} "
+                f"of task {hessian_task_id}"
             )
+            with ProcessHeartbeat(
+                "heartbeat.log",
+                f"Hessian mean field atoms {pending[0]}-{pending[-1]}",
+                interval_s=_HEARTBEAT_INTERVAL_S,
+                task_id=heartbeat_task_id,
+            ):
+                mf = equilibrium_mean_field(
+                    opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
+                )
             hessian = require_df_rks_hessian(mf)
-            h1ao = hessian.make_h1(mf.mo_coeff, mf.mo_occ, None, pending)
+            node_runner.info(
+                f"Building AO derivative integrals for atoms {pending} "
+                f"of task {hessian_task_id}"
+            )
+            with ProcessHeartbeat(
+                "heartbeat.log",
+                f"Hessian make_h1 atoms {pending[0]}-{pending[-1]}",
+                interval_s=_HEARTBEAT_INTERVAL_S,
+                task_id=heartbeat_task_id,
+            ):
+                h1ao = hessian.make_h1(mf.mo_coeff, mf.mo_occ, None, pending)
             node_runner.info(
                 f"Solving CPHF responses for atoms {pending} of task {hessian_task_id}"
             )
-            heartbeat = ProcessHeartbeat(
+            with ProcessHeartbeat(
                 "heartbeat.log",
                 f"Hessian CPHF atoms {pending[0]}-{pending[-1]}",
-                task_id=str(getattr(node_runner, "task_id", "") or ""),
-            )
-            heartbeat.start()
-            try:
+                interval_s=_HEARTBEAT_INTERVAL_S,
+                task_id=heartbeat_task_id,
+            ):
                 mo1s, mo_e1s = hessian.solve_mo1(
                     mf.mo_energy, mf.mo_coeff, mf.mo_occ, h1ao, None, pending
                 )
+            node_runner.info(
+                f"Contracting Coulomb slices for atoms {pending} of task {hessian_task_id}"
+            )
+            with ProcessHeartbeat(
+                "heartbeat.log",
+                f"Hessian Coulomb slices atoms {pending[0]}-{pending[-1]}",
+                interval_s=_HEARTBEAT_INTERVAL_S,
+                task_id=heartbeat_task_id,
+            ):
                 j_slices = coulomb_j_slices(mf, pending)
-            finally:
-                heartbeat.stop()
             nao = int(mol.nao)
             nocc = int((mf.mo_occ > 0).sum())
             naux = int(j_slices[pending[0]][0].shape[0])
@@ -491,7 +523,7 @@ async def pyscf_hessian_for_atoms(
                 if mo1s[atom_index] is None or mo_e1s[atom_index] is None:
                     raise ValueError(f"CPHF response for atom {atom_index} was not produced")
                 rhoj1, wj1 = j_slices[atom_index]
-                await store_hessian_contribution(
+                record = await store_hessian_contribution(
                     hessian_task_id,
                     atom_index,
                     n_atoms,
@@ -507,6 +539,7 @@ async def pyscf_hessian_for_atoms(
                     },
                     row_dir,
                 )
+                node_runner.record = record
                 node_runner.info(
                     f"Stored analytical Hessian contribution for atom {atom_index} "
                     f"of task {hessian_task_id}"
@@ -530,8 +563,7 @@ async def pyscf_hessian_for_atoms_ext(
         pyscf_hessian_for_atoms
 
     SimstackResult:
-        This node stores per-atom contributions on the Hessian task and does not
-        attach result models.
+        record (PySCFHessianAtomContribution): the computed contribution
     """
     return await pyscf_hessian_for_atoms(atoms, opts, **kwargs)
 
@@ -585,33 +617,44 @@ async def pyscf_hessian_partial_ext(
         hessian_task_id = str(opts.hessian_task_id)
         budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
         node_runner.info(resource_log)
+        heartbeat_task_id = str(getattr(node_runner, "task_id", "") or "")
+        node_runner.info(
+            f"Loading wavefunction for Hessian {piece} partial of task {hessian_task_id}"
+        )
         downloaded = Path(opts.wavefunction.get(local_dir=Path(".")))
         payload = _load_payload(downloaded)
         mol = molecule_from_payload(opts.qm_input, payload)
         n_atoms = int(mol.natm)
         row_dir = hessian_contribution_directory(hessian_task_id)
         existing = await find_partial_contributions(hessian_task_id)
-        mf = equilibrium_mean_field(
-            opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
+        node_runner.info(
+            f"Building the equilibrium mean field for {piece} partial of task {hessian_task_id}"
         )
+        with ProcessHeartbeat(
+            "heartbeat.log",
+            f"Hessian {piece} mean field",
+            interval_s=_HEARTBEAT_INTERVAL_S,
+            task_id=heartbeat_task_id,
+        ):
+            mf = equilibrium_mean_field(
+                opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
+            )
         hessian = require_df_rks_hessian(mf)
         hessian.max_memory = float(budget_mb)
         if piece == "xc":
             if any(record.piece == "xc" for record in existing):
                 node_runner.info(f"XC partial for task {hessian_task_id} is already stored")
                 return node_runner.succeed()
-            heartbeat = ProcessHeartbeat(
+            node_runner.info(f"Computing XC partial for task {hessian_task_id}")
+            with ProcessHeartbeat(
                 "heartbeat.log",
                 "Hessian XC partial",
-                task_id=str(getattr(node_runner, "task_id", "") or ""),
-            )
-            heartbeat.start()
-            try:
+                interval_s=_HEARTBEAT_INTERVAL_S,
+                task_id=heartbeat_task_id,
+            ):
                 array = partial_xc_and_e1(
                     hessian, mf.mo_energy, mf.mo_coeff, mf.mo_occ, budget_mb
                 )
-            finally:
-                heartbeat.stop()
             await store_partial_contribution(
                 hessian_task_id, "xc", 0, 0, n_atoms, array, {}, row_dir
             )
@@ -621,24 +664,20 @@ async def pyscf_hessian_partial_ext(
             if any(record.piece == "nlc" for record in existing):
                 node_runner.info(f"NLC partial for task {hessian_task_id} is already stored")
                 return node_runner.succeed()
-            heartbeat = ProcessHeartbeat(
+            node_runner.info(f"Computing NLC partial for task {hessian_task_id}")
+            with ProcessHeartbeat(
                 "heartbeat.log",
                 "Hessian NLC partial",
-                task_id=str(getattr(node_runner, "task_id", "") or ""),
-            )
-            heartbeat.start()
-            try:
+                interval_s=_HEARTBEAT_INTERVAL_S,
+                task_id=heartbeat_task_id,
+            ):
                 array = partial_nlc(hessian, mf.mo_coeff, mf.mo_occ, budget_mb)
-            finally:
-                heartbeat.stop()
             await store_partial_contribution(
                 hessian_task_id, "nlc", 0, 0, n_atoms, array, {}, row_dir
             )
             node_runner.info(f"Stored NLC partial for task {hessian_task_id}")
             return node_runner.succeed()
-        auxmol = mf.with_df.auxmol
-        if auxmol is None:
-            raise ValueError("density-fitted aux basis is required")
+        auxmol = attach_df_auxmol(mf, mol)
         from pyscf import lib
 
         nocc = int((mf.mo_occ > 0).sum())
@@ -694,13 +733,12 @@ async def pyscf_hessian_partial_ext(
             node_runner.info(
                 f"JK partial for aux shells {block_start}:{block_end} of task {hessian_task_id}"
             )
-            heartbeat = ProcessHeartbeat(
+            with ProcessHeartbeat(
                 "heartbeat.log",
                 f"Hessian aux shells {block_start}-{block_end}",
-                task_id=str(getattr(node_runner, "task_id", "") or ""),
-            )
-            heartbeat.start()
-            try:
+                interval_s=_HEARTBEAT_INTERVAL_S,
+                task_id=heartbeat_task_id,
+            ):
                 array, wj_ip2, wk_ip2, wk_ip2_lr = partial_jk_span(
                     hessian,
                     mf.mo_energy,
@@ -711,8 +749,6 @@ async def pyscf_hessian_partial_ext(
                     rhoj1,
                     wj1,
                 )
-            finally:
-                heartbeat.stop()
             response_arrays = {}
             if wj_ip2 is not None:
                 response_arrays["wj_ip2"] = wj_ip2
@@ -786,15 +822,26 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
             import pyscf  # noqa: F401
         except ImportError:
             return node_runner.fail("PySCF is not installed in the current environment.")
+        heartbeat_task_id = str(getattr(node_runner, "task_id", "") or "")
+        node_runner.info(f"Loading wavefunction for Hessian task {hessian_task_id}")
         downloaded = Path(opts.wavefunction.get(local_dir=Path(".")))
         payload = _load_payload(downloaded)
         mol = molecule_from_payload(opts.qm_input, payload)
         budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
         node_runner.info(resource_log)
-        mf = equilibrium_mean_field(
-            opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
+        node_runner.info(
+            f"Building the equilibrium mean field for Hessian task {hessian_task_id}"
         )
-        plan = analytical_hessian_plan(mf, mol, kwargs.get("parent_parameters"))
+        with ProcessHeartbeat(
+            "heartbeat.log",
+            "Hessian equilibrium mean field",
+            interval_s=_HEARTBEAT_INTERVAL_S,
+            task_id=heartbeat_task_id,
+        ):
+            mf = equilibrium_mean_field(
+                opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
+            )
+            plan = analytical_hessian_plan(mf, mol, kwargs.get("parent_parameters"))
         node_runner.info(
             f"Analytical Hessian lower bound {plan['seconds_full']:.0f} s "
             f"({plan['seconds_per_atom']:.0f} s/atom), "
@@ -862,10 +909,20 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
 
         if batches:
             n_ext = min(_MAX_HESSIAN_VMS - 1, max(0, len(batches) - 1))
-            async with asyncio.TaskGroup() as tg:
-                tg.create_task(run_worker(True))
-                for _ext_index in range(n_ext):
-                    tg.create_task(run_worker(False))
+            node_runner.info(
+                f"Waiting on {len(batches)} Hessian atom batches "
+                f"with {1 + n_ext} workers for task {hessian_task_id}"
+            )
+            with ProcessHeartbeat(
+                "heartbeat.log",
+                f"Hessian waiting on {len(batches)} atom batches",
+                interval_s=_HEARTBEAT_INTERVAL_S,
+                task_id=heartbeat_task_id,
+            ):
+                async with asyncio.TaskGroup() as tg:
+                    tg.create_task(run_worker(True))
+                    for _ext_index in range(n_ext):
+                        tg.create_task(run_worker(False))
         loaded = []
         for atom_index in range(n_atoms):
             record = await find_hessian_atom_contribution(hessian_task_id, atom_index)
@@ -882,9 +939,7 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
         if stored_j.shape != (n_atoms, n_atoms, 3, 3):
             raise ValueError(f"Coulomb slices assembled to {stored_j.shape}")
         hessian_obj = require_df_rks_hessian(mf)
-        auxmol = mf.with_df.auxmol
-        if auxmol is None:
-            raise ValueError("density-fitted aux basis is required")
+        auxmol = attach_df_auxmol(mf, mol)
         existing_partials = await find_partial_contributions(hessian_task_id)
         partial_jobs = []
         for shell0, shell1 in aux_shell_groups(auxmol.ao_loc, _MAX_HESSIAN_VMS):
@@ -958,9 +1013,19 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
 
         if partial_jobs:
             n_partial = min(_MAX_HESSIAN_VMS, len(partial_jobs))
-            async with asyncio.TaskGroup() as tg:
-                for _partial_index in range(n_partial):
-                    tg.create_task(run_partial_worker())
+            node_runner.info(
+                f"Waiting on {len(partial_jobs)} Hessian partial jobs "
+                f"with {n_partial} workers for task {hessian_task_id}"
+            )
+            with ProcessHeartbeat(
+                "heartbeat.log",
+                f"Hessian waiting on {len(partial_jobs)} partial jobs",
+                interval_s=_HEARTBEAT_INTERVAL_S,
+                task_id=heartbeat_task_id,
+            ):
+                async with asyncio.TaskGroup() as tg:
+                    for _partial_index in range(n_partial):
+                        tg.create_task(run_partial_worker())
         partial_records = await find_partial_contributions(hessian_task_id)
         partial = np.zeros((n_atoms, n_atoms, 3, 3))
         aux_blocks = []
