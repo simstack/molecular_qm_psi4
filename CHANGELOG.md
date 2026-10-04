@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.10.1 (2026-10-04)
+
+### Bug Fixes
+
+- Finish the DF Hessian partial without a missing auxmol or rc=137
+  ([`6e9f0c7`](https://github.com/simstack/molecular_qm_psi4/commit/6e9f0c72d677dbbfa6434f9c75183d291d475722))
+
+Attach the aux molecule density_fit() leaves unset, copy only the aux window so slices do not retain
+  the full tensor, and run ProcessHeartbeat as a context manager.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.0 (2026-10-03)
 
 ### Features
