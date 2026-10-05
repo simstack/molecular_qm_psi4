@@ -103,29 +103,64 @@ async def run_qm_calculator(qm_input, engine=None, **kwargs):
 
 
 def _positive_int(value) -> Optional[int]:
-    if isinstance(value, bool) or not isinstance(value, int):
+    if value is None:
         return None
+    if isinstance(value, bool):
+        raise ValueError(f"slurm CPU field must be an int, got {value!r}")
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped.isdigit():
+            raise ValueError(f"slurm CPU field must be an int, got {value!r}")
+        value = int(stripped)
+    elif not isinstance(value, int):
+        raise ValueError(f"slurm CPU field must be an int, got {value!r}")
     return value if value >= 1 else None
 
 
+def _slurm_field(slurm, name: str):
+    if isinstance(slurm, dict):
+        return slurm.get(name)
+    return getattr(slurm, name, None)
+
+
 def _slurm_task_count(slurm) -> int:
-    """Same as ``simstack.core.run_docker._slurm_task_count``."""
-    tasks = _positive_int(getattr(slurm, "tasks", None))
+    """Task count for a thread/CPU budget.
+
+    ``SlurmParameters.tasks`` defaults to 1, so preferring ``tasks`` whenever
+    it is set hides an explicit ``tasks_per_node``. A default of 1 yields to
+    the other field when that field is larger. Both fields above 1 and
+    unequal is a conflict.
+    """
+    tasks = _positive_int(_slurm_field(slurm, "tasks"))
+    tasks_per_node = _positive_int(_slurm_field(slurm, "tasks_per_node"))
+    if tasks is not None and tasks_per_node is not None:
+        if tasks != tasks_per_node and tasks > 1 and tasks_per_node > 1:
+            raise ValueError(
+                f"slurm tasks={tasks} and tasks_per_node={tasks_per_node} disagree"
+            )
+        if tasks == 1 and tasks_per_node > 1:
+            return tasks_per_node
+        return tasks
     if tasks is not None:
         return tasks
-    tasks_per_node = _positive_int(getattr(slurm, "tasks_per_node", None))
     if tasks_per_node is not None:
         return tasks_per_node
     return 1
 
 
 def docker_cpu_limit(slurm) -> Optional[int]:
-    """Same as ``simstack.core.run_docker.docker_cpu_limit`` (``--cpus``)."""
+    """CPU count from ``cpus_per_task`` times the task count.
+
+    ``run_docker.docker_cpu_limit`` prefers ``tasks`` even when that value is
+    only the ``SlurmParameters`` default of 1. This copy uses
+    ``tasks_per_node`` in that case so a 16-way allocation is not run as one
+    thread.
+    """
     if slurm is None:
         return None
-    cpus_per_task = _positive_int(getattr(slurm, "cpus_per_task", None))
-    tasks = _positive_int(getattr(slurm, "tasks", None))
-    tasks_per_node = _positive_int(getattr(slurm, "tasks_per_node", None))
+    cpus_per_task = _positive_int(_slurm_field(slurm, "cpus_per_task"))
+    tasks = _positive_int(_slurm_field(slurm, "tasks"))
+    tasks_per_node = _positive_int(_slurm_field(slurm, "tasks_per_node"))
     if cpus_per_task is None and tasks is None and tasks_per_node is None:
         return None
     return (cpus_per_task or 1) * _slurm_task_count(slurm)
@@ -169,11 +204,11 @@ def docker_memory_limit(slurm) -> Optional[str]:
     """Same as ``simstack.core.run_docker.docker_memory_limit`` (``--memory``)."""
     if slurm is None:
         return None
-    mem = _parse_slurm_memory(getattr(slurm, "mem", None))
+    mem = _parse_slurm_memory(_slurm_field(slurm, "mem"))
     if mem is not None:
         amount, unit = mem
         return _format_container_memory(amount, unit)
-    mem_per_cpu = _parse_slurm_memory(getattr(slurm, "mem_per_cpu", None))
+    mem_per_cpu = _parse_slurm_memory(_slurm_field(slurm, "mem_per_cpu"))
     if mem_per_cpu is None:
         return None
     amount, unit = mem_per_cpu
@@ -197,6 +232,8 @@ def slurm_from_kwargs(kwargs: dict):
     params = kwargs.get("parent_parameters") or kwargs.get("parameters")
     if params is None:
         return None
+    if isinstance(params, dict):
+        return params.get("slurm_parameters")
     return getattr(params, "slurm_parameters", None)
 
 
@@ -233,7 +270,10 @@ def pyscf_resources_from_slurm(kwargs: dict) -> tuple[float, int, str]:
     log = (
         f"run_docker container limits from slurm_parameters: {flags}; "
         f"container={mem_display} MB; PySCF max_memory={pyscf_display} MB "
-        f"({_PYSCF_MEMORY_FRACTION_OF_CONTAINER} of container); threads={cpus}"
+        f"({_PYSCF_MEMORY_FRACTION_OF_CONTAINER} of container); threads={cpus}; "
+        f"cpus_per_task={_slurm_field(slurm, 'cpus_per_task')}, "
+        f"tasks={_slurm_field(slurm, 'tasks')}, "
+        f"tasks_per_node={_slurm_field(slurm, 'tasks_per_node')}"
     )
     return memory_mb, cpus, log
 
@@ -277,11 +317,11 @@ def resources_from_parent_parameters(
         f"{label} resources from parent SlurmParameters: "
         f"memory={memory}, threads={threads} "
         f"(run_docker {flags}; "
-        f"cpus_per_task={getattr(slurm, 'cpus_per_task', None)}, "
-        f"tasks={getattr(slurm, 'tasks', None)}, "
-        f"tasks_per_node={getattr(slurm, 'tasks_per_node', None)}, "
-        f"mem={getattr(slurm, 'mem', None)}, "
-        f"mem_per_cpu={getattr(slurm, 'mem_per_cpu', None)})",
+        f"cpus_per_task={_slurm_field(slurm, 'cpus_per_task')}, "
+        f"tasks={_slurm_field(slurm, 'tasks')}, "
+        f"tasks_per_node={_slurm_field(slurm, 'tasks_per_node')}, "
+        f"mem={_slurm_field(slurm, 'mem')}, "
+        f"mem_per_cpu={_slurm_field(slurm, 'mem_per_cpu')})",
     )
 
 

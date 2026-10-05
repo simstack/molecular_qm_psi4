@@ -193,6 +193,42 @@ def test_docker_limit_helpers_match_simstack_run_docker():
     assert docker_container_resource_args(slurm) == container_resource_args("docker", slurm)
 
 
+def test_pyscf_resources_use_tasks_per_node_when_tasks_is_the_default():
+    from simstack.models.parameters import Parameters, SlurmParameters
+
+    slurm = SlurmParameters(tasks_per_node=16, mem="32G")
+    assert slurm.tasks == 1
+    assert slurm.cpus_per_task == 1
+    assert docker_cpu_limit(slurm) == 16
+    memory_mb, threads, log = pyscf_resources_from_slurm(
+        {"parent_parameters": Parameters(slurm_parameters=slurm)}
+    )
+    assert memory_mb == 27200.0
+    assert threads == 16
+    assert "threads=16" in log
+    dumped = Parameters(slurm_parameters=SlurmParameters(cpus_per_task=16, mem="32G")).model_dump()
+    _memory_mb, dict_threads, _log = pyscf_resources_from_slurm({"parent_parameters": dumped})
+    assert dict_threads == 16
+
+
+def test_set_resources_sets_blas_and_omp_thread_count(monkeypatch):
+    import os
+
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    monkeypatch.setenv("MKL_NUM_THREADS", "1")
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "1")
+    monkeypatch.setenv("NUMEXPR_NUM_THREADS", "1")
+    fake_lib = SimpleNamespace(num_threads=MagicMock(), param=SimpleNamespace())
+    fake_pyscf = SimpleNamespace(lib=fake_lib)
+    with patch.dict(sys.modules, {"pyscf": fake_pyscf, "pyscf.lib": fake_lib}):
+        PySCFCalculator(MagicMock()).set_resources(1000, 16)
+    fake_lib.num_threads.assert_called_once_with(16)
+    assert os.environ["OMP_NUM_THREADS"] == "16"
+    assert os.environ["MKL_NUM_THREADS"] == "16"
+    assert os.environ["OPENBLAS_NUM_THREADS"] == "16"
+    assert fake_lib.param.MAX_MEMORY == 1000.0
+
+
 def test_pyscf_resources_require_slurm_memory_and_cpus():
     try:
         pyscf_resources_from_slurm({})

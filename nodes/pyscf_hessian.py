@@ -424,7 +424,10 @@ async def pyscf_hessian_for_atoms(
     stored. ``Hessian.kernel(atmlst=...)`` is not used: it returns only the
     sub-block among the listed atoms.
 
-    A resource assignment rule places this node on resource self. Further
+    A resource assignment rule places this node on resource self, so it inherits
+    the caller's ``SlurmParameters``. PySCF threads are ``cpus_per_task`` times
+    that task count (``tasks``, or ``tasks_per_node`` when ``tasks`` is the
+    default 1). The count is applied before the molecule is built. Further
     batches are ``pyscf_hessian_for_atoms_ext``, placed on cloud by its rule.
 
     SimstackResult:
@@ -444,6 +447,9 @@ async def pyscf_hessian_for_atoms(
         hessian_task_id = str(opts.hessian_task_id)
         budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
         node_runner.info(resource_log)
+        PySCFCalculator(opts.qm_input, node_runner=node_runner).set_resources(
+            budget_mb, num_threads
+        )
         heartbeat_task_id = str(getattr(node_runner, "task_id", "") or "")
         node_runner.info(
             f"Loading wavefunction for Hessian atoms of task {hessian_task_id}"
@@ -559,7 +565,8 @@ async def pyscf_hessian_for_atoms_ext(
     One Hessian atom batch whose resource assignment rule is cloud.
 
     The body calls ``pyscf_hessian_for_atoms``. That inner call matches the
-    self rule and runs on the VM this node was given.
+    self rule and runs on the VM this node was given. It inherits this node's
+    ``SlurmParameters`` and uses the full task count as the PySCF thread count.
 
     Called Nodes:
         pyscf_hessian_for_atoms
@@ -583,7 +590,9 @@ async def pyscf_hessian_partial_ext(
     stored is left in place.
 
     The resource assignment rule for this node is cloud. Its Slurm memory
-    sizes the aux block, and its ``cpus_per_task`` is the PySCF thread count.
+    sizes the aux block. PySCF threads are ``cpus_per_task`` times the task
+    count (``tasks``, or ``tasks_per_node`` when ``tasks`` is the default 1).
+    That count is applied before the molecule is built.
     The aux watcher records the current memory block. After the first block
     finishes it estimates the finish time from the mean block duration and
     compares that with ``SlurmParameters.time``.
@@ -623,6 +632,9 @@ async def pyscf_hessian_partial_ext(
         hessian_task_id = str(opts.hessian_task_id)
         budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
         node_runner.info(resource_log)
+        PySCFCalculator(opts.qm_input, node_runner=node_runner).set_resources(
+            budget_mb, num_threads
+        )
         heartbeat_task_id = str(getattr(node_runner, "task_id", "") or "")
         node_runner.info(
             f"Loading wavefunction for Hessian {piece} partial of task {hessian_task_id}"
@@ -870,12 +882,15 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
         except ImportError:
             return node_runner.fail("PySCF is not installed in the current environment.")
         heartbeat_task_id = str(getattr(node_runner, "task_id", "") or "")
+        budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
+        node_runner.info(resource_log)
+        PySCFCalculator(opts.qm_input, node_runner=node_runner).set_resources(
+            budget_mb, num_threads
+        )
         node_runner.info(f"Loading wavefunction for Hessian task {hessian_task_id}")
         downloaded = Path(opts.wavefunction.get(local_dir=Path(".")))
         payload = _load_payload(downloaded)
         mol = molecule_from_payload(opts.qm_input, payload)
-        budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
-        node_runner.info(resource_log)
         node_runner.info(
             f"Building the equilibrium mean field for Hessian task {hessian_task_id}"
         )
