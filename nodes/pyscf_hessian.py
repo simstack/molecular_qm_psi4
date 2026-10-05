@@ -1,4 +1,5 @@
 import asyncio
+import time
 from pathlib import Path
 
 try:
@@ -20,7 +21,7 @@ from molecular_qm_psi4.nodes.pyscf_calculator import (
     _load_payload,
     _write_payload,
 )
-from molecular_qm_psi4.util.process_heartbeat import ProcessHeartbeat
+from molecular_qm_psi4.util.process_heartbeat import ProcessHeartbeat, write_block_progress
 from molecular_qm_psi4.util.pyscf_calculator import (
     PySCFCalculator,
     attach_df_auxmol,
@@ -30,6 +31,7 @@ from molecular_qm_psi4.util.pyscf_hessian_analytical import (
     analytical_hessian_plan,
     contract_df_coulomb,
     contract_h1ao_mo1,
+    slurm_time_limit_seconds,
 )
 from molecular_qm_psi4.util.pyscf_hessian_partial import (
     aux_blocks_cover,
@@ -582,6 +584,9 @@ async def pyscf_hessian_partial_ext(
 
     The resource assignment rule for this node is cloud. Its Slurm memory
     sizes the aux block, and its ``cpus_per_task`` is the PySCF thread count.
+    The aux watcher records the current memory block. After the first block
+    finishes it estimates the finish time from the mean block duration and
+    compares that with ``SlurmParameters.time``.
 
     SimstackResult:
         This node stores a partial Hessian contribution on the task and does not
@@ -591,6 +596,7 @@ async def pyscf_hessian_partial_ext(
     if node_runner is None:
         raise ValueError("node_runner is required")
     try:
+        job_started = time.time()
         if opts is None or not str(getattr(opts, "hessian_task_id", "") or "").strip():
             raise ValueError("hessian_task_id is required")
         if opts.qm_input is None:
@@ -703,6 +709,7 @@ async def pyscf_hessian_partial_ext(
             weight_rows.append(arrays["wj1"])
         rhoj1 = np.stack(rho_rows, axis=0)
         wj1 = np.stack(weight_rows, axis=0)
+        pending_blocks = []
         for block_start, block_end in blocks:
             matches = [
                 record
@@ -730,15 +737,54 @@ async def pyscf_hessian_partial_ext(
                     f"stored aux shells {record.shell_start}:{record.shell_end} overlap "
                     f"{block_start}:{block_end} without matching that block"
                 )
-            node_runner.info(
-                f"JK partial for aux shells {block_start}:{block_end} of task {hessian_task_id}"
-            )
-            with ProcessHeartbeat(
-                "heartbeat.log",
-                f"Hessian aux shells {block_start}-{block_end}",
-                interval_s=_HEARTBEAT_INTERVAL_S,
-                task_id=heartbeat_task_id,
-            ):
+            pending_blocks.append((block_start, block_end))
+        if not pending_blocks:
+            return node_runner.succeed()
+        allocated_s = slurm_time_limit_seconds(kwargs.get("parent_parameters"))
+        progress_path = Path("heartbeat.progress.json")
+        completed_s = 0.0
+        first_start, first_end = pending_blocks[0]
+        block_started = time.time()
+        write_block_progress(
+            progress_path,
+            {
+                "block": 1,
+                "blocks": len(pending_blocks),
+                "shell_start": first_start,
+                "shell_end": first_end,
+                "block_started": block_started,
+                "completed_s": completed_s,
+                "allocated_s": allocated_s,
+                "job_started": job_started,
+            },
+        )
+        with ProcessHeartbeat(
+            "heartbeat.log",
+            f"Hessian aux shells {shell_start}-{shell_end}",
+            interval_s=_HEARTBEAT_INTERVAL_S,
+            task_id=heartbeat_task_id,
+            progress_path=progress_path,
+        ):
+            for block_number, (block_start, block_end) in enumerate(pending_blocks, start=1):
+                if block_number > 1:
+                    block_started = time.time()
+                    write_block_progress(
+                        progress_path,
+                        {
+                            "block": block_number,
+                            "blocks": len(pending_blocks),
+                            "shell_start": block_start,
+                            "shell_end": block_end,
+                            "block_started": block_started,
+                            "completed_s": completed_s,
+                            "allocated_s": allocated_s,
+                            "job_started": job_started,
+                        },
+                    )
+                node_runner.info(
+                    f"JK partial block {block_number}/{len(pending_blocks)} "
+                    f"aux shells {block_start}:{block_end} of task {hessian_task_id}"
+                )
                 array, wj_ip2, wk_ip2, wk_ip2_lr = partial_jk_span(
                     hessian,
                     mf.mo_energy,
@@ -749,27 +795,28 @@ async def pyscf_hessian_partial_ext(
                     rhoj1,
                     wj1,
                 )
-            response_arrays = {}
-            if wj_ip2 is not None:
-                response_arrays["wj_ip2"] = wj_ip2
-            if wk_ip2 is not None:
-                response_arrays["wk_ip2"] = wk_ip2
-            if wk_ip2_lr is not None:
-                response_arrays["wk_ip2_lr"] = wk_ip2_lr
-            await store_partial_contribution(
-                hessian_task_id,
-                "aux",
-                block_start,
-                block_end,
-                n_atoms,
-                array,
-                response_arrays,
-                row_dir,
-            )
-            node_runner.info(
-                f"Stored JK partial for aux shells {block_start}:{block_end} "
-                f"of task {hessian_task_id}"
-            )
+                response_arrays = {}
+                if wj_ip2 is not None:
+                    response_arrays["wj_ip2"] = wj_ip2
+                if wk_ip2 is not None:
+                    response_arrays["wk_ip2"] = wk_ip2
+                if wk_ip2_lr is not None:
+                    response_arrays["wk_ip2_lr"] = wk_ip2_lr
+                await store_partial_contribution(
+                    hessian_task_id,
+                    "aux",
+                    block_start,
+                    block_end,
+                    n_atoms,
+                    array,
+                    response_arrays,
+                    row_dir,
+                )
+                completed_s += time.time() - block_started
+                node_runner.info(
+                    f"Stored JK partial block {block_number}/{len(pending_blocks)} "
+                    f"aux shells {block_start}:{block_end} of task {hessian_task_id}"
+                )
         return node_runner.succeed()
     except Exception as exc:
         return node_runner.fail(str(exc))
