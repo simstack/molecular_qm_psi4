@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.10.3 (2026-10-05)
+
+### Bug Fixes
+
+- Stop PySCF set_resources from loading a second BLAS
+  ([`d754c50`](https://github.com/simstack/molecular_qm_psi4/commit/d754c50f0c2b3df2428cb2579f182e489368ddff))
+
+Opening libmkl_rt.so or libopenblas.so segfaults the Psi4 process (exit 139). Call thread setters
+  only if they are already linked.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.2 (2026-10-05)
 
 ### Bug Fixes
