@@ -502,6 +502,18 @@ async def pyscf_hessian_for_atoms(
                 task_id=heartbeat_task_id,
             ):
                 h1ao = hessian.make_h1(mf.mo_coeff, mf.mo_occ, None, pending)
+            # make_h1's range_coulomb caches an RSH DF object that shares the
+            # full-range auxmol, then restores auxmol.omega to 0. CPHF get_jk
+            # rebuilds with_df.auxmol, and the next get_k asserts the stale
+            # cached omega. Drop the cache so that response rebuilds it.
+            rsh_cache = getattr(mf.with_df, "_rsh_df", None)
+            if rsh_cache is None:
+                raise ValueError("density-fitting range-separated cache is required")
+            if rsh_cache:
+                node_runner.info(
+                    "Dropping the range-separated density-fitting cache before CPHF"
+                )
+            rsh_cache.clear()
             node_runner.info(
                 f"Solving CPHF responses for atoms {pending} of task {hessian_task_id}"
             )
@@ -986,6 +998,9 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
                     for _ext_index in range(n_ext):
                         tg.create_task(run_worker(False))
         loaded = []
+        node_runner.info(
+            f"Loading stored Hessian contributions for {n_atoms} atoms of task {hessian_task_id}"
+        )
         for atom_index in range(n_atoms):
             record = await find_hessian_atom_contribution(hessian_task_id, atom_index)
             if record is None:
@@ -993,7 +1008,14 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
                     f"Hessian contribution for atom {atom_index} of task {hessian_task_id} "
                     "was not stored"
                 )
+            node_runner.info(
+                f"Loading Hessian contribution for atom {atom_index + 1}/{n_atoms} "
+                f"of task {hessian_task_id}"
+            )
             loaded.append(await materialize_hessian_contribution(record, row_dir))
+        node_runner.info(
+            f"Contracting Coulomb slices for {n_atoms} atoms of task {hessian_task_id}"
+        )
         stored_j = contract_df_coulomb(
             [item["rhoj1"] for item in loaded],
             [item["wj1"] for item in loaded],
@@ -1001,6 +1023,7 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
         if stored_j.shape != (n_atoms, n_atoms, 3, 3):
             raise ValueError(f"Coulomb slices assembled to {stored_j.shape}")
         hessian_obj = require_df_rks_hessian(mf)
+        node_runner.info(f"Planning Hessian partial jobs for task {hessian_task_id}")
         auxmol = attach_df_auxmol(mf, mol)
         existing_partials = await find_partial_contributions(hessian_task_id)
         partial_jobs = []
@@ -1089,6 +1112,9 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
                     for _partial_index in range(n_partial):
                         tg.create_task(run_partial_worker())
         partial_records = await find_partial_contributions(hessian_task_id)
+        node_runner.info(
+            f"Loading {len(partial_records)} stored Hessian partials for task {hessian_task_id}"
+        )
         partial = np.zeros((n_atoms, n_atoms, 3, 3))
         aux_blocks = []
         aux_response_blocks = []
@@ -1155,6 +1181,7 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
                 f"DF partial Hessian has shape {partial.shape}, Coulomb slices have {stored_j.shape}"
             )
         occupied = mf.mo_occ > 0
+        node_runner.info(f"Assembling the analytical Hessian for task {hessian_task_id}")
         response = contract_h1ao_mo1(
             [item["h1ao"] for item in loaded],
             [item["mo1"] for item in loaded],
