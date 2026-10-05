@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.10.6 (2026-10-05)
+
+### Bug Fixes
+
+- Clear the range-separated density-fitting cache before CPHF
+  ([`e737d33`](https://github.com/simstack/molecular_qm_psi4/commit/e737d3301f3c69a719f9cc0a7aeceea763aaf2eb))
+
+make_h1 leaves a stale omega on the cached auxmol, and the next exchange build asserts. Drop that
+  cache after the AO derivatives.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+- Log Hessian assembly while atom results are loaded
+  ([`2d0f676`](https://github.com/simstack/molecular_qm_psi4/commit/2d0f67635f16dd26275335fb271be0121e36866e))
+
+The parent task was silent after the atom batches finished, so a database download looked idle.
+  Report each load, the Coulomb contraction, and the final assembly.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.5 (2026-10-05)
 
 ### Bug Fixes
