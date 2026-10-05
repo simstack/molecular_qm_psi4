@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.10.5 (2026-10-05)
+
+### Bug Fixes
+
+- Drop the range-separated DF cache before Hessian CPHF
+  ([`390d968`](https://github.com/simstack/molecular_qm_psi4/commit/390d968b64c93852b97bf1b70017d0384a036bd2))
+
+make_h1 leaves a cached auxiliary molecule at omega 0, so the following get_k asserts. Clear that
+  cache before solve_mo1.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.4 (2026-10-05)
 
 ### Bug Fixes
