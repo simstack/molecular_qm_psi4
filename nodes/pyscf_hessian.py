@@ -502,18 +502,6 @@ async def pyscf_hessian_for_atoms(
                 task_id=heartbeat_task_id,
             ):
                 h1ao = hessian.make_h1(mf.mo_coeff, mf.mo_occ, None, pending)
-            # make_h1's range_coulomb caches an RSH DF object that shares the
-            # full-range auxmol, then restores auxmol.omega to 0. CPHF get_jk
-            # rebuilds with_df.auxmol, and the next get_k asserts the stale
-            # cached omega. Drop the cache so that response rebuilds it.
-            rsh_cache = getattr(mf.with_df, "_rsh_df", None)
-            if rsh_cache is None:
-                raise ValueError("density-fitting range-separated cache is required")
-            if rsh_cache:
-                node_runner.info(
-                    "Dropping the range-separated density-fitting cache before CPHF"
-                )
-            rsh_cache.clear()
             node_runner.info(
                 f"Solving CPHF responses for atoms {pending} of task {hessian_task_id}"
             )
