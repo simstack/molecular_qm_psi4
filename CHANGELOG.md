@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.10.4 (2026-10-05)
+
+### Bug Fixes
+
+- Stop calling BLAS thread setters through ctypes
+  ([`c117f09`](https://github.com/simstack/molecular_qm_psi4/commit/c117f0926765a36669c55859c166b2bef510c7b4))
+
+mkl_set_num_threads and openblas_set_num_threads segfault the Psi4 process (exit 139). Set the
+  OpenMP environment and use PySCF lib.num_threads.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.3 (2026-10-05)
 
 ### Bug Fixes
