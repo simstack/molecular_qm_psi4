@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.10.2 (2026-10-05)
+
+### Bug Fixes
+
+- Use the full Slurm task count for PySCF Hessian threads
+  ([`f27cc1e`](https://github.com/simstack/molecular_qm_psi4/commit/f27cc1e54f4a84e20c669d323da4d145835a0fc3))
+
+A default tasks of 1 hid tasks_per_node, so Hessian nodes ran on one thread. Apply that count before
+  the molecule is built and to the BLAS pools.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.1 (2026-10-04)
 
 ### Bug Fixes
