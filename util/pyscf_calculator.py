@@ -397,6 +397,8 @@ class PySCFCalculator:
         # Package import loads Psi4 first, which leaves BLAS/OpenMP at one
         # thread. lib.num_threads does not move an already initialized MKL
         # or OpenBLAS pool, and the partial Hessian contractions are numpy.
+        # Do not CDLL("libmkl_rt.so") or CDLL("libopenblas.so"): that loads a
+        # second BLAS into the Psi4 process and segfaults (exit 139).
         for env_name in (
             "OMP_NUM_THREADS",
             "MKL_NUM_THREADS",
@@ -406,18 +408,15 @@ class PySCFCalculator:
             os.environ[env_name] = str(threads)
         import ctypes
 
-        for library_name, function_name in (
-            ("libmkl_rt.so", "mkl_set_num_threads"),
-            ("libopenblas.so", "openblas_set_num_threads"),
-            ("mkl_rt", "mkl_set_num_threads"),
-            ("openblas", "openblas_set_num_threads"),
+        process = ctypes.CDLL(None)
+        for function_name in (
+            "mkl_set_num_threads",
+            "openblas_set_num_threads",
+            "goto_set_num_threads",
         ):
             try:
-                library = ctypes.CDLL(library_name)
-            except OSError:
-                continue
-            setter = getattr(library, function_name, None)
-            if setter is None:
+                setter = getattr(process, function_name)
+            except AttributeError:
                 continue
             setter.argtypes = [ctypes.c_int]
             setter.restype = None
