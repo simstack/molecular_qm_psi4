@@ -394,11 +394,10 @@ class PySCFCalculator:
         threads = int(num_threads)
         if threads < 1:
             raise ValueError(f"num_threads must be >= 1, got {num_threads!r}")
-        # Package import loads Psi4 first, which leaves BLAS/OpenMP at one
-        # thread. lib.num_threads does not move an already initialized MKL
-        # or OpenBLAS pool, and the partial Hessian contractions are numpy.
-        # Do not CDLL("libmkl_rt.so") or CDLL("libopenblas.so"): that loads a
-        # second BLAS into the Psi4 process and segfaults (exit 139).
+        # Psi4 is already imported in this process. Calling mkl_set_num_threads
+        # or openblas_set_num_threads through ctypes segfaults (exit 139), and
+        # loading libmkl_rt.so / libopenblas.so does the same. Environment
+        # variables plus PySCF's own thread setter are the safe path.
         for env_name in (
             "OMP_NUM_THREADS",
             "MKL_NUM_THREADS",
@@ -406,21 +405,6 @@ class PySCFCalculator:
             "NUMEXPR_NUM_THREADS",
         ):
             os.environ[env_name] = str(threads)
-        import ctypes
-
-        process = ctypes.CDLL(None)
-        for function_name in (
-            "mkl_set_num_threads",
-            "openblas_set_num_threads",
-            "goto_set_num_threads",
-        ):
-            try:
-                setter = getattr(process, function_name)
-            except AttributeError:
-                continue
-            setter.argtypes = [ctypes.c_int]
-            setter.restype = None
-            setter(threads)
         lib.num_threads(threads)
         lib.param.MAX_MEMORY = max_memory
         self.max_memory = max_memory
