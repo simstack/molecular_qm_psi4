@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.10.7 (2026-10-06)
+
+### Bug Fixes
+
+- Pin PySCF BLAS to one thread and OpenMP to the Slurm CPU count
+  ([`0da8654`](https://github.com/simstack/molecular_qm_psi4/commit/0da8654fcef7f5124e4c6277af8c077708d754a0))
+
+Importing the package no longer loads Psi4, so the BLAS pool is sized before NumPy and does not nest
+  inside the OpenMP team.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.6 (2026-10-05)
 
 ### Bug Fixes
