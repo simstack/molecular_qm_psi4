@@ -394,21 +394,38 @@ class PySCFCalculator:
         threads = int(num_threads)
         if threads < 1:
             raise ValueError(f"num_threads must be >= 1, got {num_threads!r}")
-        # Psi4 is already imported in this process. Calling mkl_set_num_threads
-        # or openblas_set_num_threads through ctypes segfaults (exit 139), and
-        # loading libmkl_rt.so / libopenblas.so does the same. Environment
-        # variables plus PySCF's own thread setter are the safe path.
+        import sys
+
+        if "psi4" in sys.modules:
+            raise ValueError(
+                "Psi4 is imported in this process. PySCF keeps BLAS at one thread "
+                "and OpenMP at the Slurm CPU count"
+            )
+        # Package import sets the BLAS variables to 1 before NumPy loads.
+        # Repeating that here does not resize an existing pool; it stops a
+        # later library from starting a second one on top of the OpenMP team.
         for env_name in (
-            "OMP_NUM_THREADS",
             "MKL_NUM_THREADS",
             "OPENBLAS_NUM_THREADS",
             "NUMEXPR_NUM_THREADS",
         ):
-            os.environ[env_name] = str(threads)
-        lib.num_threads(threads)
+            os.environ[env_name] = "1"
+        os.environ["OMP_NUM_THREADS"] = str(threads)
+        applied = lib.num_threads(threads)
+        if applied != threads:
+            raise ValueError(
+                f"PySCF OpenMP did not accept {threads} threads, got {applied!r}"
+            )
+        active = lib.num_threads()
+        if active != threads:
+            raise ValueError(
+                f"PySCF OpenMP is using {active} threads after requesting {threads}"
+            )
         lib.param.MAX_MEMORY = max_memory
         self.max_memory = max_memory
         self.num_threads = threads
+        if self.node_runner is not None:
+            self.node_runner.info(f"PySCF OpenMP threads={active}")
         # chdir=False keeps outputs in the task directory. Scratch itself must
         # not sit on the workdir mount (/mnt is the orchestrator NFS volume).
         scratch = None

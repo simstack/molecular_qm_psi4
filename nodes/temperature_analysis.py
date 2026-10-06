@@ -19,7 +19,6 @@ from molecular_qm_psi4.nodes.compare_conformers import (
     _pair_difference,
     _kcal_per_mol_from_hartree,
 )
-from molecular_qm_psi4.nodes.psi4_calculator import psi4_thermochemistry, _find_wavefunction_file as _find_psi4_wfn
 from molecular_qm_psi4.nodes.pyscf_calculator import pyscf_thermochemistry, _find_wavefunction_file as _find_pyscf_wfn
 from molecular_qm_psi4.util.qm_engine import QMEngine
 from simstack.core.node_runner import NodeRunner
@@ -109,8 +108,14 @@ async def temperature_analysis(
         engine = QMEngine.PYSCF if all(
             c.call_path.endswith(".pyscf_calculator") for c in calc_children
         ) else QMEngine.PSI4
-        thermo_node = pyscf_thermochemistry if engine == QMEngine.PYSCF else psi4_thermochemistry
-        find_wfn = _find_pyscf_wfn if engine == QMEngine.PYSCF else _find_psi4_wfn
+        if engine == QMEngine.PYSCF:
+            thermo_node = pyscf_thermochemistry
+            find_wfn = _find_pyscf_wfn
+        else:
+            from molecular_qm_psi4.nodes.psi4_calculator import (
+                _find_wavefunction_file as find_wfn,
+                psi4_thermochemistry as thermo_node,
+            )
         result_names = ("pyscf_result", "psi4_result", "qm_result")
 
         node_runner.info(

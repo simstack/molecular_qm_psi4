@@ -211,22 +211,48 @@ def test_pyscf_resources_use_tasks_per_node_when_tasks_is_the_default():
     assert dict_threads == 16
 
 
-def test_set_resources_sets_blas_and_omp_thread_count(monkeypatch):
+def test_set_resources_keeps_blas_at_one_and_sets_openmp(monkeypatch):
     import os
 
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
-    monkeypatch.setenv("MKL_NUM_THREADS", "1")
-    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "1")
-    monkeypatch.setenv("NUMEXPR_NUM_THREADS", "1")
-    fake_lib = SimpleNamespace(num_threads=MagicMock(), param=SimpleNamespace())
+    monkeypatch.setenv("MKL_NUM_THREADS", "8")
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "8")
+    monkeypatch.setenv("NUMEXPR_NUM_THREADS", "8")
+    fake_lib = SimpleNamespace(num_threads=MagicMock(return_value=16), param=SimpleNamespace())
     fake_pyscf = SimpleNamespace(lib=fake_lib)
     with patch.dict(sys.modules, {"pyscf": fake_pyscf, "pyscf.lib": fake_lib}):
         PySCFCalculator(MagicMock()).set_resources(1000, 16)
-    fake_lib.num_threads.assert_called_once_with(16)
+    assert fake_lib.num_threads.call_args_list[0].args == (16,)
+    assert fake_lib.num_threads.call_count == 2
     assert os.environ["OMP_NUM_THREADS"] == "16"
-    assert os.environ["MKL_NUM_THREADS"] == "16"
-    assert os.environ["OPENBLAS_NUM_THREADS"] == "16"
+    assert os.environ["MKL_NUM_THREADS"] == "1"
+    assert os.environ["OPENBLAS_NUM_THREADS"] == "1"
+    assert os.environ["NUMEXPR_NUM_THREADS"] == "1"
     assert fake_lib.param.MAX_MEMORY == 1000.0
+
+
+def test_set_resources_rejects_a_process_that_imported_psi4():
+    fake_lib = SimpleNamespace(num_threads=MagicMock(return_value=16), param=SimpleNamespace())
+    fake_pyscf = SimpleNamespace(lib=fake_lib)
+    with patch.dict(sys.modules, {"pyscf": fake_pyscf, "pyscf.lib": fake_lib, "psi4": object()}):
+        try:
+            PySCFCalculator(MagicMock()).set_resources(1000, 16)
+        except ValueError as exc:
+            assert "Psi4" in str(exc)
+        else:
+            raise AssertionError("expected ValueError when Psi4 is imported")
+
+
+def test_set_resources_rejects_an_openmp_count_other_than_requested():
+    fake_lib = SimpleNamespace(num_threads=MagicMock(return_value=1), param=SimpleNamespace())
+    fake_pyscf = SimpleNamespace(lib=fake_lib)
+    with patch.dict(sys.modules, {"pyscf": fake_pyscf, "pyscf.lib": fake_lib}):
+        try:
+            PySCFCalculator(MagicMock()).set_resources(1000, 16)
+        except ValueError as exc:
+            assert "OpenMP" in str(exc)
+        else:
+            raise AssertionError("expected ValueError when OpenMP stays at 1 thread")
 
 
 def test_pyscf_resources_require_slurm_memory_and_cpus():

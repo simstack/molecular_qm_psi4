@@ -1,4 +1,12 @@
-from molecular_qm_psi4.nodes.psi4_calculator import psi4_calculator
+import os
+
+# BLAS reads these once, on first import of NumPy. One BLAS thread plus an
+# OpenMP team of the Slurm CPU count is the PySCF layout that fills the cores
+# without nesting a second pool inside libcint.
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 from molecular_qm_psi4.nodes.pyscf_calculator import (
     pyscf_calculator,
     pyscf_optimization,
@@ -78,7 +86,6 @@ except ImportError:  # pragma: no cover
     __version__ = "0.0.0"
 
 __all__ = [
-    "psi4_calculator",
     "pyscf_calculator",
     "pyscf_optimization",
     "pyscf_thermochemistry",

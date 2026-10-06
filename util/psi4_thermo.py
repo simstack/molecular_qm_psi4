@@ -3,11 +3,6 @@ import numpy as np
 from molecular_qm_models.energy_units import MolecularEnergyUnitEnum, convert_energy_unit
 from simstack.models.simple_table import SimpleTable, SimpleTableColumnType
 
-try:
-    import psi4
-except ImportError:
-    psi4 = None
-
 from simstack.core.node_runner import NodeRunner
 from simstack.models import FloatData
 
@@ -76,6 +71,11 @@ def run_manual_thermo(wfn, energy: float, node_runner: NodeRunner) -> SimpleTabl
     """
 
     node_runner.log("Attempting to call manual thermo...")
+
+    try:
+        import psi4
+    except ImportError as exc:
+        raise ValueError("psi4 is required for manual Psi4 thermochemistry") from exc
 
     try:
         # The correct way to call vib.thermo manually

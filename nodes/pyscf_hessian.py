@@ -604,7 +604,9 @@ async def pyscf_hessian_partial_ext(
     The resource assignment rule for this node is cloud. Its Slurm memory
     sizes the aux block. PySCF threads are ``cpus_per_task`` times the task
     count (``tasks``, or ``tasks_per_node`` when ``tasks`` is the default 1).
-    That count is applied before the molecule is built.
+    That count is applied before the molecule is built. BLAS stays at one
+    thread. JK contractions go through ``pyscf.lib.einsum``, which uses the
+    OpenMP team, so the two pools do not nest.
     The aux watcher records the current memory block. After the first block
     finishes it estimates the finish time from the mean block duration and
     compares that with ``SlurmParameters.time``.

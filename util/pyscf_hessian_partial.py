@@ -216,7 +216,7 @@ def _partial_ejk_window(
     if nocc < 1:
         raise ValueError("occupied orbitals are required")
     dm0 = np.dot(mocc, mocc.T) * 2
-    mocc_2 = np.einsum("pi,i->pi", mocc, mo_occ[mo_occ > 0] ** 0.5) if with_k else None
+    mocc_2 = lib.einsum("pi,i->pi", mocc, mo_occ[mo_occ > 0] ** 0.5) if with_k else None
     if with_j:
         if rhoj1 is None or wj1 is None:
             raise ValueError("rhoj1 and wj1 are required for the Coulomb partial")
@@ -247,9 +247,9 @@ def _partial_ejk_window(
     rhok0 = np.empty((naux, nao, nocc)) if with_k else None
     for _atom, (shl0, shl1, p0, p1) in enumerate(aoslices):
         int3c = get_int3c((shl0, shl1, 0, nbas, 0, auxmol.nbas))
-        rhoj0 += np.einsum("klp,kl->p", int3c, dm0[p0:p1])
+        rhoj0 += lib.einsum("klp,kl->p", int3c, dm0[p0:p1])
         if with_k:
-            solved = solve_j2c(np.einsum("ijp,jk->pik", int3c, mocc_2).reshape(naux, -1))
+            solved = solve_j2c(lib.einsum("ijp,jk->pik", int3c, mocc_2).reshape(naux, -1))
             rhok0[:, p0:p1] = solved.reshape(naux, p1 - p0, nocc)
         int3c = None
     rhoj0 = solve_j2c(rhoj0)
@@ -257,11 +257,11 @@ def _partial_ejk_window(
     window = (0, nbas, 0, nbas, start, stop)
     get_int3c_ipip1 = _int3c_wrapper(mol, auxmol, "int3c2e_ipip1", "s1")
     int3c_ipip1 = get_int3c_ipip1(window)
-    vj1_diag = np.einsum("xijp,p->xij", int3c_ipip1, rhoj0[ao0:ao1]).reshape(3, 3, nao, nao)
+    vj1_diag = lib.einsum("xijp,p->xij", int3c_ipip1, rhoj0[ao0:ao1]).reshape(3, 3, nao, nao)
     vk1_diag = None
     if with_k:
-        tmp = np.einsum("Plj,Jj->PlJ", rhok0[ao0:ao1], mocc_2)
-        vk1_diag = np.einsum("xijp,plj->xil", int3c_ipip1, tmp).reshape(3, 3, nao, nao)
+        tmp = lib.einsum("Plj,Jj->PlJ", rhok0[ao0:ao1], mocc_2)
+        vk1_diag = lib.einsum("xijp,plj->xil", int3c_ipip1, tmp).reshape(3, 3, nao, nao)
     int3c_ipip1 = None
 
     get_int3c_ip1 = _int3c_wrapper(mol, auxmol, "int3c2e_ip1", "s1")
@@ -282,7 +282,7 @@ def _partial_ejk_window(
         # retains 3*nao*naux*nao floats and SIGKILLs a 32 GB VM (rc=137).
         window_solved = np.copy(solved[ao0:ao1])
         del solved
-        transformed = np.einsum("pykl,li->ikpy", window_solved, dm0)
+        transformed = lib.einsum("pykl,li->ikpy", window_solved, dm0)
         del window_solved
         ikp_atoms.append(transformed)
         pki_atoms.append(np.copy(transformed.transpose(2, 1, 0, 3)))
@@ -290,13 +290,13 @@ def _partial_ejk_window(
     ej = np.zeros((natm, natm, 3, 3))
     ek = np.zeros_like(ej)
     if with_j:
-        ej += np.einsum("ipx,jpy->ijxy", rho[:, ao0:ao1], weight[:, ao0:ao1]) * 4
+        ej += lib.einsum("ipx,jpy->ijxy", rho[:, ao0:ao1], weight[:, ao0:ao1]) * 4
 
     vk2buf = np.zeros((3, 3, nao, nao))
     if with_k:
         int3c_ip1 = get_int3c_ip1(window)
         loaded = np.concatenate(pki_atoms, axis=1)
-        vk2buf += np.einsum("xijp,pkjy->xyki", int3c_ip1, loaded)
+        vk2buf += lib.einsum("xijp,pkjy->xyki", int3c_ip1, loaded)
         int3c_ip1 = None
 
     response = int(hessobj.auxbasis_response)
@@ -304,13 +304,13 @@ def _partial_ejk_window(
     int3c_ip2 = get_int3c_ip2(window)
     wj_ip2 = np.zeros((naux, 3))
     if with_j:
-        wj_ip2[ao0:ao1] = np.einsum("yklp,lk->py", int3c_ip2, dm0)
+        wj_ip2[ao0:ao1] = lib.einsum("yklp,lk->py", int3c_ip2, dm0)
     wk_ip2 = None
     wk_ip2_p = None
     if with_k:
-        wk_ip2 = np.einsum("yklp,il->ipyk", int3c_ip2, dm0)
+        wk_ip2 = lib.einsum("yklp,il->ipyk", int3c_ip2, dm0)
         if response > 1:
-            wk_ip2_p = np.einsum("xuvp,ui,vj->pxij", int3c_ip2, mocc_2, mocc_2)
+            wk_ip2_p = lib.einsum("xuvp,ui,vj->pxij", int3c_ip2, mocc_2, mocc_2)
     int3c_ip2 = None
 
     get_int3c_ipvip1 = _int3c_wrapper(mol, auxmol, "int3c2e_ipvip1", "s1")
@@ -322,49 +322,49 @@ def _partial_ejk_window(
         if with_k:
             int3c_ip1 = get_int3c_ip1(atom_window)
             loaded = np.concatenate([block[p0:p1] for block in ikp_atoms], axis=1)
-            vk1 = np.einsum("xijp,ikpy->xykj", int3c_ip1, loaded)
+            vk1 = lib.einsum("xijp,ikpy->xykj", int3c_ip1, loaded)
             vk1[:, :, :, p0:p1] += vk2buf[:, :, :, p0:p1]
             int3c_ip1 = None
         int3c_ipvip1 = get_int3c_ipvip1(atom_window)
         if with_j:
-            vj1 = np.einsum("xijp,p->xji", int3c_ipvip1, rhoj0[ao0:ao1]).reshape(3, 3, nao, p1 - p0)
+            vj1 = lib.einsum("xijp,p->xji", int3c_ipvip1, rhoj0[ao0:ao1]).reshape(3, 3, nao, p1 - p0)
         else:
             vj1 = None
         if with_k:
-            tmp = np.einsum("pki,ji->pkj", rhok0[ao0:ao1], mocc_2[p0:p1])
-            vk1 = vk1 + np.einsum("xijp,pki->xjk", int3c_ipvip1, tmp).reshape(3, 3, nao, nao)
+            tmp = lib.einsum("pki,ji->pkj", rhok0[ao0:ao1], mocc_2[p0:p1])
+            vk1 = vk1 + lib.einsum("xijp,pki->xjk", int3c_ipvip1, tmp).reshape(3, 3, nao, nao)
         int3c_ipvip1 = None
         if with_j:
-            ej[i0, i0] += np.einsum("xypq,pq->xy", vj1_diag[:, :, p0:p1], dm0[p0:p1]) * 2
+            ej[i0, i0] += lib.einsum("xypq,pq->xy", vj1_diag[:, :, p0:p1], dm0[p0:p1]) * 2
         if with_k:
-            ek[i0, i0] += np.einsum("xypq,pq->xy", vk1_diag[:, :, p0:p1], dm0[p0:p1])
+            ek[i0, i0] += lib.einsum("xypq,pq->xy", vk1_diag[:, :, p0:p1], dm0[p0:p1])
         for j0 in range(i0 + 1):
             q0, q1 = aoslices[j0][2:]
             if with_j:
-                ej[i0, j0] += np.einsum("xypq,pq->xy", vj1[:, :, q0:q1], dm0[q0:q1, p0:p1]) * 2
+                ej[i0, j0] += lib.einsum("xypq,pq->xy", vj1[:, :, q0:q1], dm0[q0:q1, p0:p1]) * 2
             if with_k:
-                ek[i0, j0] += np.einsum("xypq,pq->xy", vk1[:, :, q0:q1], dm0[q0:q1])
+                ek[i0, j0] += lib.einsum("xypq,pq->xy", vk1[:, :, q0:q1], dm0[q0:q1])
         if not hessobj.auxbasis_response:
             continue
         wk1_pij = solved_ip1(shl0, shl1, p0, p1)
-        rhoj1_p = np.einsum("pxij,ji->px", wk1_pij, dm0[:, p0:p1])
+        rhoj1_p = lib.einsum("pxij,ji->px", wk1_pij, dm0[:, p0:p1])
         int3c_ip1ip2 = get_int3c_ip1ip2(atom_window) if with_j or with_k else None
         wj11 = None
         if with_j:
-            contracted = np.einsum("xijp,ji->xp", int3c_ip1ip2, dm0[:, p0:p1])
+            contracted = lib.einsum("xijp,ji->xp", int3c_ip1ip2, dm0[:, p0:p1])
             wj11 = np.zeros((contracted.shape[0], naux))
             wj11[:, ao0:ao1] = contracted
-        wj0_01 = np.einsum("ypq,q->yp", int2c_ip1, rhoj0) if with_j else None
+        wj0_01 = lib.einsum("ypq,q->yp", int2c_ip1, rhoj0) if with_j else None
         rhok_pji = None
         wk1_pji = None
         wk1_ipj = None
         rho2c = None
         if with_k:
-            rhok_p_i = np.einsum("plj,il->pji", rhok0, dm0[p0:p1])
-            rhok_pji = np.einsum("pji,Jj->pJi", rhok_p_i, mocc_2)
-            wk1_pji = np.einsum("ypq,qji->ypji", int2c_ip1, rhok_pji)
-            wk1_ipj = np.einsum("ipyk,kj->ipyj", wk_ip2[p0:p1], dm0)
-            rho2c = np.einsum("pxij,qji->xqp", wk1_pij, rhok_pji)
+            rhok_p_i = lib.einsum("plj,il->pji", rhok0, dm0[p0:p1])
+            rhok_pji = lib.einsum("pji,Jj->pJi", rhok_p_i, mocc_2)
+            wk1_pji = lib.einsum("ypq,qji->ypji", int2c_ip1, rhok_pji)
+            wk1_ipj = lib.einsum("ipyk,kj->ipyj", wk_ip2[p0:p1], dm0)
+            rho2c = lib.einsum("pxij,qji->xqp", wk1_pij, rhok_pji)
         for j_atom in range(auxslices.shape[0]):
             q0 = int(auxslices[j_atom, 2])
             q1 = int(auxslices[j_atom, 3])
@@ -375,20 +375,20 @@ def _partial_ejk_window(
             loc0 = left - ao0
             loc1 = right - ao0
             if with_j:
-                piece_j = np.einsum("xp,p->x", wj11[:, left:right], rhoj0[left:right]).reshape(3, 3)
-                piece_j -= np.einsum("yqp,q,px->xy", int2c_ip1[:, left:right], rhoj0[left:right], rhoj1_p)
-                piece_j -= np.einsum("px,yp->xy", rhoj1_p[left:right], wj0_01[:, left:right])
-                piece_j += np.einsum("px,py->xy", rhoj1_p[left:right], wj_ip2[left:right])
+                piece_j = lib.einsum("xp,p->x", wj11[:, left:right], rhoj0[left:right]).reshape(3, 3)
+                piece_j -= lib.einsum("yqp,q,px->xy", int2c_ip1[:, left:right], rhoj0[left:right], rhoj1_p)
+                piece_j -= lib.einsum("px,yp->xy", rhoj1_p[left:right], wj0_01[:, left:right])
+                piece_j += lib.einsum("px,py->xy", rhoj1_p[left:right], wj_ip2[left:right])
                 j_factor = 2.0 if response > 1 else 1.0
                 ej[i0, j_atom] += piece_j * j_factor
                 ej[j_atom, i0] += piece_j.T * j_factor
             if with_k:
-                piece_k = np.einsum(
+                piece_k = lib.einsum(
                     "xijp,pji->x", int3c_ip1ip2[:, :, :, loc0:loc1], rhok_pji[left:right]
                 ).reshape(3, 3)
-                piece_k -= np.einsum("pxij,ypji->xy", wk1_pij[left:right], wk1_pji[:, left:right])
-                piece_k -= np.einsum("xqp,yqp->xy", rho2c[:, left:right], int2c_ip1[:, left:right])
-                piece_k += np.einsum("pxij,ipyj->xy", wk1_pij[left:right], wk1_ipj[:, loc0:loc1])
+                piece_k -= lib.einsum("pxij,ypji->xy", wk1_pij[left:right], wk1_pji[:, left:right])
+                piece_k -= lib.einsum("xqp,yqp->xy", rho2c[:, left:right], int2c_ip1[:, left:right])
+                piece_k += lib.einsum("pxij,ipyj->xy", wk1_pij[left:right], wk1_ipj[:, loc0:loc1])
                 k_factor = 1.0 if response > 1 else 0.5
                 ek[i0, j_atom] += piece_k * k_factor
                 ek[j_atom, i0] += piece_k.T * k_factor
@@ -407,19 +407,19 @@ def _partial_ejk_window(
                 f"int2c2e_ipip1 has shape {getattr(int2c_ipip1, 'shape', None)}, "
                 f"expected {(9, naux, naux)}"
             )
-        int2c_ip_ip = np.einsum("xpq,qr,ysr->xyps", int2c_ip1, int2c_inv, int2c_ip1)
+        int2c_ip_ip = lib.einsum("xpq,qr,ysr->xyps", int2c_ip1, int2c_inv, int2c_ip1)
         ip1ip2 = auxmol.intor("int2c2e_ip1ip2", aosym="s1")
         if int(np.size(ip1ip2)) != 9 * naux * naux:
             raise ValueError(
                 f"int2c2e_ip1ip2 has size {np.size(ip1ip2)}, expected {9 * naux * naux}"
             )
         int2c_ip_ip = int2c_ip_ip - np.asarray(ip1ip2).reshape(3, 3, naux, naux)
-        wj0_01 = np.einsum("ypq,q->yp", int2c_ip1, rhoj0) if with_j else None
+        wj0_01 = lib.einsum("ypq,q->yp", int2c_ip1, rhoj0) if with_j else None
         rhok0_pp = None
         rho2c_0 = None
         if with_k:
-            rhok0_pp = np.einsum("plj,li->pij", rhok0, mocc_2)
-            rho2c_0 = np.einsum("pij,qji->pq", rhok0_pp, rhok0_pp)
+            rhok0_pp = lib.einsum("plj,li->pij", rhok0, mocc_2)
+            rho2c_0 = lib.einsum("pij,qji->pq", rhok0_pp, rhok0_pp)
         get_int3c_ipip2 = _int3c_wrapper(mol, auxmol, "int3c2e_ipip2", "s1")
         for i0 in range(natm):
             atom_p0 = int(auxslices[i0, 2])
@@ -432,34 +432,34 @@ def _partial_ejk_window(
             shell_right = loc.index(right)
             int3c_ipip2 = get_int3c_ipip2((0, nbas, 0, nbas, shell_left, shell_right))
             if with_j:
-                ej[i0, i0] += np.einsum(
+                ej[i0, i0] += lib.einsum(
                     "xijp,ji,p->x", int3c_ipip2, dm0, rhoj0[left:right]
                 ).reshape(3, 3)
-                ej[i0, i0] -= np.einsum(
+                ej[i0, i0] -= lib.einsum(
                     "p,xpq,q->x", rhoj0[left:right], int2c_ipip1[:, left:right], rhoj0
                 ).reshape(3, 3)
             if with_k:
-                rhok_pji = np.einsum("Pij,Jj,Ii->PJI", rhok0_pp[left:right], mocc_2, mocc_2)
-                ek[i0, i0] += 0.5 * np.einsum("xijp,pij->x", int3c_ipip2, rhok_pji).reshape(3, 3)
-                ek[i0, i0] -= 0.5 * np.einsum(
+                rhok_pji = lib.einsum("Pij,Jj,Ii->PJI", rhok0_pp[left:right], mocc_2, mocc_2)
+                ek[i0, i0] += 0.5 * lib.einsum("xijp,pij->x", int3c_ipip2, rhok_pji).reshape(3, 3)
+                ek[i0, i0] -= 0.5 * lib.einsum(
                     "pq,xpq->x", rho2c_0[left:right], int2c_ipip1[:, left:right]
                 ).reshape(3, 3)
-            ip1_metric = np.einsum("xpq,qr->xpr", int2c_ip1[:, left:right], int2c_inv)
+            ip1_metric = lib.einsum("xpq,qr->xpr", int2c_ip1[:, left:right], int2c_inv)
             rhoj1_resp = None
             rhoj0_01 = None
             rhoj0_10 = None
             if with_j:
-                rhoj1_resp = np.einsum("px,pq->xq", wj_ip2[left:right], int2c_inv[left:right])
-                rhoj0_01 = np.einsum("xp,pq->xq", wj0_01[:, left:right], int2c_inv[left:right])
-                rhoj0_10 = np.einsum("p,xpq->xq", rhoj0[left:right], ip1_metric)
+                rhoj1_resp = lib.einsum("px,pq->xq", wj_ip2[left:right], int2c_inv[left:right])
+                rhoj0_01 = lib.einsum("xp,pq->xq", wj0_01[:, left:right], int2c_inv[left:right])
+                rhoj0_10 = lib.einsum("p,xpq->xq", rhoj0[left:right], ip1_metric)
             rho2c_1 = None
             if with_k:
-                ip1_rho2c = 0.5 * np.einsum("xpq,qr->xpr", int2c_ip1[:, left:right], rho2c_0)
-                rho2c_1 = np.einsum("xrq,rp->xpq", ip1_rho2c, int2c_inv[left:right])
-                rho2c_1 = rho2c_1 + np.einsum("xrp,rq->xpq", ip1_metric, rho2c_0[left:right])
+                ip1_rho2c = 0.5 * lib.einsum("xpq,qr->xpr", int2c_ip1[:, left:right], rho2c_0)
+                rho2c_1 = lib.einsum("xrq,rp->xpq", ip1_rho2c, int2c_inv[left:right])
+                rho2c_1 = rho2c_1 + lib.einsum("xrp,rq->xpq", ip1_metric, rho2c_0[left:right])
                 int3c_ip2_atom = get_int3c_ip2((0, nbas, 0, nbas, shell_left, shell_right))
-                tmp = np.einsum("xuvr,vj,ui->xrij", int3c_ip2_atom, mocc_2, mocc_2)
-                tmp = np.einsum("xrij,qij,rp->xpq", tmp, rhok0_pp, int2c_inv[left:right])
+                tmp = lib.einsum("xuvr,vj,ui->xrij", int3c_ip2_atom, mocc_2, mocc_2)
+                tmp = lib.einsum("xrij,qij,rp->xpq", tmp, rhok0_pp, int2c_inv[left:right])
                 rho2c_1 = rho2c_1 - tmp - tmp.transpose(0, 2, 1)
                 int3c_ip2_atom = tmp = None
             for j_atom in range(natm):
@@ -468,27 +468,27 @@ def _partial_ejk_window(
                 if q0 >= q1:
                     continue
                 if with_j:
-                    piece_j = 0.5 * np.einsum(
+                    piece_j = 0.5 * lib.einsum(
                         "p,xypq,q->xy",
                         rhoj0[left:right],
                         int2c_ip_ip[:, :, left:right, q0:q1],
                         rhoj0[q0:q1],
                     )
-                    piece_j -= np.einsum("xp,yp->xy", rhoj1_resp[:, q0:q1], wj0_01[:, q0:q1])
-                    piece_j += 0.5 * np.einsum("xp,yp->xy", rhoj0_01[:, q0:q1], wj0_01[:, q0:q1])
-                    piece_j -= np.einsum(
+                    piece_j -= lib.einsum("xp,yp->xy", rhoj1_resp[:, q0:q1], wj0_01[:, q0:q1])
+                    piece_j += 0.5 * lib.einsum("xp,yp->xy", rhoj0_01[:, q0:q1], wj0_01[:, q0:q1])
+                    piece_j -= lib.einsum(
                         "yqp,q,xp->xy", int2c_ip1[:, q0:q1], rhoj0[q0:q1], rhoj1_resp
                     )
-                    piece_j += np.einsum("xp,yp->xy", rhoj0_10[:, q0:q1], wj0_01[:, q0:q1])
+                    piece_j += lib.einsum("xp,yp->xy", rhoj0_10[:, q0:q1], wj0_01[:, q0:q1])
                     ej[i0, j_atom] += piece_j
                     ej[j_atom, i0] += piece_j.T
                 if with_k:
-                    piece_k = 0.5 * np.einsum(
+                    piece_k = 0.5 * lib.einsum(
                         "pq,xypq->xy",
                         rho2c_0[left:right, q0:q1],
                         int2c_ip_ip[:, :, left:right, q0:q1],
                     )
-                    piece_k += np.einsum("xpq,ypq->xy", rho2c_1[:, q0:q1], int2c_ip1[:, q0:q1])
+                    piece_k += lib.einsum("xpq,ypq->xy", rho2c_1[:, q0:q1], int2c_ip1[:, q0:q1])
                     ek[i0, j_atom] += piece_k * 0.5
                     ek[j_atom, i0] += piece_k.T * 0.5
             int3c_ipip2 = None
@@ -594,6 +594,7 @@ def _response2_quadratic(auxmol, wj_ip2, wk_ip2, with_j, with_k):
     matching vector is required when the flag is true and rejected when it is
     false. Terms that are linear in a single aux window are not included.
     """
+    from pyscf import lib
     from pyscf.df.grad.rhf import LINEAR_DEP_THRESHOLD
     from pyscf.df.hessian.rhf import _pinv
 
@@ -637,18 +638,18 @@ def _response2_quadratic(auxmol, wj_ip2, wk_ip2, with_j, with_k):
         p1 = int(auxslices[i0, 3])
         if p0 >= p1:
             continue
-        rhoj1 = np.einsum("px,pq->xq", wj[p0:p1], int2c_inv[p0:p1]) if with_j else None
+        rhoj1 = lib.einsum("px,pq->xq", wj[p0:p1], int2c_inv[p0:p1]) if with_j else None
         for j0 in range(natm):
             q0 = int(auxslices[j0, 2])
             q1 = int(auxslices[j0, 3])
             if q0 >= q1:
                 continue
             if with_j:
-                piece_j = 0.5 * np.einsum("xp,py->xy", rhoj1[:, q0:q1], wj[q0:q1])
+                piece_j = 0.5 * lib.einsum("xp,py->xy", rhoj1[:, q0:q1], wj[q0:q1])
                 ej[i0, j0] += piece_j
                 ej[j0, i0] += piece_j.T
             if with_k:
-                piece_k = 0.5 * np.einsum(
+                piece_k = 0.5 * lib.einsum(
                     "pxij,pq,qyij->xy", wk[p0:p1], int2c_inv[p0:p1, q0:q1], wk[q0:q1]
                 )
                 ek[i0, j0] += piece_k * 0.5
@@ -761,6 +762,7 @@ def partial_xc_and_e1(hessobj, mo_energy, mo_coeff, mo_occ, max_memory_mb):
     cloud task. VV10 is not included.
     """
     _require_numpy()
+    from pyscf import lib
     from pyscf.hessian import rhf as rhf_hess
     from pyscf.hessian import rks as rks_hess
 
@@ -779,7 +781,7 @@ def partial_xc_and_e1(hessobj, mo_energy, mo_coeff, mo_occ, max_memory_mb):
         )
     mocc = mo_coeff[:, mo_occ > 0]
     dm0 = np.dot(mocc, mocc.T) * 2
-    dme0 = np.einsum("pi,qi,i->pq", mocc, mocc, mo_energy[mo_occ > 0]) * 2
+    dme0 = lib.einsum("pi,qi,i->pq", mocc, mocc, mo_energy[mo_occ > 0]) * 2
     aoslices = mol.aoslice_by_atom()
     s1aa, s1ab, _s1a = rhf_hess.get_ovlp(mol)
     hcore_deriv = hessobj.hcore_generator(mol)
@@ -788,14 +790,14 @@ def partial_xc_and_e1(hessobj, mo_energy, mo_coeff, mo_occ, max_memory_mb):
     vxc = rks_hess._get_vxc_deriv2(hessobj, mo_coeff, mo_occ, budget)
     for i0 in range(natm):
         _shl0, _shl1, p0, p1 = aoslices[i0]
-        de2[i0, i0] -= np.einsum("xypq,pq->xy", s1aa[:, :, p0:p1], dme0[p0:p1]) * 2
-        de2[i0, i0] += np.einsum("xypq,pq->xy", veff_diag[:, :, p0:p1], dm0[p0:p1]) * 2
+        de2[i0, i0] -= lib.einsum("xypq,pq->xy", s1aa[:, :, p0:p1], dme0[p0:p1]) * 2
+        de2[i0, i0] += lib.einsum("xypq,pq->xy", veff_diag[:, :, p0:p1], dm0[p0:p1]) * 2
         veff = vxc[i0]
         for j0 in range(i0 + 1):
             q0, q1 = aoslices[j0][2:]
-            de2[i0, j0] -= np.einsum("xypq,pq->xy", s1ab[:, :, p0:p1, q0:q1], dme0[p0:p1, q0:q1]) * 2
-            de2[i0, j0] += np.einsum("xypq,pq->xy", hcore_deriv(i0, j0), dm0)
-            de2[i0, j0] += np.einsum("xypq,pq->xy", veff[:, :, q0:q1], dm0[q0:q1]) * 2
+            de2[i0, j0] -= lib.einsum("xypq,pq->xy", s1ab[:, :, p0:p1, q0:q1], dme0[p0:p1, q0:q1]) * 2
+            de2[i0, j0] += lib.einsum("xypq,pq->xy", hcore_deriv(i0, j0), dm0)
+            de2[i0, j0] += lib.einsum("xypq,pq->xy", veff[:, :, q0:q1], dm0[q0:q1]) * 2
     _symmetrize(de2)
     if de2.shape != (natm, natm, 3, 3):
         raise ValueError(f"XC partial has shape {de2.shape}")
