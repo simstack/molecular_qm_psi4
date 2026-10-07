@@ -1,15 +1,7 @@
 import asyncio
-from keyword import kwlist
-from pprint import pprint
 
-from pandas.core.window.doc import kwargs_scipy
-
-from molecular_qm_psi4 import psi4_calculator
-from molecular_qm_psi4.util.psi4_result import Psi4Result
-from molecular_qm_psi4.util.psi4_calculator import Psi4Calculator
+from molecular_qm_psi4.nodes.pyscf_calculator import pyscf_calculator
 from molecular_qm_models import Molecule, Atom, QMInput, QMMethod, Functional, BasisSet
-import pytest
-import numpy as np
 
 from simstack.core.context import context
 from simstack.models import Parameters
@@ -35,19 +27,19 @@ async def psi4_thermochemistry_testing():
     )
 
     parameters = Parameters(resource="local", in_docker=True, force_rerun=True)
-    psi4_result = await psi4_calculator(qm_input,parameters=parameters)
+    qm_result = await pyscf_calculator(qm_input,parameters=parameters)
 
-    if getattr(psi4_result, "thermodynamics_table", None) is not None:
+    if getattr(qm_result, "thermodynamics_table", None) is not None:
         print("Thermo table found:")
-        assert psi4_result.thermodynamics_table is not None
-        for row in psi4_result.thermodynamics_table.row:
+        assert qm_result.thermodynamics_table is not None
+        for row in qm_result.thermodynamics_table.row:
             for key, value in row.items():
                 print(f"{key}: {value}", end=" ")
             print(" ")
-    elif getattr(psi4_result, "thermo_result", None) is not None:
+    elif getattr(qm_result, "thermo_result", None) is not None:
         print("Legacy thermo_result found:")
-        assert psi4_result.thermo_result.thermodynamics_table is not None
-        for row in psi4_result.thermo_result.thermodynamics_table.row:
+        assert qm_result.thermo_result.thermodynamics_table is not None
+        for row in qm_result.thermo_result.thermodynamics_table.row:
             for key, value in row.items():
                 print(f"{key}: {value}", end=" ")
             print(" ")

@@ -1,7 +1,7 @@
 import asyncio
 
 from molecular_qm_models import QMInput, BasisSet, Functional, Molecule
-from molecular_qm_psi4 import psi4_calculator
+from molecular_qm_psi4.nodes.pyscf_calculator import pyscf_calculator
 from simstack.core.context import context
 from simstack.models import Parameters
 
@@ -20,7 +20,7 @@ async def main():
     )
 
     parameters = Parameters(resource="local", in_docker=True, force_rerun=True)
-    result = await psi4_calculator(qm_input, parameters=parameters)
+    result = await pyscf_calculator(qm_input, parameters=parameters)
     print(result)
 
 
