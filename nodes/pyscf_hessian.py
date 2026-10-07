@@ -710,17 +710,6 @@ async def pyscf_hessian_partial_ext(
             node_runner.info(f"Stored NLC partial for task {hessian_task_id}")
             return node_runner.succeed()
         auxmol = attach_df_auxmol(mf, mol)
-        from pyscf import lib
-
-        nocc = int((mf.mo_occ > 0).sum())
-        blk = largest_aux_blk(
-            int(mol.nao),
-            int(auxmol.nao),
-            nocc,
-            budget_mb,
-            float(lib.current_memory()[0]),
-        )
-        blocks = shell_blocks(auxmol.ao_loc, shell_start, shell_end, blk)
         rho_rows = []
         weight_rows = []
         for atom_index in range(n_atoms):
@@ -735,6 +724,23 @@ async def pyscf_hessian_partial_ext(
             weight_rows.append(arrays["wj1"])
         rhoj1 = np.stack(rho_rows, axis=0)
         wj1 = np.stack(weight_rows, axis=0)
+        # The per-atom arrays are copies. Drop them before sizing the aux block
+        # so the resident set matches the memory held for the contractions.
+        del rho_rows, weight_rows
+        from pyscf import lib
+
+        nocc = int((mf.mo_occ > 0).sum())
+        blk = largest_aux_blk(
+            int(mol.nao),
+            int(auxmol.nao),
+            nocc,
+            budget_mb,
+            float(lib.current_memory()[0]),
+        )
+        node_runner.info(
+            f"JK aux block size {blk} functions at max_memory={float(budget_mb)} MB"
+        )
+        blocks = shell_blocks(auxmol.ao_loc, shell_start, shell_end, blk)
         pending_blocks = []
         for block_start, block_end in blocks:
             matches = [
@@ -820,6 +826,7 @@ async def pyscf_hessian_partial_ext(
                     block_end,
                     rhoj1,
                     wj1,
+                    blk,
                 )
                 response_arrays = {}
                 if wj_ip2 is not None:

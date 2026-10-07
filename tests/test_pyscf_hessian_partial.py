@@ -97,7 +97,7 @@ def test_partial_chunks_match_pyscf_partial_hess_elec():
         response_blocks = []
         for shell0, shell1 in shell_blocks(aux_loc, 0, len(aux_loc) - 1, 8):
             piece, wj, wk, wk_lr = partial_jk_span(
-                hessian, mf.mo_energy, mf.mo_coeff, mf.mo_occ, shell0, shell1, rhoj1, wj1
+                hessian, mf.mo_energy, mf.mo_coeff, mf.mo_occ, shell0, shell1, rhoj1, wj1, 8
             )
             total += piece
             arrays = {}

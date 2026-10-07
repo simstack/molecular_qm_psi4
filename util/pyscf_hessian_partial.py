@@ -499,24 +499,25 @@ def _partial_ejk_window(
     return ej, ek, wj_slice, wk_slice
 
 
-def partial_jk_span(hessobj, mo_energy, mo_coeff, mo_occ, shell0, shell1, rhoj1, wj1):
+def partial_jk_span(
+    hessobj, mo_energy, mo_coeff, mo_occ, shell0, shell1, rhoj1, wj1, block_limit
+):
     """Additive JK piece of one aux-shell range, without the one-electron term.
 
     Range-separated hybrids run the long-range exchange again under
     ``range_coulomb(omega)``, matching ``pyscf.df.hessian.rks.partial_hess_elec``.
-    The block size is fixed from the memory in use before either pass allocates
-    the 9-component aux tensor. The returned Coulomb and exchange vectors are
-    the window's second-order RI contractions. They are None when
-    ``auxbasis_response`` is 1. The quadratic cross terms that couple two
-    windows are not included; :func:`partial_response2_cross` adds those once
-    the windows have been stacked.
+    ``block_limit`` is the aux-function count that fits once the Coulomb
+    vectors are resident. Both passes use that same count. Re-measuring memory
+    here shrinks it by the few megabytes allocated since the shells were
+    grouped, and a window on that boundary is rejected. The returned Coulomb
+    and exchange vectors are the window's second-order RI contractions. They
+    are None when ``auxbasis_response`` is 1. The quadratic cross terms that
+    couple two windows are not included; :func:`partial_response2_cross` adds
+    those once the windows have been stacked.
     """
     _require_numpy()
-    from pyscf import lib
 
-    from molecular_qm_psi4.util.pyscf_calculator import largest_aux_blk
-
-    mol, mf, auxmol, budget = _closed_shell_df_rks(hessobj)
+    mol, mf, _, _ = _closed_shell_df_rks(hessobj)
     ni = mf._numint
     omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, spin=mol.spin)
     if omega is None or alpha is None or hyb is None:
@@ -524,14 +525,10 @@ def partial_jk_span(hessobj, mo_energy, mo_coeff, mo_occ, shell0, shell1, rhoj1,
     hybrid = bool(ni.libxc.is_hybrid_xc(mf.xc))
     if mo_occ is None:
         raise ValueError("mo_occ is required")
-    nocc = int((np.asarray(mo_occ) > 0).sum())
-    block_limit = largest_aux_blk(
-        int(mol.nao),
-        int(auxmol.nao),
-        nocc,
-        budget,
-        float(lib.current_memory()[0]),
-    )
+    if isinstance(block_limit, bool) or not isinstance(block_limit, int):
+        raise ValueError(f"aux block limit must be an int, got {block_limit!r}")
+    if block_limit < 1:
+        raise ValueError(f"aux block limit must be positive, got {block_limit!r}")
     _ej, ek, wj_ip2, wk_ip2 = _partial_ejk_window(
         hessobj,
         mo_energy,
