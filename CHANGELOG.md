@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.10.8 (2026-10-07)
+
+### Bug Fixes
+
+- Size the JK aux block after the Coulomb vectors are resident
+  ([`b2654dc`](https://github.com/simstack/molecular_qm_psi4/commit/b2654dc12f5a3bd908a896d2fb7107bae7b72da3))
+
+Re-measuring memory inside the contraction rejected a shell window that was one function over the
+  new limit.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.7 (2026-10-06)
 
 ### Bug Fixes
