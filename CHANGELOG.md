@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.10.9 (2026-10-07)
+
+### Bug Fixes
+
+- Stop test scripts from importing psi4_calculator
+  ([`7721534`](https://github.com/simstack/molecular_qm_psi4/commit/77215344bb33c37a3dad10dfae7ba423172aa44a))
+
+create_model_table loads every testing module, and the package no longer exports that name.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.8 (2026-10-07)
 
 ### Bug Fixes
