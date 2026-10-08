@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.10.10 (2026-10-08)
+
+### Bug Fixes
+
+- Bound the Hessian make_h1 aux block so a 32 GB container is not SIGKILLed
+  ([`6ad64fc`](https://github.com/simstack/molecular_qm_psi4/commit/6ad64fc4fe11ab131491363eb1c850bd1023e088))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.9 (2026-10-07)
 
 ### Bug Fixes
