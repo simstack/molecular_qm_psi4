@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v0.10.11 (2026-10-08)
+
+### Bug Fixes
+
+- Give large Hessians a fixed memory reserve and record what they need
+  ([`f7d0910`](https://github.com/simstack/molecular_qm_psi4/commit/f7d09109b20604b89e13b18cc259b8c452a8f487))
+
+A 15 percent cut of a 125 GB allocation rejected a density-fitted Hessian that fits after a fixed OS
+  and Docker reserve. Store atom count, basis, functional, the PySCF budget, and the estimated peak
+  for the parent and each child.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.10 (2026-10-08)
 
 ### Bug Fixes
