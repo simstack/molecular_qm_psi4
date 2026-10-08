@@ -89,6 +89,106 @@ def h1_ip1_block(nao, naux, nocc, max_memory_mb, reserved_mb, with_k) -> int:
     return blk
 
 
+def make_h1_memory(mf, mol, max_memory) -> dict:
+    """Peak RAM of PySCF's DF RKS ``make_h1`` at its 480-function aux block.
+
+    The XC derivative ``(natm, 3, nao, nao)`` is still live when ``_gen_jk``
+    allocates that same shape for every atom and ``int3c2e_ip1`` of shape
+    ``(3, nao, nao, blk)``. ``blk`` is capped at 480, and a hybrid
+    ``lib.einsum`` copies the 3-center tensor. A partial-Hessian estimate that
+    shrinks ``blk`` to fit the budget does not describe this peak. A 32 GB
+    atom batch dies here with SIGKILL (-9) while the heartbeat still says
+    ``make_h1``.
+    """
+    if max_memory is None:
+        raise ValueError("max_memory is required")
+    budget = float(max_memory)
+    if budget <= 0:
+        raise ValueError(f"max_memory must be positive, got {max_memory!r}")
+    if mol is None or getattr(mol, "natm", None) is None:
+        raise ValueError("molecule natm is required to estimate make_h1 memory")
+    nao = getattr(mol, "nao", None)
+    if nao is None:
+        raise ValueError("molecule nao is required to estimate make_h1 memory")
+    natm = int(mol.natm)
+    orbitals = int(nao)
+    if natm < 1 or orbitals < 1:
+        raise ValueError(f"molecule natm={natm} nao={orbitals} cannot estimate make_h1")
+    xc = getattr(mf, "xc", None)
+    if not xc:
+        raise ValueError("functional is required to estimate make_h1 memory")
+    numint = getattr(mf, "_numint", None)
+    libxc = getattr(numint, "libxc", None)
+    is_hybrid = getattr(libxc, "is_hybrid_xc", None)
+    if not callable(is_hybrid):
+        raise ValueError("numerical integrator is required to estimate make_h1 memory")
+    with_k = is_hybrid(xc)
+    if np is not None and isinstance(with_k, np.bool_):
+        with_k = bool(with_k)
+    if not isinstance(with_k, bool):
+        raise ValueError(f"hybrid flag for xc {xc!r} must be a bool, got {with_k!r}")
+    mo_occ = getattr(mf, "mo_occ", None)
+    if mo_occ is None:
+        raise ValueError("mo_occ is required to estimate make_h1 memory")
+    if isinstance(mo_occ, (list, tuple)) or getattr(mo_occ, "ndim", 1) > 1:
+        nocc = int(sum(int((occ > 0).sum()) for occ in mo_occ))
+    else:
+        nocc = int((mo_occ > 0).sum())
+    if nocc < 1:
+        raise ValueError("occupied orbitals are required to estimate make_h1 memory")
+    with_df = getattr(mf, "with_df", None)
+    if with_df is None:
+        raise ValueError("density fitting is required to estimate make_h1 memory")
+    auxmol = getattr(with_df, "auxmol", None)
+    if auxmol is None:
+        from molecular_qm_psi4.util.pyscf_calculator import attach_df_auxmol
+
+        auxmol = attach_df_auxmol(mf, mol)
+    naux = int(auxmol.nao)
+    if naux < 1:
+        raise ValueError("aux basis is required to estimate make_h1 memory")
+    blk = _PYSCF_AUX_BLOCK if naux > _PYSCF_AUX_BLOCK else naux
+    nao2 = orbitals * orbitals
+    h1ao_mb = natm * 3 * nao2 * 8 / 1e6
+    int3c_mb = 3 * nao2 * blk * 8 / 1e6
+    # Hybrid exchange passes the whole int3c block through lib.einsum, which
+    # copies that operand. Pure DFT only contracts density slices of it.
+    copy_mb = int3c_mb if with_k else 0.0
+    rhok0_mb = naux * orbitals * nocc * 8 / 1e6 if with_k else 0.0
+    int2c_mb = 3 * naux * naux * 8 / 1e6
+    coef_mb = blk * nao2 * 8 / 1e6
+    vk1_mb = 3 * nao2 * 8 / 1e6
+    current_mb = 0.0
+    try:
+        from pyscf import lib
+
+        current_mb = float(lib.current_memory()[0])
+    except Exception:
+        current_mb = 0.0
+    required_mb = (
+        h1ao_mb
+        + h1ao_mb
+        + int3c_mb
+        + copy_mb
+        + rhok0_mb
+        + int2c_mb
+        + coef_mb
+        + vk1_mb
+        + _H1_OVERHEAD_MB
+        + current_mb
+    )
+    return {
+        "naux": naux,
+        "nao": orbitals,
+        "nocc": nocc,
+        "blk": blk,
+        "required_mb": required_mb,
+        "fits": required_mb <= budget,
+        "density_fit": True,
+        "with_k": with_k,
+    }
+
+
 def _atom_indexes(atom_indexes, natm):
     if atom_indexes is None:
         raise ValueError("atom indexes are required")

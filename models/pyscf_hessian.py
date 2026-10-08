@@ -92,9 +92,13 @@ class PySCFHessianMemoryRecord(Model):
     recorded the row. ``scope`` is ``df_hessian``, an atom span such as
     ``atoms 20-39``, or a partial span such as ``aux 0:400``.
 
-    ``allocated_memory_mb`` is the PySCF ``max_memory`` budget. ``required_memory_mb``
-    is the density-fitted Hessian peak from ``df_hessian_memory`` at that budget
-    (the figure compared with ``max_memory`` before a batch starts).
+    ``allocated_memory_mb`` is the PySCF ``max_memory`` budget. For the parent
+    and a partial child, ``required_memory_mb`` is the density-fitted partial
+    peak from ``df_hessian_memory``. For an atom batch it is the ``make_h1``
+    peak at PySCF's 480-function aux block: the XC derivative, a Coulomb
+    buffer for every atom, ``int3c2e_ip1``, and the hybrid einsum copy. That
+    is the allocation that SIGKILLs a 32 GB atom VM. Shrinking the block so
+    the partial estimate fits does not reduce this peak.
     """
 
     field_name: str = "PySCFHessianMemoryRecord"

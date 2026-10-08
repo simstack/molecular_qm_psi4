@@ -6,6 +6,15 @@ import pytest
 
 from molecular_qm_psi4.nodes.pyscf_hessian import record_hessian_memory
 from molecular_qm_psi4.util.pyscf_calculator import df_hessian_memory
+from molecular_qm_psi4.util.pyscf_hessian_h1 import make_h1_memory
+
+
+class _Libxc:
+    @staticmethod
+    def is_hybrid_xc(xc):
+        if not isinstance(xc, str) or not xc:
+            raise ValueError(f"functional is required, got {xc!r}")
+        return xc.lower() == "pbe0"
 
 
 class _Database:
@@ -29,7 +38,9 @@ def _mean_field(allocated, naux=2058, nao=1188, nocc=80):
     mol = SimpleNamespace(natm=42, nao=nao)
     mf = SimpleNamespace(
         max_memory=float(allocated),
+        xc="pbe0",
         mo_occ=occupation,
+        _numint=SimpleNamespace(libxc=_Libxc),
         with_df=SimpleNamespace(auxmol=SimpleNamespace(nao=naux)),
     )
     return mol, mf
@@ -90,7 +101,7 @@ def test_parent_records_basis_functional_and_the_df_peak(monkeypatch):
 def test_child_records_its_own_task_and_atom_span(monkeypatch):
     allocated = 27904.0
     mol, mf = _mean_field(allocated)
-    expected = df_hessian_memory(mf, mol, allocated)
+    expected = make_h1_memory(mf, mol, allocated)
     database = _save(monkeypatch)
 
     record = asyncio.run(
@@ -121,6 +132,8 @@ def test_child_records_its_own_task_and_atom_span(monkeypatch):
     assert record.functional == "pbe0"
     assert record.allocated_memory_mb == allocated
     assert record.required_memory_mb == pytest.approx(expected["required_mb"], abs=1)
+    assert record.aux_blk == 480
+    assert record.required_memory_mb > 32000
     assert record.fits is False
 
 

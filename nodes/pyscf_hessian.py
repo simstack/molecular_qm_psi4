@@ -37,7 +37,7 @@ from molecular_qm_psi4.util.pyscf_hessian_analytical import (
     contract_h1ao_mo1,
     slurm_time_limit_seconds,
 )
-from molecular_qm_psi4.util.pyscf_hessian_h1 import make_df_rks_h1
+from molecular_qm_psi4.util.pyscf_hessian_h1 import make_df_rks_h1, make_h1_memory
 from molecular_qm_psi4.util.pyscf_hessian_partial import (
     aux_blocks_cover,
     aux_shell_groups,
@@ -341,7 +341,13 @@ async def record_hessian_memory(
         raise ValueError("basis set is required")
     if not functional:
         raise ValueError("functional is required")
-    info = df_hessian_memory(mf, mol, allocated)
+    # Atom batches die in make_h1, which holds the XC derivative, a Coulomb
+    # buffer for every atom, and a 480-function int3c2e_ip1 block. That peak
+    # is not the partial-Hessian ipip1 estimate.
+    if str(scope).startswith("atoms "):
+        info = make_h1_memory(mf, mol, allocated)
+    else:
+        info = df_hessian_memory(mf, mol, allocated)
     if not info["density_fit"]:
         raise ValueError("density fitting is required to record Hessian memory")
     record = PySCFHessianMemoryRecord(
@@ -365,7 +371,8 @@ async def record_hessian_memory(
     node_runner.info(
         f"Hessian memory {node_name} {scope}: "
         f"n_atoms={record.n_atoms}, basis={basis}, functional={functional}, "
-        f"allocated {allocated:.0f} MB, required {record.required_memory_mb:.0f} MB"
+        f"allocated {allocated:.0f} MB, required {record.required_memory_mb:.0f} MB "
+        f"at aux block {record.aux_blk}"
     )
     return record
 

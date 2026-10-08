@@ -1,6 +1,38 @@
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 
-from molecular_qm_psi4.util.pyscf_hessian_h1 import h1_ip1_block
+from molecular_qm_psi4.util.pyscf_hessian_h1 import h1_ip1_block, make_h1_memory
+
+
+class _Libxc:
+    @staticmethod
+    def is_hybrid_xc(xc):
+        if not isinstance(xc, str) or not xc:
+            raise ValueError(f"functional is required, got {xc!r}")
+        return xc.lower() in {"pbe0", "b3lyp", "cam-b3lyp"}
+
+
+def test_pbe0_make_h1_480_block_exceeds_a_32gb_container():
+    # def2-TZVPP-sized PBE0: XC derivative and the all-atom Coulomb buffer stay
+    # live while int3c2e_ip1 at blk=480 is allocated and copied. That peak is
+    # what SIGKILLed the 32 GB atom batch, and it is above both 27200 MB and
+    # the 32000 MB cgroup.
+    occupation = np.zeros(104)
+    occupation[:100] = 2.0
+    mol = SimpleNamespace(natm=40, nao=1600)
+    mf = SimpleNamespace(
+        xc="pbe0",
+        mo_occ=occupation,
+        _numint=SimpleNamespace(libxc=_Libxc),
+        with_df=SimpleNamespace(auxmol=SimpleNamespace(nao=3000)),
+    )
+    info = make_h1_memory(mf, mol, 27200)
+    assert info["blk"] == 480
+    assert info["with_k"] is True
+    assert info["required_mb"] > 32000
+    assert info["fits"] is False
 
 
 def test_def2_tzvpp_block_is_below_pyscf_480():
