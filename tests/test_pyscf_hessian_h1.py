@@ -1,0 +1,84 @@
+import pytest
+
+from molecular_qm_psi4.util.pyscf_hessian_h1 import h1_ip1_block
+
+
+def test_def2_tzvpp_block_is_below_pyscf_480():
+    # 2 * (3 + 1) * nao^2 * 8 plus the hybrid slice. 480 of those exceed 32 GB.
+    blk = h1_ip1_block(1600, 4000, 220, 27200, 10000, True)
+    assert blk == 101
+    assert blk < 480
+
+
+def test_block_is_capped_by_the_aux_dimension():
+    assert h1_ip1_block(10, 20, 4, 8000, 100, True) == 20
+
+
+def test_one_aux_function_that_does_not_fit_raises():
+    with pytest.raises(ValueError, match="does not fit"):
+        h1_ip1_block(8000, 8000, 1000, 27200, 26000, True)
+
+
+def test_block_size_rejects_missing_memory():
+    with pytest.raises(ValueError, match="max_memory"):
+        h1_ip1_block(10, 20, 4, 0, 0, True)
+    with pytest.raises(ValueError, match="reserved_mb"):
+        h1_ip1_block(10, 20, 4, 8000, -1, True)
+    with pytest.raises(ValueError, match="with_k"):
+        h1_ip1_block(10, 20, 4, 8000, 100, 1)
+
+
+def _water(xc):
+    pytest.importorskip("pyscf")
+    from pyscf import dft, gto
+
+    mol = gto.M(atom="O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24", basis="sto-3g", verbose=0)
+    mf = dft.RKS(mol).density_fit()
+    mf.xc = xc
+    mf.conv_tol = 1e-10
+    mf.kernel()
+    assert mf.converged
+    hessian = mf.Hessian()
+    hessian.max_memory = 4000
+    return mf, hessian
+
+
+def _assert_same_h1(reference, actual, atoms):
+    import numpy as np
+
+    for atom in atoms:
+        assert actual[atom] is not None
+        np.testing.assert_allclose(actual[atom], reference[atom], rtol=1e-7, atol=1e-7)
+
+
+def test_make_h1_matches_pyscf_for_pbe0_and_a_subset():
+    mf, hessian = _water("pbe0")
+    from molecular_qm_psi4.util.pyscf_hessian_h1 import make_df_rks_h1
+
+    reference = hessian.make_h1(mf.mo_coeff, mf.mo_occ, None, [1, 2])
+    actual = make_df_rks_h1(hessian, mf.mo_coeff, mf.mo_occ, [1, 2], 4000)
+    _assert_same_h1(reference, actual, [1, 2])
+    assert actual[0] is None
+
+
+def test_blocked_make_h1_matches_pyscf_for_camb3lyp():
+    mf, hessian = _water("camb3lyp")
+    import molecular_qm_psi4.util.pyscf_hessian_h1 as h1_mod
+    from molecular_qm_psi4.util.pyscf_hessian_h1 import make_df_rks_h1
+
+    from molecular_qm_psi4.util.pyscf_hessian_partial import shell_blocks
+
+    aux_loc = mf.with_df.auxmol.ao_loc
+    widest = max(int(aux_loc[i + 1]) - int(aux_loc[i]) for i in range(len(aux_loc) - 1))
+    assert len(shell_blocks(aux_loc, 0, len(aux_loc) - 1, widest)) > 1
+    real_block = h1_mod.h1_ip1_block
+    real_piece = h1_mod._wj_in_one_piece
+    h1_mod.h1_ip1_block = lambda *args, **kwargs: min(widest, real_block(*args, **kwargs))
+    h1_mod._wj_in_one_piece = lambda *args, **kwargs: False
+    try:
+        reference = hessian.make_h1(mf.mo_coeff, mf.mo_occ)
+        actual = make_df_rks_h1(hessian, mf.mo_coeff, mf.mo_occ, range(mf.mol.natm), 4000)
+    finally:
+        h1_mod.h1_ip1_block = real_block
+        h1_mod._wj_in_one_piece = real_piece
+    _assert_same_h1(reference, actual, range(mf.mol.natm))

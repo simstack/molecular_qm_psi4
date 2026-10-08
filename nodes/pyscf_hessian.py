@@ -33,6 +33,7 @@ from molecular_qm_psi4.util.pyscf_hessian_analytical import (
     contract_h1ao_mo1,
     slurm_time_limit_seconds,
 )
+from molecular_qm_psi4.util.pyscf_hessian_h1 import make_df_rks_h1
 from molecular_qm_psi4.util.pyscf_hessian_partial import (
     aux_blocks_cover,
     aux_shell_groups,
@@ -491,6 +492,7 @@ async def pyscf_hessian_for_atoms(
                     opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
                 )
             hessian = require_df_rks_hessian(mf)
+            hessian.max_memory = float(budget_mb)
             node_runner.info(
                 f"Building AO derivative integrals for atoms {pending} "
                 f"of task {hessian_task_id}"
@@ -501,7 +503,16 @@ async def pyscf_hessian_for_atoms(
                 interval_s=_HEARTBEAT_INTERVAL_S,
                 task_id=heartbeat_task_id,
             ):
-                h1ao = hessian.make_h1(mf.mo_coeff, mf.mo_occ, None, pending)
+                # PySCF make_h1 keeps a 480-function int3c2e_ip1 block and copies
+                # it. That SIGKILLs (-9) a 32 GB container on def2-TZVPP.
+                h1ao = make_df_rks_h1(
+                    hessian,
+                    mf.mo_coeff,
+                    mf.mo_occ,
+                    pending,
+                    budget_mb,
+                    log=node_runner.info,
+                )
             # make_h1's range_coulomb caches an RSH DF object that shares the
             # full-range auxmol, then restores auxmol.omega to 0. CPHF get_jk
             # rebuilds with_df.auxmol, and the next get_k asserts the stale
