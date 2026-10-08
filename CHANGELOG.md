@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v0.10.12 (2026-10-08)
+
+### Bug Fixes
+
+- Record the make_h1 peak for Hessian atom batches
+  ([`c8ba5e5`](https://github.com/simstack/molecular_qm_psi4/commit/c8ba5e51120a4ebf7d049b990ef22130378a735d))
+
+A 32 GB atom VM is SIGKILLed while make_h1 holds the XC derivative, the all-atom Coulomb buffer, and
+  a 480-function int3c2e_ip1 block. The partial-Hessian estimate shrinks that block and understates
+  the memory the batch needs.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.11 (2026-10-08)
 
 ### Bug Fixes
