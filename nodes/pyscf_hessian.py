@@ -12,6 +12,7 @@ from molecular_qm_psi4.models.pyscf_hessian import (
     PySCFHessianAtomContribution,
     PySCFHessianAtomsInput,
     PySCFHessianInput,
+    PySCFHessianMemoryRecord,
     PySCFHessianPartialContribution,
     PySCFHessianPartialInput,
 )
@@ -25,7 +26,10 @@ from molecular_qm_psi4.util.process_heartbeat import ProcessHeartbeat, write_blo
 from molecular_qm_psi4.util.pyscf_calculator import (
     PySCFCalculator,
     attach_df_auxmol,
+    df_hessian_memory,
     largest_aux_blk,
+    pyscf_basis_name,
+    pyscf_functional_name,
 )
 from molecular_qm_psi4.util.pyscf_hessian_analytical import (
     analytical_hessian_plan,
@@ -268,6 +272,104 @@ async def store_partial_contribution(
     return record
 
 
+_HESSIAN_MEMORY_NODES = {
+    "pyscf_hessian",
+    "pyscf_hessian_for_atoms",
+    "pyscf_hessian_for_atoms_ext",
+    "pyscf_hessian_partial_ext",
+}
+
+
+async def record_hessian_memory(
+    node_runner,
+    kwargs,
+    hessian_task_id,
+    qm_input,
+    mol,
+    mf,
+    allocated_memory_mb,
+    scope,
+):
+    """Persist atom count, basis, functional, the PySCF budget, and the DF peak."""
+    db = context.db
+    if db is None:
+        raise ValueError("database is required to record Hessian memory")
+    if node_runner is None:
+        raise ValueError("node_runner is required to record Hessian memory")
+    if hessian_task_id is None or not str(hessian_task_id).strip():
+        raise ValueError("hessian_task_id is required")
+    if kwargs is None:
+        raise ValueError("kwargs are required to record Hessian memory")
+    task_id = kwargs.get("task_id")
+    if task_id is None:
+        task_id = getattr(node_runner, "task_id", None)
+    if task_id is None or not str(task_id).strip():
+        raise ValueError("task_id is required to record Hessian memory")
+    call_path = kwargs.get("call_path")
+    if call_path is None or not str(call_path).strip():
+        raise ValueError("call_path is required to record Hessian memory")
+    node_name = str(call_path).rsplit(".", 1)[-1]
+    if node_name not in _HESSIAN_MEMORY_NODES:
+        raise ValueError(
+            f"Hessian memory is recorded for {sorted(_HESSIAN_MEMORY_NODES)}, "
+            f"got {node_name!r}"
+        )
+    if scope is None or not str(scope).strip():
+        raise ValueError("scope is required to record Hessian memory")
+    if qm_input is None:
+        raise ValueError("qm_input is required to record Hessian memory")
+    if mol is None or getattr(mol, "natm", None) is None:
+        raise ValueError("molecule natm is required to record Hessian memory")
+    if allocated_memory_mb is None:
+        raise ValueError("allocated memory is required")
+    allocated = float(allocated_memory_mb)
+    if allocated <= 0:
+        raise ValueError(
+            f"allocated memory must be positive, got {allocated_memory_mb!r}"
+        )
+    mf_memory = getattr(mf, "max_memory", None)
+    if mf_memory is None:
+        raise ValueError("mean field max_memory is required")
+    if float(mf_memory) != allocated:
+        raise ValueError(
+            f"mean field max_memory={mf_memory} does not match "
+            f"allocated memory {allocated}"
+        )
+    basis = pyscf_basis_name(qm_input)
+    functional = pyscf_functional_name(qm_input)
+    if not basis:
+        raise ValueError("basis set is required")
+    if not functional:
+        raise ValueError("functional is required")
+    info = df_hessian_memory(mf, mol, allocated)
+    if not info["density_fit"]:
+        raise ValueError("density fitting is required to record Hessian memory")
+    record = PySCFHessianMemoryRecord(
+        hessian_task_id=str(hessian_task_id),
+        task_id=str(task_id),
+        node_name=node_name,
+        call_path=str(call_path),
+        scope=str(scope),
+        n_atoms=int(mol.natm),
+        basis=basis,
+        functional=functional,
+        allocated_memory_mb=allocated,
+        required_memory_mb=float(info["required_mb"]),
+        fits=bool(info["fits"]),
+        nao=int(info["nao"]),
+        naux=int(info["naux"]),
+        nocc=int(info["nocc"]),
+        aux_blk=int(info["blk"]),
+    )
+    await db.save(record)
+    node_runner.info(
+        f"Hessian memory {node_name} {scope}: "
+        f"n_atoms={record.n_atoms}, basis={basis}, functional={functional}, "
+        f"allocated {allocated:.0f} MB, required {record.required_memory_mb:.0f} MB"
+    )
+    return record
+
+
 def molecule_from_payload(qm_input, payload):
     from pyscf import gto
 
@@ -491,6 +593,16 @@ async def pyscf_hessian_for_atoms(
                 mf = equilibrium_mean_field(
                     opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
                 )
+            await record_hessian_memory(
+                node_runner,
+                kwargs,
+                hessian_task_id,
+                opts.qm_input,
+                mol,
+                mf,
+                budget_mb,
+                f"atoms {pending[0]}-{pending[-1]}",
+            )
             hessian = require_df_rks_hessian(mf)
             hessian.max_memory = float(budget_mb)
             node_runner.info(
@@ -682,6 +794,20 @@ async def pyscf_hessian_partial_ext(
             mf = equilibrium_mean_field(
                 opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
             )
+        if piece == "aux":
+            memory_scope = f"aux {shell_start}:{shell_end}"
+        else:
+            memory_scope = piece
+        await record_hessian_memory(
+            node_runner,
+            kwargs,
+            hessian_task_id,
+            opts.qm_input,
+            mol,
+            mf,
+            budget_mb,
+            memory_scope,
+        )
         hessian = require_df_rks_hessian(mf)
         hessian.max_memory = float(budget_mb)
         if piece == "xc":
@@ -934,6 +1060,16 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
         ):
             mf = equilibrium_mean_field(
                 opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
+            )
+            await record_hessian_memory(
+                node_runner,
+                kwargs,
+                hessian_task_id,
+                opts.qm_input,
+                mol,
+                mf,
+                budget_mb,
+                "df_hessian",
             )
             plan = analytical_hessian_plan(mf, mol, kwargs.get("parent_parameters"))
         node_runner.info(

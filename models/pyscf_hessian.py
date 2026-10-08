@@ -79,3 +79,37 @@ class PySCFHessianPartialContribution(Model):
     shell_end: int = Field(index=True)
     n_atoms: int
     partial_file: FileStack = Reference()
+
+
+@simstack_model
+class PySCFHessianMemoryRecord(Model):
+    """Allocated PySCF budget and the DF Hessian peak for one Hessian task.
+
+    Written by ``pyscf_hessian`` and by each child that builds the mean field
+    (``pyscf_hessian_for_atoms``, including the nested call on a
+    ``pyscf_hessian_for_atoms_ext`` VM, and ``pyscf_hessian_partial_ext``).
+    ``hessian_task_id`` is the parent task. ``task_id`` is the task that
+    recorded the row. ``scope`` is ``df_hessian``, an atom span such as
+    ``atoms 20-39``, or a partial span such as ``aux 0:400``.
+
+    ``allocated_memory_mb`` is the PySCF ``max_memory`` budget. ``required_memory_mb``
+    is the density-fitted Hessian peak from ``df_hessian_memory`` at that budget
+    (the figure compared with ``max_memory`` before a batch starts).
+    """
+
+    field_name: str = "PySCFHessianMemoryRecord"
+    hessian_task_id: str = Field(index=True)
+    task_id: str = Field(index=True)
+    node_name: str = Field(index=True)
+    call_path: str
+    scope: str
+    n_atoms: int
+    basis: str
+    functional: str
+    allocated_memory_mb: float
+    required_memory_mb: float
+    fits: bool
+    nao: int
+    naux: int
+    nocc: int
+    aux_blk: int

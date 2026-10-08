@@ -25,6 +25,7 @@ from molecular_qm_psi4.util.qm_engine import (
     docker_cpu_limit,
     docker_memory_limit,
     memory_to_mb,
+    _PYSCF_CONTAINER_OVERHEAD_MB,
     pyscf_resources_from_slurm,
     resolve_engine,
     resources_from_parent_parameters,
@@ -136,13 +137,13 @@ def test_pyscf_resources_match_run_docker_container_limits():
     memory_mb, threads, log = pyscf_resources_from_slurm(
         {"parent_parameters": SimpleNamespace(slurm_parameters=slurm)}
     )
-    assert memory_mb == 27200.0
+    assert memory_mb == 32000.0 - _PYSCF_CONTAINER_OVERHEAD_MB
     assert threads == 8
     assert "--cpus 8" in log
     assert "--memory 32g" in log
     assert "container=32000 MB" in log
-    assert "max_memory=27200 MB" in log
-    assert "0.85 of container" in log
+    assert f"max_memory={int(memory_mb)} MB" in log
+    assert f"minus {int(_PYSCF_CONTAINER_OVERHEAD_MB)} MB for the OS and Docker" in log
     assert "threads=8" in log
     memory, psi4_threads, _ = resources_from_parent_parameters(
         {"parent_parameters": SimpleNamespace(slurm_parameters=slurm)},
@@ -165,11 +166,11 @@ def test_pyscf_resources_mem_per_cpu_matches_docker():
     memory_mb, threads, log = pyscf_resources_from_slurm(
         {"parameters": SimpleNamespace(slurm_parameters=slurm)}
     )
-    assert memory_mb == 13600.0
+    assert memory_mb == 16000.0 - _PYSCF_CONTAINER_OVERHEAD_MB
     assert threads == 4
     assert "--memory 16g" in log
     assert "container=16000 MB" in log
-    assert "max_memory=13600 MB" in log
+    assert f"max_memory={int(memory_mb)} MB" in log
 
 
 def test_docker_limit_helpers_match_simstack_run_docker():
@@ -203,12 +204,48 @@ def test_pyscf_resources_use_tasks_per_node_when_tasks_is_the_default():
     memory_mb, threads, log = pyscf_resources_from_slurm(
         {"parent_parameters": Parameters(slurm_parameters=slurm)}
     )
-    assert memory_mb == 27200.0
+    assert memory_mb == 32000.0 - _PYSCF_CONTAINER_OVERHEAD_MB
     assert threads == 16
     assert "threads=16" in log
     dumped = Parameters(slurm_parameters=SlurmParameters(cpus_per_task=16, mem="32G")).model_dump()
     _memory_mb, dict_threads, _log = pyscf_resources_from_slurm({"parent_parameters": dumped})
     assert dict_threads == 16
+
+
+def test_pyscf_resources_subtract_a_fixed_overhead_from_a_large_allocation():
+    slurm = SimpleNamespace(
+        mem="125G",
+        mem_per_cpu=None,
+        cpus_per_task=16,
+        tasks=1,
+        tasks_per_node=1,
+    )
+    memory_mb, _threads, log = pyscf_resources_from_slurm(
+        {"parent_parameters": SimpleNamespace(slurm_parameters=slurm)}
+    )
+    assert memory_mb == 125000.0 - _PYSCF_CONTAINER_OVERHEAD_MB
+    assert memory_mb > 125000.0 * 0.85
+    assert "0.85" not in log
+    assert f"minus {int(_PYSCF_CONTAINER_OVERHEAD_MB)} MB for the OS and Docker" in log
+
+
+def test_pyscf_resources_reject_a_container_that_cannot_cover_the_overhead():
+    slurm = SimpleNamespace(
+        mem="2G",
+        mem_per_cpu=None,
+        cpus_per_task=2,
+        tasks=1,
+        tasks_per_node=1,
+    )
+    try:
+        pyscf_resources_from_slurm(
+            {"parent_parameters": SimpleNamespace(slurm_parameters=slurm)}
+        )
+    except ValueError as exc:
+        assert "not positive" in str(exc)
+        assert str(int(_PYSCF_CONTAINER_OVERHEAD_MB)) in str(exc)
+    else:
+        raise AssertionError("expected ValueError when the container is smaller than the reserve")
 
 
 def test_set_resources_keeps_blas_at_one_and_sets_openmp(monkeypatch):
@@ -674,6 +711,25 @@ def test_df_hessian_memory_tzvp_38_atoms_exceeds_32g_budget():
     assert info["rhok0_mb"] < 2000
     assert info["int3c_ipip1_mb"] > 10000
     assert "int3c_ipip1" in info["summary"]
+
+
+def test_df_hessian_memory_reported_basis_fits_after_a_fixed_reserve():
+    """naux=2058, nao=1188, nocc=80 on a 125 GB allocation.
+
+    85% of that allocation is 106250 MB and the estimate is about 112 GB, so
+    the fraction rejects a calculation that fits once only the fixed OS and
+    Docker reserve is removed.
+    """
+    mol = SimpleNamespace(nao=1188, nelectron=160)
+    auxmol = SimpleNamespace(nao=2058)
+    mf = SimpleNamespace(mo_occ=_Occ(80), with_df=SimpleNamespace(auxmol=auxmol))
+    budget = 125000.0 - _PYSCF_CONTAINER_OVERHEAD_MB
+    info = df_hessian_memory(mf, mol, budget)
+    assert info["fits"] is True
+    assert info["required_mb"] <= budget
+    fraction_budget = 125000.0 * 0.85
+    rejected = df_hessian_memory(mf, mol, fraction_budget)
+    assert rejected["fits"] is False
 
 
 def test_df_hessian_memory_small_molecule_fits():

@@ -23,6 +23,7 @@ from molecular_qm_psi4.models.pyscf_hessian import (
     PySCFHessianAtomContribution,
     PySCFHessianAtomsInput,
     PySCFHessianInput,
+    PySCFHessianMemoryRecord,
     PySCFHessianPartialContribution,
     PySCFHessianPartialInput,
 )
@@ -99,6 +100,7 @@ __all__ = [
     "PySCFHessianAtomContribution",
     "PySCFHessianPartialInput",
     "PySCFHessianPartialContribution",
+    "PySCFHessianMemoryRecord",
     "qm_calculator",
     "QMEngine",
     "QMEngineInput",
