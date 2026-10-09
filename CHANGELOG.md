@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.10.15 (2026-10-09)
+
+### Bug Fixes
+
+- Fail unknown PySCF optimization accuracy instead of using Medium
+  ([`fbd1343`](https://github.com/simstack/molecular_qm_psi4/commit/fbd134355927db296919f0a3aa3b75ad58c84a85))
+
+Print the five geomeTRIC cutoffs, plus the last RMS and max gradient, on the optimization heartbeat.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.14 (2026-10-09)
 
 ### Bug Fixes
