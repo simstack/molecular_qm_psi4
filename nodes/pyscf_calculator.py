@@ -1211,7 +1211,7 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     SimstackResult:
         qm_result (QMResult): Parsed result from the PySCF calculation.
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
-            were computed. Frequency jobs run as a child ``pyscf_hessian`` node.
+            were computed. Frequency jobs run as a child ``pyscf_hessian_orchestrator`` node.
             Optimization runs as a child ``pyscf_optimization`` node and is reused
             when that Hessian fails.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
@@ -1225,7 +1225,7 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
 
     Called Nodes:
         pyscf_optimization
-        pyscf_hessian
+        pyscf_hessian_orchestrator
     """
     node_runner = kwargs.get("node_runner")
     try:
@@ -1404,10 +1404,10 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 if not wavefunction_saved:
                     raise ValueError("wavefunction file is required before the Hessian")
                 from molecular_qm_psi4.models.pyscf_hessian import PySCFHessianInput
-                from molecular_qm_psi4.nodes.pyscf_hessian import pyscf_hessian
+                from molecular_qm_psi4.nodes.pyscf_hessian import pyscf_hessian_orchestrator
 
-                node_runner.info("Starting pyscf_hessian for frequencies")
-                hess_result = await pyscf_hessian(
+                node_runner.info("Starting pyscf_hessian_orchestrator for frequencies")
+                hess_result = await pyscf_hessian_orchestrator(
                     PySCFHessianInput(qm_input=qm_input, wavefunction=wfn_fs),
                     **kwargs,
                 )

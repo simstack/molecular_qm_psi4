@@ -15,6 +15,8 @@ from molecular_qm_psi4.models.pyscf_hessian import (
     PySCFHessianMemoryRecord,
     PySCFHessianPartialContribution,
     PySCFHessianPartialInput,
+    PySCFHessianPlan,
+    PySCFHessianStageInput,
 )
 from molecular_qm_psi4.nodes.pyscf_calculator import (
     _FREQ_KEY,
@@ -56,7 +58,7 @@ from simstack.core.node import node
 from simstack.core.simstack_result import SimstackResult
 from simstack.models import FileStack
 
-# The master VM plus at most two pyscf_hessian_for_atoms_ext VMs.
+# At most three cloud VMs. The orchestrator does not run an atom batch itself.
 _MAX_HESSIAN_VMS = 3
 _HEARTBEAT_INTERVAL_S = 60.0
 
@@ -274,10 +276,21 @@ async def store_partial_contribution(
 
 _HESSIAN_MEMORY_NODES = {
     "pyscf_hessian",
+    "pyscf_hessian_init",
     "pyscf_hessian_for_atoms",
     "pyscf_hessian_for_atoms_ext",
     "pyscf_hessian_partial_ext",
 }
+
+_ASSEMBLY_RESULT_FIELDS = (
+    "vibrational_frequencies",
+    "thermodynamics_table",
+    "G_tot",
+    "ZPE_tot",
+    "E_tot",
+    "S_tot",
+    "wavefunction",
+)
 
 
 async def record_hessian_memory(
@@ -1000,52 +1013,34 @@ async def pyscf_hessian_partial_ext(
 
 
 @node
-async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
+async def pyscf_hessian_init(opts: PySCFHessianStageInput, **kwargs) -> SimstackResult:
     """
-    Analytical Hessian and harmonic frequencies for an optimized PySCF wavefunction.
+    Build the equilibrium mean field and return the Hessian launch plan.
 
-    Packs atoms into batches that fit in ``SlurmParameters.time``. One worker
-    on this VM calls ``pyscf_hessian_for_atoms``. Up to two workers call
-    ``pyscf_hessian_for_atoms_ext``, which the cloud assignment rule places on
-    its own VM. The three workers share one queue. A worker takes the next
-    batch only after its previous batch has finished. This task waits until
-    every batch has finished. Aux-shell, XC and NLC chunks then run through
-    ``pyscf_hessian_partial_ext`` on cloud. This task sums those chunks with
-    the stored CPHF response and writes frequencies and thermochemistry.
-
-    One atom whose estimated cost exceeds the time limit raises ValueError
-    before a batch VM is started.
+    The mean field lives only in this task. It records the density-fitted
+    memory peak, chooses how many atoms fit in ``SlurmParameters.time``, and
+    lists the aux-shell groups. It does not run CPHF or partial contractions.
+    That time value is the atom-batch budget: one atom that exceeds it raises
+    ValueError before any batch VM starts. This process returns as soon as the
+    plan is stored.
 
     SimstackResult:
-        vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1).
-        thermodynamics_table (SimpleTable): Component thermochemistry at 298.15 K
-            and 101325 Pa.
-        G_tot (FloatData): Total Gibbs free energy (Hartree).
-        ZPE_tot (FloatData): Total zero-point energy (Hartree).
-        E_tot (FloatData): Total thermal internal energy (Hartree).
-        S_tot (FloatData): Total entropy (kcal/mol/K).
-        wavefunction (FileStack): Wavefunction payload including the Hessian and
-            frequency analysis.
-    Called Nodes:
-        pyscf_hessian_for_atoms
-        pyscf_hessian_for_atoms_ext
-        pyscf_hessian_partial_ext
-
+        plan (PySCFHessianPlan): Atom batch size, aux shell groups, and whether
+            the functional has a nonlocal correlation term.
     """
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
         raise ValueError("node_runner is required")
-    hessian_task_id = kwargs.get("task_id") or getattr(node_runner, "task_id", None)
-    if hessian_task_id is None or not str(hessian_task_id).strip():
-        raise ValueError("pyscf_hessian requires task_id")
-    hessian_task_id = str(hessian_task_id)
     try:
-        if opts is None or opts.qm_input is None or opts.wavefunction is None:
+        if opts is None or not str(getattr(opts, "hessian_task_id", "") or "").strip():
+            raise ValueError("hessian_task_id is required")
+        if opts.qm_input is None or opts.wavefunction is None:
             raise ValueError("qm_input and wavefunction are required")
         try:
             import pyscf  # noqa: F401
         except ImportError:
             return node_runner.fail("PySCF is not installed in the current environment.")
+        hessian_task_id = str(opts.hessian_task_id)
         heartbeat_task_id = str(getattr(node_runner, "task_id", "") or "")
         budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
         node_runner.info(resource_log)
@@ -1068,33 +1063,173 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
             mf = equilibrium_mean_field(
                 opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
             )
-            await record_hessian_memory(
-                node_runner,
-                kwargs,
-                hessian_task_id,
-                opts.qm_input,
-                mol,
-                mf,
-                budget_mb,
-                "df_hessian",
-            )
-            plan = analytical_hessian_plan(mf, mol, kwargs.get("parent_parameters"))
-        node_runner.info(
-            f"Analytical Hessian lower bound {plan['seconds_full']:.0f} s "
-            f"({plan['seconds_per_atom']:.0f} s/atom), "
-            f"Slurm time {plan['time_limit_seconds']} s, "
-            f"batch size {plan['batch_size']} "
-            f"(natm={plan['natm']}, naux={plan['naux']}, "
-            f"nocc={plan['nocc']}, nao={plan['nao']})"
+        await record_hessian_memory(
+            node_runner,
+            kwargs,
+            hessian_task_id,
+            opts.qm_input,
+            mol,
+            mf,
+            budget_mb,
+            "df_hessian",
         )
-        n_atoms = int(mol.natm)
-        row_dir = hessian_contribution_directory(hessian_task_id)
+        timing = analytical_hessian_plan(mf, mol, kwargs.get("parent_parameters"))
+        node_runner.info(
+            f"Analytical Hessian lower bound {timing['seconds_full']:.0f} s "
+            f"({timing['seconds_per_atom']:.0f} s/atom), "
+            f"Slurm time {timing['time_limit_seconds']} s, "
+            f"batch size {timing['batch_size']} "
+            f"(natm={timing['natm']}, naux={timing['naux']}, "
+            f"nocc={timing['nocc']}, nao={timing['nao']})"
+        )
+        if int(timing["natm"]) != int(mol.natm):
+            raise ValueError(
+                f"Hessian plan natm={timing['natm']} does not match molecule {int(mol.natm)}"
+            )
+        batch_size = timing["batch_size"]
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError(f"Hessian batch size must be a positive int, got {batch_size!r}")
+        if not hasattr(mf, "do_nlc"):
+            raise ValueError("mean field do_nlc is required")
+        include_nlc = mf.do_nlc()
+        if not isinstance(include_nlc, bool):
+            raise ValueError(f"mean field do_nlc must return bool, got {include_nlc!r}")
+        auxmol = attach_df_auxmol(mf, mol)
+        groups = aux_shell_groups(auxmol.ao_loc, _MAX_HESSIAN_VMS)
+        db = context.db
+        if db is None:
+            raise ValueError("database is required to store the Hessian plan")
+        shell_starts = IntList(elements=[shell0 for shell0, _shell1 in groups])
+        shell_ends = IntList(elements=[shell1 for _shell0, shell1 in groups])
+        await db.save(shell_starts)
+        await db.save(shell_ends)
+        plan = PySCFHessianPlan(
+            n_atoms=int(mol.natm),
+            batch_size=batch_size,
+            shell_starts=shell_starts,
+            shell_ends=shell_ends,
+            include_nlc=include_nlc,
+        )
+        node_runner.plan = plan
+        node_runner.info(
+            f"Hessian plan for task {hessian_task_id}: "
+            f"{plan.n_atoms} atoms, batch size {plan.batch_size}, "
+            f"{len(groups)} aux groups, nlc={include_nlc}"
+        )
+        return node_runner.succeed()
+    except Exception as exc:
+        return node_runner.fail(str(exc))
+
+
+@node
+async def pyscf_hessian_orchestrator(
+    opts: PySCFHessianInput, **kwargs
+) -> SimstackResult:
+    """
+    Wait on the cloud Hessian children without holding the mean field.
+
+    Calls ``pyscf_hessian_init``, then up to three ``pyscf_hessian_for_atoms_ext``
+    workers, then up to three ``pyscf_hessian_partial_ext`` workers. Stored atoms
+    and partial groups are skipped. Assembly is a separate ``pyscf_hessian``
+    task. This process does not build a mean field and does not load the
+    contribution arrays.
+
+    Contributions are stored under this task's id.
+
+    SimstackResult:
+        vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1).
+        thermodynamics_table (SimpleTable): Component thermochemistry at 298.15 K
+            and 101325 Pa.
+        G_tot (FloatData): Total Gibbs free energy (Hartree).
+        ZPE_tot (FloatData): Total zero-point energy (Hartree).
+        E_tot (FloatData): Total thermal internal energy (Hartree).
+        S_tot (FloatData): Total entropy (kcal/mol/K).
+        wavefunction (FileStack): Wavefunction payload including the Hessian and
+            frequency analysis.
+    Called Nodes:
+        pyscf_hessian_init
+        pyscf_hessian_for_atoms_ext
+        pyscf_hessian_partial_ext
+        pyscf_hessian
+    """
+    node_runner = kwargs.get("node_runner")
+    if node_runner is None:
+        raise ValueError("node_runner is required")
+    hessian_task_id = kwargs.get("task_id") or getattr(node_runner, "task_id", None)
+    if hessian_task_id is None or not str(hessian_task_id).strip():
+        raise ValueError("pyscf_hessian_orchestrator requires task_id")
+    hessian_task_id = str(hessian_task_id)
+    try:
+        if opts is None or opts.qm_input is None or opts.wavefunction is None:
+            raise ValueError("qm_input and wavefunction are required")
+        if _MAX_HESSIAN_VMS < 1:
+            raise ValueError("Hessian VM cap must be at least 1")
+        heartbeat_task_id = str(getattr(node_runner, "task_id", "") or "")
+        parent_name = kwargs.get("custom_name") or ""
+        stage = PySCFHessianStageInput(
+            hessian_task_id=hessian_task_id,
+            qm_input=opts.qm_input,
+            wavefunction=opts.wavefunction,
+        )
+        init_name = "hessian-init"
+        if parent_name:
+            init_name = f"{parent_name}-{init_name}"
+        init_kwargs = dict(kwargs)
+        init_kwargs["custom_name"] = init_name
+        node_runner.info(f"Calling pyscf_hessian_init for task {hessian_task_id}")
+        init_result = await pyscf_hessian_init(stage, **init_kwargs)
+        plan = getattr(init_result, "plan", None)
+        if plan is None and hasattr(init_result, "n_atoms"):
+            plan = init_result
+        if plan is None or not hasattr(plan, "shell_starts") or not hasattr(plan, "shell_ends"):
+            raise ValueError("Hessian init did not return a plan")
+        n_atoms = plan.n_atoms
+        batch_size = plan.batch_size
+        include_nlc = plan.include_nlc
+        if isinstance(n_atoms, bool) or not isinstance(n_atoms, int) or n_atoms < 1:
+            raise ValueError(f"Hessian plan n_atoms must be a positive int, got {n_atoms!r}")
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError(
+                f"Hessian plan batch_size must be a positive int, got {batch_size!r}"
+            )
+        if not isinstance(include_nlc, bool):
+            raise ValueError(f"Hessian plan include_nlc must be bool, got {include_nlc!r}")
+        db = context.db
+        if db is None:
+            raise ValueError("database is required to read the Hessian plan")
+        bound_lists = []
+        for name in ("shell_starts", "shell_ends"):
+            stored = getattr(plan, name)
+            if stored is None:
+                raise ValueError(f"Hessian plan {name} is required")
+            if not hasattr(stored, "elements"):
+                stored_id = getattr(stored, "id", stored)
+                stored = await db.find_one(IntList, IntList.id == stored_id)
+            if stored is None or getattr(stored, "elements", None) is None:
+                raise ValueError(f"Hessian plan {name} is missing")
+            bound_lists.append(list(stored.elements))
+        starts, ends = bound_lists
+        if len(starts) != len(ends) or not starts:
+            raise ValueError(f"Hessian plan aux groups are {starts} and {ends}")
+        groups = []
+        cursor = 0
+        for shell0, shell1 in zip(starts, ends):
+            if (
+                isinstance(shell0, bool)
+                or isinstance(shell1, bool)
+                or not isinstance(shell0, int)
+                or not isinstance(shell1, int)
+                or shell0 != cursor
+                or shell1 <= shell0
+            ):
+                raise ValueError(f"Hessian plan aux groups are not contiguous: {starts}, {ends}")
+            groups.append((shell0, shell1))
+            cursor = shell1
         atoms_input = PySCFHessianAtomsInput(
             hessian_task_id=hessian_task_id,
             qm_input=opts.qm_input,
             wavefunction=opts.wavefunction,
         )
-        parent_name = kwargs.get("custom_name") or ""
         pending = []
         for atom_index in range(n_atoms):
             record = await find_hessian_atom_contribution(hessian_task_id, atom_index)
@@ -1109,26 +1244,15 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
                 )
                 continue
             pending.append(atom_index)
-        batch_size = int(plan["batch_size"])
         batches = [
             pending[start : start + batch_size]
             for start in range(0, len(pending), batch_size)
         ]
-        if _MAX_HESSIAN_VMS < 1:
-            raise ValueError("Hessian VM cap must include the master VM")
         batch_queue = asyncio.Queue()
         for batch in batches:
             batch_queue.put_nowait(batch)
 
-        async def run_worker(on_this_vm):
-            node_name = (
-                "pyscf_hessian_for_atoms"
-                if on_this_vm
-                else "pyscf_hessian_for_atoms_ext"
-            )
-            call = (
-                pyscf_hessian_for_atoms if on_this_vm else pyscf_hessian_for_atoms_ext
-            )
+        async def run_atom_worker():
             while True:
                 try:
                     batch = batch_queue.get_nowait()
@@ -1140,15 +1264,18 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
                 child_kwargs = dict(kwargs)
                 child_kwargs["custom_name"] = atom_name
                 node_runner.info(
-                    f"Calling {node_name} for atoms {batch} of task {hessian_task_id}"
+                    f"Calling pyscf_hessian_for_atoms_ext for atoms {batch} "
+                    f"of task {hessian_task_id}"
                 )
-                await call(IntList(elements=batch), atoms_input, **child_kwargs)
+                await pyscf_hessian_for_atoms_ext(
+                    IntList(elements=batch), atoms_input, **child_kwargs
+                )
 
         if batches:
-            n_ext = min(_MAX_HESSIAN_VMS - 1, max(0, len(batches) - 1))
+            n_workers = min(_MAX_HESSIAN_VMS, len(batches))
             node_runner.info(
                 f"Waiting on {len(batches)} Hessian atom batches "
-                f"with {1 + n_ext} workers for task {hessian_task_id}"
+                f"with {n_workers} cloud workers for task {hessian_task_id}"
             )
             with ProcessHeartbeat(
                 "heartbeat.log",
@@ -1157,40 +1284,11 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
                 task_id=heartbeat_task_id,
             ):
                 async with asyncio.TaskGroup() as tg:
-                    tg.create_task(run_worker(True))
-                    for _ext_index in range(n_ext):
-                        tg.create_task(run_worker(False))
-        loaded = []
-        node_runner.info(
-            f"Loading stored Hessian contributions for {n_atoms} atoms of task {hessian_task_id}"
-        )
-        for atom_index in range(n_atoms):
-            record = await find_hessian_atom_contribution(hessian_task_id, atom_index)
-            if record is None:
-                raise ValueError(
-                    f"Hessian contribution for atom {atom_index} of task {hessian_task_id} "
-                    "was not stored"
-                )
-            node_runner.info(
-                f"Loading Hessian contribution for atom {atom_index + 1}/{n_atoms} "
-                f"of task {hessian_task_id}"
-            )
-            loaded.append(await materialize_hessian_contribution(record, row_dir))
-        node_runner.info(
-            f"Contracting Coulomb slices for {n_atoms} atoms of task {hessian_task_id}"
-        )
-        stored_j = contract_df_coulomb(
-            [item["rhoj1"] for item in loaded],
-            [item["wj1"] for item in loaded],
-        )
-        if stored_j.shape != (n_atoms, n_atoms, 3, 3):
-            raise ValueError(f"Coulomb slices assembled to {stored_j.shape}")
-        hessian_obj = require_df_rks_hessian(mf)
-        node_runner.info(f"Planning Hessian partial jobs for task {hessian_task_id}")
-        auxmol = attach_df_auxmol(mf, mol)
+                    for _worker_index in range(n_workers):
+                        tg.create_task(run_atom_worker())
         existing_partials = await find_partial_contributions(hessian_task_id)
         partial_jobs = []
-        for shell0, shell1 in aux_shell_groups(auxmol.ao_loc, _MAX_HESSIAN_VMS):
+        for shell0, shell1 in groups:
             touching = []
             for record in existing_partials:
                 if record.piece != "aux":
@@ -1216,18 +1314,18 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
             partial_jobs.append(("xc", 0, 0))
         else:
             node_runner.info(f"XC partial for task {hessian_task_id} is already stored")
-        if not hasattr(mf, "do_nlc"):
-            raise ValueError("mean field do_nlc is required")
         nlc_rows = [record for record in existing_partials if record.piece == "nlc"]
         if len(nlc_rows) > 1:
             raise ValueError(f"multiple NLC partials for task {hessian_task_id}")
-        if mf.do_nlc():
+        if include_nlc:
             if not nlc_rows:
                 partial_jobs.append(("nlc", 0, 0))
             else:
                 node_runner.info(f"NLC partial for task {hessian_task_id} is already stored")
         elif nlc_rows:
-            raise ValueError(f"stored NLC partial for xc {mf.xc!r}, which has no NLC")
+            raise ValueError(
+                f"stored NLC partial for task {hessian_task_id}, which has no NLC"
+            )
         partial_queue = asyncio.Queue()
         for job in partial_jobs:
             partial_queue.put_nowait(job)
@@ -1263,7 +1361,7 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
             n_partial = min(_MAX_HESSIAN_VMS, len(partial_jobs))
             node_runner.info(
                 f"Waiting on {len(partial_jobs)} Hessian partial jobs "
-                f"with {n_partial} workers for task {hessian_task_id}"
+                f"with {n_partial} cloud workers for task {hessian_task_id}"
             )
             with ProcessHeartbeat(
                 "heartbeat.log",
@@ -1274,6 +1372,115 @@ async def pyscf_hessian(opts: PySCFHessianInput, **kwargs) -> SimstackResult:
                 async with asyncio.TaskGroup() as tg:
                     for _partial_index in range(n_partial):
                         tg.create_task(run_partial_worker())
+        assemble_name = "hessian-assemble"
+        if parent_name:
+            assemble_name = f"{parent_name}-{assemble_name}"
+        assemble_kwargs = dict(kwargs)
+        assemble_kwargs["custom_name"] = assemble_name
+        node_runner.info(f"Calling pyscf_hessian to assemble task {hessian_task_id}")
+        assembled = await pyscf_hessian(stage, **assemble_kwargs)
+        if assembled is None:
+            raise ValueError("Hessian assembly returned no result")
+        for name in _ASSEMBLY_RESULT_FIELDS:
+            value = getattr(assembled, name, None)
+            if value is None:
+                raise ValueError(f"Hessian assembly did not return {name}")
+            setattr(node_runner, name, value)
+        node_runner.info(f"Assembled analytical Hessian for task {hessian_task_id}")
+        return node_runner.succeed()
+    except Exception as exc:
+        if node_runner is not None:
+            return node_runner.fail(str(exc))
+        raise
+
+
+@node
+async def pyscf_hessian(opts: PySCFHessianStageInput, **kwargs) -> SimstackResult:
+    """
+    Assemble a stored analytical Hessian and write frequencies.
+
+    Rebuilds the equilibrium mean field, loads the atom and partial
+    contributions stored under ``opts.hessian_task_id``, and writes
+    frequencies and thermochemistry. It does not launch batch tasks. The
+    large allocation ends when this task returns.
+
+    SimstackResult:
+        vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1).
+        thermodynamics_table (SimpleTable): Component thermochemistry at 298.15 K
+            and 101325 Pa.
+        G_tot (FloatData): Total Gibbs free energy (Hartree).
+        ZPE_tot (FloatData): Total zero-point energy (Hartree).
+        E_tot (FloatData): Total thermal internal energy (Hartree).
+        S_tot (FloatData): Total entropy (kcal/mol/K).
+        wavefunction (FileStack): Wavefunction payload including the Hessian and
+            frequency analysis.
+    """
+    node_runner = kwargs.get("node_runner")
+    if node_runner is None:
+        raise ValueError("node_runner is required")
+    try:
+        if opts is None or not str(getattr(opts, "hessian_task_id", "") or "").strip():
+            raise ValueError("hessian_task_id is required")
+        if opts.qm_input is None or opts.wavefunction is None:
+            raise ValueError("qm_input and wavefunction are required")
+        hessian_task_id = str(opts.hessian_task_id)
+        try:
+            import pyscf  # noqa: F401
+        except ImportError:
+            return node_runner.fail("PySCF is not installed in the current environment.")
+        heartbeat_task_id = str(getattr(node_runner, "task_id", "") or "")
+        budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
+        node_runner.info(resource_log)
+        PySCFCalculator(opts.qm_input, node_runner=node_runner).set_resources(
+            budget_mb, num_threads
+        )
+        node_runner.info(f"Loading wavefunction for Hessian task {hessian_task_id}")
+        downloaded = Path(opts.wavefunction.get(local_dir=Path(".")))
+        payload = _load_payload(downloaded)
+        mol = molecule_from_payload(opts.qm_input, payload)
+        n_atoms = int(mol.natm)
+        row_dir = hessian_contribution_directory(hessian_task_id)
+        node_runner.info(
+            f"Building the equilibrium mean field for Hessian task {hessian_task_id}"
+        )
+        with ProcessHeartbeat(
+            "heartbeat.log",
+            "Hessian assembly mean field",
+            interval_s=_HEARTBEAT_INTERVAL_S,
+            task_id=heartbeat_task_id,
+        ):
+            mf = equilibrium_mean_field(
+                opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
+            )
+        loaded = []
+        node_runner.info(
+            f"Loading stored Hessian contributions for {n_atoms} atoms of task {hessian_task_id}"
+        )
+        for atom_index in range(n_atoms):
+            record = await find_hessian_atom_contribution(hessian_task_id, atom_index)
+            if record is None:
+                raise ValueError(
+                    f"Hessian contribution for atom {atom_index} of task {hessian_task_id} "
+                    "was not stored"
+                )
+            node_runner.info(
+                f"Loading Hessian contribution for atom {atom_index + 1}/{n_atoms} "
+                f"of task {hessian_task_id}"
+            )
+            loaded.append(await materialize_hessian_contribution(record, row_dir))
+        node_runner.info(
+            f"Contracting Coulomb slices for {n_atoms} atoms of task {hessian_task_id}"
+        )
+        stored_j = contract_df_coulomb(
+            [item["rhoj1"] for item in loaded],
+            [item["wj1"] for item in loaded],
+        )
+        if stored_j.shape != (n_atoms, n_atoms, 3, 3):
+            raise ValueError(f"Coulomb slices assembled to {stored_j.shape}")
+        hessian_obj = require_df_rks_hessian(mf)
+        auxmol = attach_df_auxmol(mf, mol)
+        if not hasattr(mf, "do_nlc"):
+            raise ValueError("mean field do_nlc is required")
         partial_records = await find_partial_contributions(hessian_task_id)
         node_runner.info(
             f"Loading {len(partial_records)} stored Hessian partials for task {hessian_task_id}"

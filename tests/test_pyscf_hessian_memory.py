@@ -67,7 +67,7 @@ def test_parent_records_basis_functional_and_the_df_peak(monkeypatch):
             SimpleNamespace(info=logs.append),
             {
                 "task_id": "parent-task",
-                "call_path": ".pyscf_hessian",
+                "call_path": ".pyscf_hessian_init",
             },
             "parent-task",
             _qm_input(),
@@ -81,8 +81,8 @@ def test_parent_records_basis_functional_and_the_df_peak(monkeypatch):
     assert database.saved == [record]
     assert record.hessian_task_id == "parent-task"
     assert record.task_id == "parent-task"
-    assert record.node_name == "pyscf_hessian"
-    assert record.call_path == ".pyscf_hessian"
+    assert record.node_name == "pyscf_hessian_init"
+    assert record.call_path == ".pyscf_hessian_init"
     assert record.scope == "df_hessian"
     assert record.n_atoms == 42
     assert record.basis == "def2-tzvpp"
@@ -110,7 +110,7 @@ def test_child_records_its_own_task_and_atom_span(monkeypatch):
             {
                 "task_id": "atom-task",
                 "call_path": (
-                    ".pyscf_hessian.pyscf_hessian_for_atoms_ext.pyscf_hessian_for_atoms"
+                    ".pyscf_hessian_orchestrator.pyscf_hessian_for_atoms_ext.pyscf_hessian_for_atoms"
                 ),
             },
             "parent-task",
@@ -147,7 +147,7 @@ def test_partial_node_name_comes_from_the_call_path(monkeypatch):
             SimpleNamespace(info=lambda _message: None),
             {
                 "task_id": "partial-task",
-                "call_path": ".pyscf_hessian.pyscf_hessian_partial_ext",
+                "call_path": ".pyscf_hessian_orchestrator.pyscf_hessian_partial_ext",
             },
             "parent-task",
             _qm_input(),
@@ -173,7 +173,7 @@ def test_rejected_budget_is_stored_before_it_fits(monkeypatch):
     record = asyncio.run(
         record_hessian_memory(
             SimpleNamespace(info=lambda _message: None),
-            {"task_id": "parent-task", "call_path": ".pyscf_hessian"},
+            {"task_id": "parent-task", "call_path": ".pyscf_hessian_init"},
             "parent-task",
             _qm_input(),
             mol,
@@ -216,7 +216,7 @@ def test_record_rejects_a_mean_field_without_density_fitting(monkeypatch):
         asyncio.run(
             record_hessian_memory(
                 SimpleNamespace(info=lambda _message: None),
-                {"task_id": "parent-task", "call_path": ".pyscf_hessian"},
+                {"task_id": "parent-task", "call_path": ".pyscf_hessian_init"},
                 "parent-task",
                 _qm_input(),
                 mol,

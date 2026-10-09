@@ -1,6 +1,7 @@
 from odmantic import Field, Model, Reference
 
 from molecular_qm_models import QMInput
+from molecular_qm_psi4.models.int_list import IntList
 from simstack.models import FileStack, simstack_model
 
 
@@ -11,6 +12,38 @@ class PySCFHessianInput(Model):
     field_name: str = "PySCFHessianInput"
     qm_input: QMInput = Reference()
     wavefunction: FileStack = Reference()
+
+
+@simstack_model
+class PySCFHessianStageInput(Model):
+    """Wavefunction for one short Hessian stage, stored under the orchestrator task.
+
+    ``hessian_task_id`` is the ``pyscf_hessian_orchestrator`` task id. Init and
+    assembly are separate tasks, so contributions are not stored under their
+    own task ids.
+    """
+
+    field_name: str = "PySCFHessianStageInput"
+    hessian_task_id: str
+    qm_input: QMInput = Reference()
+    wavefunction: FileStack = Reference()
+
+
+@simstack_model
+class PySCFHessianPlan(Model):
+    """Batch size and aux-shell groups for one Hessian, without a live mean field.
+
+    ``shell_starts[i]:shell_ends[i]`` is one aux-shell group. ``include_nlc``
+    is the mean field's ``do_nlc()`` result. The orchestrator launches cloud
+    children from this plan and from rows already stored for the task.
+    """
+
+    field_name: str = "PySCFHessianPlan"
+    n_atoms: int
+    batch_size: int
+    shell_starts: IntList = Reference()
+    shell_ends: IntList = Reference()
+    include_nlc: bool
 
 
 @simstack_model
@@ -85,14 +118,14 @@ class PySCFHessianPartialContribution(Model):
 class PySCFHessianMemoryRecord(Model):
     """Allocated PySCF budget and the DF Hessian peak for one Hessian task.
 
-    Written by ``pyscf_hessian`` and by each child that builds the mean field
+    Written by ``pyscf_hessian_init`` and by each child that builds the mean field
     (``pyscf_hessian_for_atoms``, including the nested call on a
     ``pyscf_hessian_for_atoms_ext`` VM, and ``pyscf_hessian_partial_ext``).
-    ``hessian_task_id`` is the parent task. ``task_id`` is the task that
+    ``hessian_task_id`` is the orchestrator task. ``task_id`` is the task that
     recorded the row. ``scope`` is ``df_hessian``, an atom span such as
     ``atoms 20-39``, or a partial span such as ``aux 0:400``.
 
-    ``allocated_memory_mb`` is the PySCF ``max_memory`` budget. For the parent
+    ``allocated_memory_mb`` is the PySCF ``max_memory`` budget. For init
     and a partial child, ``required_memory_mb`` is the density-fitted partial
     peak from ``df_hessian_memory``. For an atom batch it is the ``make_h1``
     peak at PySCF's 480-function aux block: the XC derivative, a Coulomb
