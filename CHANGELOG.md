@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v0.10.16 (2026-10-09)
+
+### Bug Fixes
+
+- Show live optimization criteria and plot each cutoff
+  ([`1621e8d`](https://github.com/simstack/molecular_qm_psi4/commit/1621e8d028429e6d46245242cc9fbff60bd28daa))
+
+Iteration lines report the current values, with a star when a cutoff is met, and the heartbeat
+  repeats every five minutes. Each criterion is saved as a chart with its threshold drawn as a flat
+  line.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.15 (2026-10-09)
 
 ### Bug Fixes
