@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.10.14 (2026-10-09)
+
+### Bug Fixes
+
+- Add imaginary frequency validation and error reporting
+  ([`145f343`](https://github.com/simstack/molecular_qm_psi4/commit/145f34351bd0a9efc508ebe99ce9ce2a16299d50))
+
+Introduce `_imaginary_frequency_failure` to identify negative vibrational frequencies below a
+  defined threshold. Validate vibrational data across multiple workflows and handle errors with
+  specific failure messages. Add corresponding unit tests for edge cases and exception handling.
+
+
 ## v0.10.13 (2026-10-09)
 
 ### Bug Fixes
