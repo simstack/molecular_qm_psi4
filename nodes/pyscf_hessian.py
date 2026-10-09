@@ -52,6 +52,10 @@ from molecular_qm_psi4.util.pyscf_hessian_partial import (
 )
 from molecular_qm_psi4.util.pyscf_result import PySCFResult
 from molecular_qm_psi4.util.pyscf_thermo import run_pyscf_thermo
+from molecular_qm_psi4.util.vibration_molden import (
+    attach_vibration_molden,
+    vibration_molden_filestack,
+)
 from molecular_qm_psi4.util.qm_engine import pyscf_resources_from_slurm
 from simstack.core.context import context
 from simstack.core.node import node
@@ -290,6 +294,7 @@ _ASSEMBLY_RESULT_FIELDS = (
     "E_tot",
     "S_tot",
     "wavefunction",
+    "vibration_molden",
 )
 
 
@@ -1146,6 +1151,8 @@ async def pyscf_hessian_orchestrator(
         S_tot (FloatData): Total entropy (kcal/mol/K).
         wavefunction (FileStack): Wavefunction payload including the Hessian and
             frequency analysis.
+        vibration_molden (FileStack): Normal modes in Molden format
+            (``vibrations.molden``) for visualization in Molden or Avogadro.
     Called Nodes:
         pyscf_hessian_init
         pyscf_hessian_for_atoms_ext
@@ -1386,6 +1393,7 @@ async def pyscf_hessian_orchestrator(
             if value is None:
                 raise ValueError(f"Hessian assembly did not return {name}")
             setattr(node_runner, name, value)
+        attach_vibration_molden(node_runner, node_runner.vibration_molden)
         node_runner.info(f"Assembled analytical Hessian for task {hessian_task_id}")
         return node_runner.succeed()
     except Exception as exc:
@@ -1414,6 +1422,8 @@ async def pyscf_hessian(opts: PySCFHessianStageInput, **kwargs) -> SimstackResul
         S_tot (FloatData): Total entropy (kcal/mol/K).
         wavefunction (FileStack): Wavefunction payload including the Hessian and
             frequency analysis.
+        vibration_molden (FileStack): Normal modes in Molden format
+            (``vibrations.molden``) for visualization in Molden or Avogadro.
     """
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
@@ -1578,6 +1588,7 @@ async def pyscf_hessian(opts: PySCFHessianStageInput, **kwargs) -> SimstackResul
         pyscf_result = PySCFResult(opts.qm_input)
         pyscf_result.qm_result.final_energy = float(payload["energy"])
         pyscf_result.frequency_tables(freq_info, node_runner, n_atoms)
+        attach_vibration_molden(node_runner, vibration_molden_filestack(mol, freq_info))
         from types import SimpleNamespace
 
         thermo_mf = SimpleNamespace(mol=mol, e_tot=float(payload["energy"]))

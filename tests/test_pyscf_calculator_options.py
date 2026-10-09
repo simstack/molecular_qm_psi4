@@ -5,6 +5,8 @@ import logging
 import re
 import sys
 
+import pytest
+
 from molecular_qm_psi4.util.pyscf_calculator import (
     PySCFCalculator,
     df_hessian_memory,
@@ -564,7 +566,9 @@ def test_pyscf_persist_opt_charts_plots_each_criterion_and_its_threshold(monkeyp
         raise AssertionError("expected ValueError for a non-positive gradient norm")
 
 
-def _run_fake_pyscf_optimize(snapshotter, scanner_returns):
+def _run_fake_pyscf_optimize(
+    snapshotter, scanner_returns, *, converged=True, max_optimization_iterations=100
+):
     from molecular_qm_psi4.nodes.pyscf_calculator import _optimize
 
     mf = MagicMock()
@@ -573,13 +577,13 @@ def _run_fake_pyscf_optimize(snapshotter, scanner_returns):
         side_effect=list(scanner_returns)
     )
 
-    def fake_optimize(method, callback=None, maxsteps=None, **kwargs):
+    def fake_kernel(method, callback=None, maxsteps=None, **kwargs):
         mol = MagicMock()
         for _ in scanner_returns:
             method(mol)
-        return MagicMock()
+        return converged, MagicMock()
 
-    fake_solver = SimpleNamespace(optimize=fake_optimize)
+    fake_solver = SimpleNamespace(kernel=fake_kernel)
     with patch.dict(
         sys.modules,
         {
@@ -591,8 +595,28 @@ def _run_fake_pyscf_optimize(snapshotter, scanner_returns):
     ), patch("molecular_qm_psi4.nodes.pyscf_calculator.ProcessHeartbeat") as heartbeat_cls:
         heartbeat_cls.return_value.start = MagicMock()
         heartbeat_cls.return_value.stop = MagicMock()
-        _optimize(mf, _qm_input(), snapshotter)
+        _optimize(
+            mf,
+            _qm_input(max_optimization_iterations=max_optimization_iterations),
+            snapshotter,
+        )
     return heartbeat_cls
+
+
+def test_pyscf_optimize_fails_when_iteration_limit_is_reached_without_convergence():
+    from molecular_qm_psi4.nodes.pyscf_calculator import OptimizationSnapshotter
+    from molecular_qm_psi4.util.psi4_calculator import OptimizationNotConvergedError
+
+    snapshotter = OptimizationSnapshotter(
+        MagicMock(), {"node_runner": MagicMock()}, interval=10
+    )
+    with pytest.raises(OptimizationNotConvergedError, match="did not converge in 3 iterations"):
+        _run_fake_pyscf_optimize(
+            snapshotter,
+            [(-76.5, [[0.0, 0.0, 0.1]])],
+            converged=False,
+            max_optimization_iterations=3,
+        )
 
 
 def test_pyscf_optimize_records_iteration_and_total_timings():

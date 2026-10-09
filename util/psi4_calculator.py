@@ -73,6 +73,10 @@ class OptimizationOscillationError(RuntimeError):
     """Raised when optimization energy oscillates with no net downward trend."""
 
 
+class OptimizationNotConvergedError(RuntimeError):
+    """Raised when geometry optimization hits the iteration limit without converging."""
+
+
 def _named_value(field, default):
     """Return an enum/string field value, ignoring MagicMock placeholders."""
     if field is None:

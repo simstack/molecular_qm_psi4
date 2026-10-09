@@ -21,6 +21,7 @@ from odmantic import ObjectId
 
 from molecular_qm_models import QMInput, QMResult, Molecule, MoleculeSnapshot
 from molecular_qm_psi4.util.psi4_calculator import (
+    OptimizationNotConvergedError,
     OptimizationOscillationError,
     OptimizationTimeoutError,
     basis_name_from_qm_input,
@@ -46,6 +47,10 @@ from molecular_qm_psi4.util.opt_structures import (
 )
 from molecular_qm_psi4.util.pyscf_result import PySCFResult
 from molecular_qm_psi4.util.pyscf_thermo import run_pyscf_thermo
+from molecular_qm_psi4.util.vibration_molden import (
+    attach_vibration_molden,
+    vibration_molden_filestack,
+)
 from molecular_qm_psi4.util.qm_engine import (
     attach_optimizer_timings,
     pyscf_resources_from_slurm,
@@ -1241,12 +1246,29 @@ def _optimize(mf, qm_input, snapshotter):
     wall_start = time.monotonic()
     cpu_start = time.process_time()
     try:
-        mol_eq = geometric_solver.optimize(
+        kernel = getattr(geometric_solver, "kernel", None)
+        if not callable(kernel):
+            raise ValueError(
+                "pyscf geometric_solver.kernel is required to report optimization convergence"
+            )
+        steps = getattr(qm_input, "max_optimization_iterations", None)
+        if steps is None:
+            raise ValueError("max_optimization_iterations is required")
+        steps = int(steps)
+        converged, mol_eq = kernel(
             as_pyscf_method(mf.mol, scan_fn),
             callback=None if snapshotter is None else snapshotter.callback,
-            maxsteps=int(qm_input.max_optimization_iterations),
+            maxsteps=steps,
             **conv_params,
         )
+        if not isinstance(converged, bool):
+            raise ValueError(
+                f"optimization convergence flag must be bool, got {converged!r}"
+            )
+        if not converged:
+            raise OptimizationNotConvergedError(
+                f"Geometry optimization did not converge in {steps} iterations"
+            )
     finally:
         if snapshotter is not None:
             snapshotter.opt_wall_s = time.monotonic() - wall_start
@@ -1453,6 +1475,9 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             were computed. Frequency jobs run as a child ``pyscf_hessian_orchestrator`` node.
             Optimization runs as a child ``pyscf_optimization`` node and is reused
             when that Hessian fails.
+        vibration_molden (FileStack): Normal modes in Molden format
+            (``vibrations.molden``) for visualization in Molden or Avogadro when
+            frequencies were computed.
         optimization_timing (SimpleTable): Per-iteration and summary wall/CPU times.
         thermodynamics_table (SimpleTable): Component thermochemistry (S in kcal/mol/K;
             Cv, Cp, E, H, G, ZPE in engine units) when frequencies were computed.
@@ -1615,6 +1640,11 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 if freq_info:
                     n_atoms = mol.natm if hasattr(mol, "natm") else None
                     pyscf_result.frequency_tables(freq_info, node_runner, n_atoms)
+                    attach_vibration_molden(
+                        node_runner,
+                        vibration_molden_filestack(mol, freq_info),
+                        qm_result,
+                    )
                 thermodynamics_table = None
                 if freq_info and qm_input.frequencies:
                     thermodynamics_table = run_pyscf_thermo(mf, freq_info, 298.15, 101325.0, node_runner)
@@ -1666,6 +1696,11 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 updated = getattr(hess_result, "wavefunction", None)
                 if updated is not None:
                     qm_result.files.append(updated)
+                attach_vibration_molden(
+                    node_runner,
+                    getattr(hess_result, "vibration_molden", None),
+                    qm_result,
+                )
                 thermodynamics_table = getattr(node_runner, "thermodynamics_table", thermodynamics_table)
 
             node_runner.info("PySCF calculation finished successfully")
