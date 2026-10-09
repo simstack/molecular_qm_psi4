@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.10.13 (2026-10-09)
+
+### Bug Fixes
+
+- Keep the Hessian waiter off the large mean-field allocation
+  ([`777e308`](https://github.com/simstack/molecular_qm_psi4/commit/777e3088b70dce026fceb9850e4938c1afb02162))
+
+Split planning and assembly into short tasks so the process that waits on cloud children does not
+  hold the mean field.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.12 (2026-10-08)
 
 ### Bug Fixes
