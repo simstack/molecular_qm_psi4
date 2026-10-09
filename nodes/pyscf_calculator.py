@@ -33,8 +33,10 @@ from molecular_qm_psi4.util.pyscf_calculator import (
     PySCFCalculator,
     df_hessian_memory,
     harmonic_cartesian_constraints,
+    format_pyscf_opt_convergence,
     iteration_timeout_seconds,
     method_name_from_qm_input,
+    pyscf_opt_accuracy_name,
     pyscf_opt_conv_params,
 )
 from molecular_qm_psi4.util.opt_structures import (
@@ -394,6 +396,8 @@ class OptimizationSnapshotter:
         self._iter_timer = None
         self._iter_heartbeat = None
         self._timeout_logged = False
+        self.opt_convergence_text = ""
+        self.last_opt_step = None
 
     def _node_runner(self):
         return self.kwargs.get("node_runner")
@@ -426,11 +430,21 @@ class OptimizationSnapshotter:
             logger.info(start_msg)
         task_id = "" if node_runner is None else str(getattr(node_runner, "task_id", "") or "")
         prefix = f"Optimization iteration {self.geom_iter}"
-        if self.grad_history:
-            last_grad = self.grad_history[-1]["grad_norm"]
-            if last_grad is None:
-                raise ValueError("grad_norm is required")
-            prefix += f" |g|={float(last_grad):.6e} Ha/Bohr"
+        if self.opt_convergence_text:
+            prefix += f" {self.opt_convergence_text}"
+        last = self.last_opt_step
+        if last is not None and last.get("grad_norm") is not None:
+            if last.get("grms") is None or last.get("gmax") is None:
+                raise ValueError("grms and gmax are required when grad_norm is set")
+            prefix += (
+                f" |g|={float(last['grad_norm']):.6e}"
+                f" grms={float(last['grms']):.6e}"
+                f" gmax={float(last['gmax']):.6e} Ha/Bohr"
+            )
+            previous = last.get("previous_energy")
+            energy = last.get("energy")
+            if previous is not None and energy is not None:
+                prefix += f" dE={float(energy) - float(previous):.4e} Ha"
         heartbeat = ProcessHeartbeat(
             _HEARTBEAT_LOG,
             prefix,
@@ -554,15 +568,18 @@ class OptimizationSnapshotter:
                 if node_runner is not None:
                     node_runner.warning(f"Failed to store MoleculeSnapshot: {exc}")
 
-    def _log_opt_step(self, energy, grad_norm, wall_s, cpu_s):
+    def _log_opt_step(self, energy, grad_norm, wall_s, cpu_s, grms=None, gmax=None):
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         step = int(self.geom_iter)
         if energy is None or grad_norm is None:
             msg = f"{stamp} Optimization step {step}: energy/gradient unavailable"
         else:
+            if grms is None or gmax is None:
+                raise ValueError("grms and gmax are required when grad_norm is set")
             msg = (
                 f"{stamp} Optimization step {step}: "
-                f"energy={float(energy):.12f} Ha, |g|={float(grad_norm):.6e} Ha/Bohr"
+                f"energy={float(energy):.12f} Ha, |g|={float(grad_norm):.6e} Ha/Bohr, "
+                f"grms={float(grms):.6e} Ha/Bohr, gmax={float(gmax):.6e} Ha/Bohr"
             )
         if wall_s is None or cpu_s is None:
             raise ValueError("wall_s and cpu_s must both be set")
@@ -991,12 +1008,29 @@ def _optimize(mf, qm_input, snapshotter):
             cpu_s = time.process_time() - cpu_start
             snapshotter._cancel_iter_timer()
             grad_norm = None
+            grms = None
+            gmax = None
             try:
                 if grad is not None and np is not None:
-                    grad_norm = float(np.linalg.norm(np.asarray(grad, dtype=float)))
+                    values = np.asarray(grad, dtype=float).ravel()
+                    grad_norm = float(np.linalg.norm(values))
+                    gmax = float(np.max(np.abs(values)))
+                    grms = float(np.sqrt(np.mean(np.square(values))))
             except Exception:
                 pass
-            stamp = snapshotter._log_opt_step(energy, grad_norm, wall_s, cpu_s)
+            previous_energy = (
+                None if snapshotter.last_opt_step is None else snapshotter.last_opt_step.get("energy")
+            )
+            snapshotter.last_opt_step = {
+                "grad_norm": grad_norm,
+                "grms": grms,
+                "gmax": gmax,
+                "energy": None if energy is None else float(energy),
+                "previous_energy": previous_energy,
+            }
+            stamp = snapshotter._log_opt_step(
+                energy, grad_norm, wall_s, cpu_s, grms=grms, gmax=gmax
+            )
             snapshotter.timing_history.append(
                 {
                     "step": int(snapshotter.geom_iter),
@@ -1019,7 +1053,15 @@ def _optimize(mf, qm_input, snapshotter):
                         f"basis={snapshotter.basis_name or 'unknown'})"
                     )
 
-    conv_params = pyscf_opt_conv_params(getattr(qm_input, "optimization_accuracy", None))
+    accuracy_name = pyscf_opt_accuracy_name(getattr(qm_input, "optimization_accuracy", None))
+    conv_params = pyscf_opt_conv_params(accuracy_name)
+    convergence_text = format_pyscf_opt_convergence(accuracy_name, conv_params)
+    if snapshotter is not None:
+        snapshotter.opt_convergence_text = convergence_text
+        node_runner = snapshotter._node_runner()
+        if node_runner is not None:
+            node_runner.info(convergence_text)
+            node_runner.log(convergence_text)
     wall_start = time.monotonic()
     cpu_start = time.process_time()
     try:

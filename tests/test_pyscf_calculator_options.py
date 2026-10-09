@@ -47,6 +47,7 @@ def _qm_input(*, max_scf_iterations=100, max_optimization_iterations=100, print_
     qm_input.charge = 0
     qm_input.multiplicity = 1
     qm_input.method.value = "DFT"
+    qm_input.optimization_accuracy.value = "Medium"
     qm_input.functional.functional.value = "B3LYP"
     qm_input.functional.dispersion_correction.value.value = "NONE"
     qm_input.molecule.atoms = [MagicMock(), MagicMock()]
@@ -80,6 +81,42 @@ def test_pyscf_opt_conv_params_medium():
     assert params["convergence_grms"] == 3e-4
     tight = pyscf_opt_conv_params("Tight")
     assert tight["convergence_grms"] == 3e-5
+
+
+def test_pyscf_opt_conv_params_rejects_unknown_accuracy():
+    try:
+        pyscf_opt_conv_params("GAU_VERYTIGHT")
+    except ValueError as exc:
+        assert "GAU_VERYTIGHT" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for an unknown optimization accuracy")
+    try:
+        pyscf_opt_conv_params(None)
+    except ValueError as exc:
+        assert "required" in str(exc)
+    else:
+        raise AssertionError("expected ValueError when optimization accuracy is missing")
+
+
+def test_format_pyscf_opt_convergence_prints_every_geomeTRIC_cutoff():
+    from molecular_qm_psi4.util.pyscf_calculator import format_pyscf_opt_convergence
+
+    text = format_pyscf_opt_convergence("VeryTight", pyscf_opt_conv_params("VeryTight"))
+    assert text == (
+        "optimization_accuracy=VeryTight "
+        "|dE|<1.0e-08 Ha "
+        "grms<1.0e-05 Ha/Bohr "
+        "gmax<1.5e-05 Ha/Bohr "
+        "drms<6.0e-05 Ang "
+        "dmax<9.0e-05 Ang "
+        "(geomeTRIC requires all five)"
+    )
+    try:
+        format_pyscf_opt_convergence("VeryTight", {"convergence_energy": 1e-8})
+    except ValueError as exc:
+        assert "missing" in str(exc)
+    else:
+        raise AssertionError("expected ValueError when a cutoff is missing")
 
 
 def test_pyscf_iteration_timeout_floor_scale_and_cap():
@@ -495,11 +532,27 @@ def test_pyscf_optimize_logs_energy_and_gradient_every_step():
     assert "Optimization step 3: energy=-76.520000000000 Ha, |g|=3.000000e-02 Ha/Bohr" in step_logs[2]
     logged = [call.args[0] for call in node_runner.log.call_args_list]
     assert step_logs == [msg for msg in logged if "Optimization step " in msg]
+    criteria = (
+        "optimization_accuracy=Medium "
+        "|dE|<1.0e-06 Ha "
+        "grms<3.0e-04 Ha/Bohr "
+        "gmax<4.5e-04 Ha/Bohr "
+        "drms<1.2e-03 Ang "
+        "dmax<1.8e-03 Ang "
+        "(geomeTRIC requires all five)"
+    )
     prefixes = [call.args[1] for call in heartbeat_cls.call_args_list]
     assert prefixes == [
-        "Optimization iteration 1",
-        "Optimization iteration 2 |g|=1.200000e-01 Ha/Bohr",
-        "Optimization iteration 3 |g|=8.000000e-02 Ha/Bohr",
+        f"Optimization iteration 1 {criteria}",
+        (
+            f"Optimization iteration 2 {criteria} "
+            "|g|=1.200000e-01 grms=6.928203e-02 gmax=1.200000e-01 Ha/Bohr"
+        ),
+        (
+            f"Optimization iteration 3 {criteria} "
+            "|g|=8.000000e-02 grms=4.618802e-02 gmax=8.000000e-02 Ha/Bohr "
+            "dE=-1.0000e-02 Ha"
+        ),
     ]
 
 

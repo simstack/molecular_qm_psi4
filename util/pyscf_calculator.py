@@ -171,9 +171,52 @@ def pyscf_verbose(print_level) -> int:
     return _PYSCF_VERBOSE[clamp_print_level(print_level)]
 
 
+def pyscf_opt_accuracy_name(optimization_accuracy) -> str:
+    if optimization_accuracy is None:
+        raise ValueError("optimization_accuracy is required")
+    name = _named_value(optimization_accuracy, None)
+    if name is None:
+        raise ValueError(
+            f"optimization_accuracy {optimization_accuracy!r} is not a known name"
+        )
+    if name not in _OPT_CONV:
+        known = ", ".join(_OPT_CONV)
+        raise ValueError(f"optimization_accuracy {name!r} is not one of {known}")
+    return name
+
+
 def pyscf_opt_conv_params(optimization_accuracy) -> dict:
-    name = _named_value(optimization_accuracy, "Medium")
-    return dict(_OPT_CONV.get(name, _OPT_CONV["Medium"]))
+    return dict(_OPT_CONV[pyscf_opt_accuracy_name(optimization_accuracy)])
+
+
+_OPT_CONV_KEYS = (
+    "convergence_energy",
+    "convergence_grms",
+    "convergence_gmax",
+    "convergence_drms",
+    "convergence_dmax",
+)
+
+
+def format_pyscf_opt_convergence(name, params) -> str:
+    """Text for the five cutoffs passed to geomeTRIC. All five must be met."""
+    if name is None or not str(name).strip():
+        raise ValueError("optimization accuracy name is required")
+    if not isinstance(params, dict):
+        raise ValueError(f"optimization convergence params must be a dict, got {params!r}")
+    missing = [key for key in _OPT_CONV_KEYS if params.get(key) is None]
+    if missing:
+        raise ValueError(f"optimization convergence is missing {missing}")
+    energy, grms, gmax, drms, dmax = (float(params[key]) for key in _OPT_CONV_KEYS)
+    return (
+        f"optimization_accuracy={name} "
+        f"|dE|<{energy:.1e} Ha "
+        f"grms<{grms:.1e} Ha/Bohr "
+        f"gmax<{gmax:.1e} Ha/Bohr "
+        f"drms<{drms:.1e} Ang "
+        f"dmax<{dmax:.1e} Ang "
+        f"(geomeTRIC requires all five)"
+    )
 
 
 def iteration_timeout_seconds(n_atoms, basis_name) -> float:
