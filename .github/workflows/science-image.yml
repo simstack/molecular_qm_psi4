@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       distribute:
-        description: Mirror to simstack.de :5000 and refresh compute nodes
+        description: Mirror to simstack.de :5000
         type: boolean
         default: true
 
@@ -127,7 +127,6 @@ jobs:
             docker push "127.0.0.1:5000/${LOCAL_IMAGE}"
             docker image ls "$LOCAL_IMAGE"
             docker image ls "127.0.0.1:5000/${LOCAL_IMAGE}"
-            "$HOME/simstack-model/scripts/update_nodes.sh"
 
   apptainer:
     needs: build
