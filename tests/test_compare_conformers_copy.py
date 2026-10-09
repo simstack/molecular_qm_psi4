@@ -1,3 +1,7 @@
+from types import SimpleNamespace
+
+import pytest
+
 from molecular_qm_models import (
     BasisSet,
     Functional,
@@ -18,6 +22,7 @@ from molecular_qm_psi4.nodes.compare_conformers import (
     ThermoBenchmarkMethodList,
     ThermoBenchmarkStep,
     _compare_conformers_outputs,
+    _imaginary_frequency_failure,
     _engine_name,
     _final_structure_molecule,
     _kcal_per_mol_from_hartree,
@@ -31,6 +36,7 @@ from molecular_qm_psi4.nodes.compare_conformers import (
     thermo_benchmark,
 )
 from molecular_qm_psi4.nodes.multistep_optimizer import PreOptimizerInput
+from molecular_qm_psi4.util.frequency_table import vibrational_frequency_table
 from molecular_qm_psi4.util.qm_engine import QMEngine, QMEngineInput
 from simstack.models.simple_table import SimpleTable
 
@@ -306,6 +312,59 @@ def test_compare_conformers_outputs_stores_final_molecules():
 
     assert node_runner.result.final_molecule1 is mol
     assert node_runner.result.final_molecule2 is other
+
+
+def test_imaginary_frequency_at_minus_49_is_allowed():
+    table = vibrational_frequency_table([-49.0, -50.0, 400.0])
+    assert (
+        _imaginary_frequency_failure(
+            SimpleNamespace(vibrational_frequencies=table), None
+        )
+        is None
+    )
+
+
+def test_imaginary_frequency_below_minus_50_fails():
+    table = vibrational_frequency_table([10.0, -51.0, 400.0])
+    message = _imaginary_frequency_failure(
+        SimpleNamespace(vibrational_frequencies=table), None
+    )
+    assert "Imaginary frequencies below -50 cm^-1" in message
+    assert "mode 2=-51.00 cm^-1" in message
+
+
+def test_imaginary_frequency_reads_qm_result_when_child_has_no_table():
+    table = vibrational_frequency_table([-51.0])
+    message = _imaginary_frequency_failure(
+        SimpleNamespace(), SimpleNamespace(vibrational_frequencies=table)
+    )
+    assert "mode 1=-51.00 cm^-1" in message
+
+
+def test_missing_frequency_table_raises():
+    with pytest.raises(ValueError, match="required"):
+        _imaginary_frequency_failure(SimpleNamespace(), SimpleNamespace())
+
+
+def test_empty_frequency_table_raises():
+    table = SimpleTable(name="Vibrational frequencies")
+    table.add_column("Mode", "number")
+    table.add_column("Wavenumber", "number")
+    with pytest.raises(ValueError, match="empty"):
+        _imaginary_frequency_failure(
+            SimpleNamespace(vibrational_frequencies=table), None
+        )
+
+
+def test_missing_wavenumber_raises():
+    table = SimpleTable(name="Vibrational frequencies")
+    table.add_column("Mode", "number")
+    table.add_column("Wavenumber", "number")
+    table.add_row({"Mode": 1})
+    with pytest.raises(ValueError, match="Wavenumber"):
+        _imaginary_frequency_failure(
+            SimpleNamespace(vibrational_frequencies=table), None
+        )
 
 
 def test_final_structure_molecule_and_engine_name():

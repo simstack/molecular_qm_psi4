@@ -19,6 +19,7 @@ from molecular_qm_psi4.nodes.multistep_optimizer import (
     _persist_step_molecule,
     multistep_optimizer,
 )
+from molecular_qm_psi4.util.frequency_table import FREQ_ZERO_CM1
 from molecular_qm_psi4.util.qm_engine import (
     QMEngine,
     QMEngineInput,
@@ -306,6 +307,43 @@ def _thermo_component(source, label: str, column: str = "tot"):
     return None
 
 
+def _imaginary_frequency_failure(source, qm_result) -> Optional[str]:
+    """Return a failure message when a reported mode is below -FREQ_ZERO_CM1.
+
+    Frequencies are read from ``source.vibrational_frequencies``, otherwise from
+    ``qm_result``. A missing table, an empty table, or a row without Mode or
+    Wavenumber raises ValueError.
+    """
+    table = getattr(source, "vibrational_frequencies", None) if source is not None else None
+    if table is None:
+        table = (
+            getattr(qm_result, "vibrational_frequencies", None)
+            if qm_result is not None
+            else None
+        )
+    if table is None:
+        raise ValueError("vibrational frequencies are required")
+    rows = getattr(table, "row", None)
+    if rows is None:
+        raise ValueError("vibrational frequencies have no rows")
+    if len(rows) == 0:
+        raise ValueError("vibrational frequencies are empty")
+    bad = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("vibrational frequency row is not a mapping")
+        if row.get("Mode") is None:
+            raise ValueError("vibrational frequency row has no Mode")
+        if row.get("Wavenumber") is None:
+            raise ValueError("vibrational frequency row has no Wavenumber")
+        wavenumber = float(row["Wavenumber"])
+        if wavenumber < -FREQ_ZERO_CM1:
+            bad.append(f"mode {row['Mode']}={wavenumber:.2f} cm^-1")
+    if not bad:
+        return None
+    return f"Imaginary frequencies below -{FREQ_ZERO_CM1:g} cm^-1: " + ", ".join(bad)
+
+
 def _pair_difference(values) -> Optional[float]:
     if len(values) != 2:
         return None
@@ -586,6 +624,10 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
                 node_runner.info(f"Molecule {i+1} SCF energy: {scf_energy}")
             scf_values.append(scf_energy)
 
+            freq_error = _imaginary_frequency_failure(calc_result, qm_result)
+            if freq_error is not None:
+                return node_runner.fail(f"Molecule {i + 1}: {freq_error}")
+
             g_tot = _thermo_component(calc_result, "G")
             if g_tot is None:
                 node_runner.error(f"G tot not found in thermochemistry output for molecule {i+1}")
@@ -822,6 +864,9 @@ async def compare_conformers_preopt(
             return node_runner.fail(
                 f"Pre-optimization failed for molecule {i + 1}: {error}"
             )
+        freq_error = _imaginary_frequency_failure(opt_result, qm_result)
+        if freq_error is not None:
+            return node_runner.fail(f"Molecule {i + 1}: {freq_error}")
 
         node_runner.info(
             f"Computing thermochemistry for molecule {i + 1} at "
