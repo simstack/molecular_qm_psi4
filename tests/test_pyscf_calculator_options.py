@@ -367,6 +367,7 @@ def test_pyscf_set_options_logs_qminput_limits():
 
 def test_pyscf_persist_opt_charts_keeps_last_20_steps(monkeypatch):
     import asyncio
+    import math
 
     from odmantic import ObjectId
 
@@ -388,9 +389,24 @@ def test_pyscf_persist_opt_charts_keeps_last_20_steps(monkeypatch):
         mod._persist_opt_charts(energy, grad, {"task_id": str(ObjectId()), "node_runner": MagicMock()})
     )
     energy_charts = [chart for chart in db.saved if chart.series[0].yKey == "energy"]
-    grad_charts = [chart for chart in db.saved if chart.series[0].yKey == "grad_norm"]
+    grad_charts = [chart for chart in db.saved if chart.series[0].yKey == "log10_grad_norm"]
     assert [row["step"] for row in energy_charts[-1].data] == list(range(6, 26))
     assert [row["step"] for row in grad_charts[-1].data] == list(range(6, 26))
+    assert grad_charts[-1].title.text == "PySCF optimization log10 gradient norm"
+    assert grad_charts[-1].axes[1].title == "log10(|g|)"
+    assert grad_charts[-1].data[-1]["log10_grad_norm"] == math.log10(0.1 / 25)
+    try:
+        asyncio.run(
+            mod._persist_opt_charts(
+                [{"step": 1, "energy": -1.0}],
+                [{"step": 1, "grad_norm": 0.0}],
+                {"task_id": str(ObjectId()), "node_runner": MagicMock()},
+            )
+        )
+    except ValueError as exc:
+        assert "positive" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for a non-positive gradient norm")
 
 
 def _run_fake_pyscf_optimize(snapshotter, scanner_returns):
@@ -421,6 +437,7 @@ def _run_fake_pyscf_optimize(snapshotter, scanner_returns):
         heartbeat_cls.return_value.start = MagicMock()
         heartbeat_cls.return_value.stop = MagicMock()
         _optimize(mf, _qm_input(), snapshotter)
+    return heartbeat_cls
 
 
 def test_pyscf_optimize_records_iteration_and_total_timings():
@@ -457,7 +474,7 @@ def test_pyscf_optimize_logs_energy_and_gradient_every_step():
     snapshotter = OptimizationSnapshotter(
         MagicMock(), {"node_runner": node_runner}, interval=10
     )
-    _run_fake_pyscf_optimize(
+    heartbeat_cls = _run_fake_pyscf_optimize(
         snapshotter,
         [
             (-76.5, [[0.12, 0.0, 0.0]]),
@@ -478,6 +495,12 @@ def test_pyscf_optimize_logs_energy_and_gradient_every_step():
     assert "Optimization step 3: energy=-76.520000000000 Ha, |g|=3.000000e-02 Ha/Bohr" in step_logs[2]
     logged = [call.args[0] for call in node_runner.log.call_args_list]
     assert step_logs == [msg for msg in logged if "Optimization step " in msg]
+    prefixes = [call.args[1] for call in heartbeat_cls.call_args_list]
+    assert prefixes == [
+        "Optimization iteration 1",
+        "Optimization iteration 2 |g|=1.200000e-01 Ha/Bohr",
+        "Optimization iteration 3 |g|=8.000000e-02 Ha/Bohr",
+    ]
 
 
 def test_pyscf_snapshotter_writes_qm_result_structures_every_ten_steps():

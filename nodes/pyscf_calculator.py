@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import re
 import signal
@@ -182,11 +183,25 @@ async def _persist_opt_charts(energy_data, grad_data, kwargs, existing=(None, No
         parent_id,
         existing[0],
     )
+    logged_grad = []
+    for row in list(grad_data)[-_OPT_CHART_STEPS:]:
+        if "grad_norm" not in row or row["grad_norm"] is None:
+            raise ValueError(f"grad_norm is required to plot its log, got {row!r}")
+        grad_norm = float(row["grad_norm"])
+        if not grad_norm > 0.0:
+            raise ValueError(f"grad_norm must be positive to plot its log, got {grad_norm}")
+        logged = {
+            "step": row["step"],
+            "log10_grad_norm": math.log10(grad_norm),
+        }
+        if "timestamp" in row:
+            logged["timestamp"] = row["timestamp"]
+        logged_grad.append(logged)
     grad_chart = _opt_line_chart(
-        list(grad_data)[-_OPT_CHART_STEPS:],
-        "grad_norm",
-        "PySCF optimization gradient norm",
-        "|g| (Ha/Bohr)",
+        logged_grad,
+        "log10_grad_norm",
+        "PySCF optimization log10 gradient norm",
+        "log10(|g|)",
         parent_id,
         existing[1],
     )
@@ -410,9 +425,15 @@ class OptimizationSnapshotter:
         else:
             logger.info(start_msg)
         task_id = "" if node_runner is None else str(getattr(node_runner, "task_id", "") or "")
+        prefix = f"Optimization iteration {self.geom_iter}"
+        if self.grad_history:
+            last_grad = self.grad_history[-1]["grad_norm"]
+            if last_grad is None:
+                raise ValueError("grad_norm is required")
+            prefix += f" |g|={float(last_grad):.6e} Ha/Bohr"
         heartbeat = ProcessHeartbeat(
             _HEARTBEAT_LOG,
-            f"Optimization iteration {self.geom_iter}",
+            prefix,
             interval_s=_HEARTBEAT_INTERVAL_S,
             task_id=task_id,
             extra_paths=["pyscf.out"],

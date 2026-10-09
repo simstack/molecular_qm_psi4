@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import logging
+import math
 import os
 import re
 import signal
@@ -823,11 +824,25 @@ async def _persist_opt_charts(energy_data, grad_data, kwargs, existing=(None, No
         parent_id,
         existing[0],
     )
+    logged_grad = []
+    for row in list(grad_data)[-_OPT_CHART_STEPS:]:
+        if "grad_norm" not in row or row["grad_norm"] is None:
+            raise ValueError(f"grad_norm is required to plot its log, got {row!r}")
+        grad_norm = float(row["grad_norm"])
+        if not grad_norm > 0.0:
+            raise ValueError(f"grad_norm must be positive to plot its log, got {grad_norm}")
+        logged = {
+            "step": row["step"],
+            "log10_grad_norm": math.log10(grad_norm),
+        }
+        if "timestamp" in row:
+            logged["timestamp"] = row["timestamp"]
+        logged_grad.append(logged)
     grad_chart = _opt_line_chart(
-        list(grad_data)[-_OPT_CHART_STEPS:],
-        "grad_norm",
-        "Psi4 optimization gradient norm",
-        "|g| (Ha/Bohr)",
+        logged_grad,
+        "log10_grad_norm",
+        "Psi4 optimization log10 gradient norm",
+        "log10(|g|)",
         parent_id,
         existing[1],
     )
