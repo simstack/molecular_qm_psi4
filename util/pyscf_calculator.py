@@ -198,6 +198,42 @@ _OPT_CONV_KEYS = (
 )
 
 
+def _mark_if_met(value, limit) -> str:
+    number = float(value)
+    cutoff = float(limit)
+    star = "*" if abs(number) < cutoff else ""
+    return f"{number:.6e}{star}"
+
+
+def format_pyscf_opt_progress(params, current) -> str:
+    """Current geomeTRIC values. A trailing * means that value is inside its cutoff."""
+    if not isinstance(params, dict):
+        raise ValueError(f"optimization convergence params must be a dict, got {params!r}")
+    if not isinstance(current, dict):
+        raise ValueError(f"optimization progress must be a dict, got {current!r}")
+    missing = [key for key in _OPT_CONV_KEYS if params.get(key) is None]
+    if missing:
+        raise ValueError(f"optimization convergence is missing {missing}")
+    fields = (
+        ("energy_change", "convergence_energy", "|dE|=", " Ha"),
+        ("grms", "convergence_grms", "grms=", " Ha/Bohr"),
+        ("gmax", "convergence_gmax", "gmax=", " Ha/Bohr"),
+        ("drms", "convergence_drms", "drms=", " Ang"),
+        ("dmax", "convergence_dmax", "dmax=", " Ang"),
+    )
+    parts = []
+    for key, limit_key, label, unit in fields:
+        if key not in current:
+            continue
+        value = current[key]
+        if value is None:
+            raise ValueError(f"{key} is required")
+        if key == "energy_change":
+            value = abs(float(value))
+        parts.append(f"{label}{_mark_if_met(value, params[limit_key])}{unit}")
+    return " ".join(parts)
+
+
 def format_pyscf_opt_convergence(name, params) -> str:
     """Text for the five cutoffs passed to geomeTRIC. All five must be met."""
     if name is None or not str(name).strip():

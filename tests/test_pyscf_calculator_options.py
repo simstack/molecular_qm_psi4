@@ -98,6 +98,35 @@ def test_pyscf_opt_conv_params_rejects_unknown_accuracy():
         raise AssertionError("expected ValueError when optimization accuracy is missing")
 
 
+def test_format_pyscf_opt_progress_marks_values_inside_the_cutoff():
+    from molecular_qm_psi4.util.pyscf_calculator import format_pyscf_opt_progress
+
+    params = pyscf_opt_conv_params("VeryTight")
+    text = format_pyscf_opt_progress(
+        params,
+        {
+            "energy_change": -2.6504e-7,
+            "grms": 3.429639e-6,
+            "gmax": 1.14912e-5,
+            "drms": 1.763111e-5,
+            "dmax": 2.9e-5,
+        },
+    )
+    assert text == (
+        "|dE|=2.650400e-07 Ha "
+        "grms=3.429639e-06* Ha/Bohr "
+        "gmax=1.149120e-05* Ha/Bohr "
+        "drms=1.763111e-05* Ang "
+        "dmax=2.900000e-05* Ang"
+    )
+    try:
+        format_pyscf_opt_progress(params, {"grms": None})
+    except ValueError as exc:
+        assert "grms" in str(exc)
+    else:
+        raise AssertionError("expected ValueError when a reported value is missing")
+
+
 def test_format_pyscf_opt_convergence_prints_every_geomeTRIC_cutoff():
     from molecular_qm_psi4.util.pyscf_calculator import format_pyscf_opt_convergence
 
@@ -432,6 +461,95 @@ def test_pyscf_persist_opt_charts_keeps_last_20_steps(monkeypatch):
     assert grad_charts[-1].title.text == "PySCF optimization log10 gradient norm"
     assert grad_charts[-1].axes[1].title == "log10(|g|)"
     assert grad_charts[-1].data[-1]["log10_grad_norm"] == math.log10(0.1 / 25)
+
+
+def test_pyscf_persist_opt_charts_plots_each_criterion_and_its_threshold(monkeypatch):
+    import asyncio
+
+    from odmantic import ObjectId
+
+    from molecular_qm_psi4.nodes import pyscf_calculator as mod
+
+    class FakeDb:
+        def __init__(self):
+            self.saved = []
+
+        async def save(self, obj):
+            self.saved.append(obj)
+            return obj
+
+    db = FakeDb()
+    monkeypatch.setattr(mod, "_get_db", lambda: db)
+    energy = [{"step": i, "energy": -76.0 - i} for i in range(1, 4)]
+    grad = [{"step": i, "grad_norm": 0.1 / i} for i in range(1, 4)]
+    criteria = [
+        {"step": 1, "grms": 1.0e-3, "gmax": 2.0e-3},
+        {
+            "step": 2,
+            "grms": 5.0e-4,
+            "gmax": 1.0e-3,
+            "drms": 4.0e-4,
+            "dmax": 8.0e-4,
+            "abs_de": 2.0e-6,
+        },
+        {
+            "step": 3,
+            "grms": 1.0e-5,
+            "gmax": 2.0e-5,
+            "drms": 2.0e-4,
+            "dmax": 3.0e-4,
+            "abs_de": 1.0e-7,
+        },
+    ]
+    params = {
+        "convergence_energy": 1.0e-8,
+        "convergence_grms": 1.0e-5,
+        "convergence_gmax": 1.5e-5,
+        "convergence_drms": 6.0e-5,
+        "convergence_dmax": 9.0e-5,
+    }
+    asyncio.run(
+        mod._persist_opt_charts(
+            energy,
+            grad,
+            {"task_id": str(ObjectId()), "node_runner": MagicMock()},
+            criterion_data=criteria,
+            conv_params=params,
+        )
+    )
+    by_key = {}
+    for chart in db.saved:
+        y_keys = [series.yKey for series in chart.series]
+        if "threshold" in y_keys:
+            by_key[y_keys[0]] = chart
+    assert set(by_key) == {"abs_de", "grms", "gmax", "drms", "dmax"}
+    grms = by_key["grms"]
+    assert grms.title.text == "PySCF optimization grms"
+    assert grms.axes[1].type == "log"
+    assert grms.axes[1].title == "grms (Ha/Bohr)"
+    assert [series.yKey for series in grms.series] == ["grms", "threshold"]
+    assert grms.series[1].title == "threshold"
+    assert grms.series[1].lineDash == [6, 4]
+    assert [row["step"] for row in grms.data] == [1, 2, 3]
+    assert [row["threshold"] for row in grms.data] == [1.0e-5, 1.0e-5, 1.0e-5]
+    assert [row["grms"] for row in grms.data] == [1.0e-3, 5.0e-4, 1.0e-5]
+    assert [row["step"] for row in by_key["abs_de"].data] == [2, 3]
+    assert [row["threshold"] for row in by_key["abs_de"].data] == [1.0e-8, 1.0e-8]
+    assert [row["step"] for row in by_key["drms"].data] == [2, 3]
+    assert [row["step"] for row in by_key["dmax"].data] == [2, 3]
+    try:
+        asyncio.run(
+            mod._persist_opt_charts(
+                energy,
+                grad,
+                {"task_id": str(ObjectId()), "node_runner": MagicMock()},
+                criterion_data=criteria,
+            )
+        )
+    except ValueError as exc:
+        assert "convergence params" in str(exc)
+    else:
+        raise AssertionError("expected ValueError when convergence params are missing")
     try:
         asyncio.run(
             mod._persist_opt_charts(
@@ -532,26 +650,13 @@ def test_pyscf_optimize_logs_energy_and_gradient_every_step():
     assert "Optimization step 3: energy=-76.520000000000 Ha, |g|=3.000000e-02 Ha/Bohr" in step_logs[2]
     logged = [call.args[0] for call in node_runner.log.call_args_list]
     assert step_logs == [msg for msg in logged if "Optimization step " in msg]
-    criteria = (
-        "optimization_accuracy=Medium "
-        "|dE|<1.0e-06 Ha "
-        "grms<3.0e-04 Ha/Bohr "
-        "gmax<4.5e-04 Ha/Bohr "
-        "drms<1.2e-03 Ang "
-        "dmax<1.8e-03 Ang "
-        "(geomeTRIC requires all five)"
-    )
     prefixes = [call.args[1] for call in heartbeat_cls.call_args_list]
     assert prefixes == [
-        f"Optimization iteration 1 {criteria}",
+        "Optimization iteration 1",
+        "Optimization iteration 2 grms=6.928203e-02 Ha/Bohr gmax=1.200000e-01 Ha/Bohr",
         (
-            f"Optimization iteration 2 {criteria} "
-            "|g|=1.200000e-01 grms=6.928203e-02 gmax=1.200000e-01 Ha/Bohr"
-        ),
-        (
-            f"Optimization iteration 3 {criteria} "
-            "|g|=8.000000e-02 grms=4.618802e-02 gmax=8.000000e-02 Ha/Bohr "
-            "dE=-1.0000e-02 Ha"
+            "Optimization iteration 3 |dE|=1.000000e-02 Ha "
+            "grms=4.618802e-02 Ha/Bohr gmax=8.000000e-02 Ha/Bohr"
         ),
     ]
 
@@ -713,7 +818,7 @@ def test_kernel_hessian_logs_info_and_stops_heartbeat():
     heartbeat.start.assert_called_once()
     heartbeat.stop.assert_called_once()
     assert heartbeat_cls.call_args.kwargs["interval_s"] == _HEARTBEAT_INTERVAL_S
-    assert _HEARTBEAT_INTERVAL_S == 1800.0
+    assert _HEARTBEAT_INTERVAL_S == 300.0
     messages = [call.args[0] for call in node_runner.info.call_args_list]
     assert any("Starting frequency/Hessian calculation" in msg for msg in messages)
     assert hobj.verbose == 4

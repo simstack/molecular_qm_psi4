@@ -34,6 +34,7 @@ from molecular_qm_psi4.util.pyscf_calculator import (
     df_hessian_memory,
     harmonic_cartesian_constraints,
     format_pyscf_opt_convergence,
+    format_pyscf_opt_progress,
     iteration_timeout_seconds,
     method_name_from_qm_input,
     pyscf_opt_accuracy_name,
@@ -71,7 +72,14 @@ _SNAPSHOT_WFN_NAME = "snapshot.wfn.npy"
 _WATCHDOG_SIDECAR = "optimization_watchdog_timeout.txt"
 _HEARTBEAT_LOG = "heartbeat.log"
 _FREQ_KEY = "frequency_analysis"
-_HEARTBEAT_INTERVAL_S = 1800.0
+_HEARTBEAT_INTERVAL_S = 300.0
+_CRITERION_CHARTS = (
+    ("abs_de", "convergence_energy", "|dE|", "Ha"),
+    ("grms", "convergence_grms", "grms", "Ha/Bohr"),
+    ("gmax", "convergence_gmax", "gmax", "Ha/Bohr"),
+    ("drms", "convergence_drms", "drms", "Ang"),
+    ("dmax", "convergence_dmax", "dmax", "Ang"),
+)
 
 
 def _cleanup_snapshot_files(directory: Path | None = None):
@@ -169,9 +177,78 @@ def _opt_line_chart(data, y_key, title, y_label, parent_id, existing=None):
     )
 
 
-async def _persist_opt_charts(energy_data, grad_data, kwargs, existing=(None, None)):
+def _criterion_plot_rows(history, value_key, threshold):
+    cutoff = float(threshold)
+    if not cutoff > 0.0:
+        raise ValueError(f"{value_key} threshold must be positive, got {cutoff}")
+    rows = []
+    for row in history:
+        if value_key not in row:
+            continue
+        value = row[value_key]
+        if value is None:
+            raise ValueError(f"{value_key} is required")
+        number = float(value)
+        if not number > 0.0:
+            raise ValueError(f"{value_key} must be positive to plot against its threshold, got {number}")
+        plotted = {"step": row["step"], value_key: number, "threshold": cutoff}
+        if "timestamp" in row:
+            plotted["timestamp"] = row["timestamp"]
+        rows.append(plotted)
+    return rows[-_OPT_CHART_STEPS:]
+
+
+def _opt_criterion_chart(data, value_key, title, y_label, parent_id, existing=None):
+    value_series = AGLineSeriesConfig(
+        type="line",
+        xKey="step",
+        yKey=value_key,
+        title=y_label,
+        data=data,
+        marker={"enabled": False},
+    )
+    threshold_series = AGLineSeriesConfig(
+        type="line",
+        xKey="step",
+        yKey="threshold",
+        title="threshold",
+        data=data,
+        marker={"enabled": False},
+        lineDash=[6, 4],
+    )
+    axes = [
+        AGChartAxisConfig(type="number", position="bottom", title="Optimization step"),
+        AGChartAxisConfig(type="log", position="left", title=y_label),
+    ]
+    series = [value_series, threshold_series]
+    if existing is not None:
+        existing.data = data
+        existing.title = AGChartTitleConfig(text=title)
+        existing.series = series
+        existing.axes = axes
+        existing.parent_id = parent_id
+        return existing
+    return ChartArtifactModel(
+        parent_id=parent_id,
+        data=data,
+        title=AGChartTitleConfig(text=title),
+        series=series,
+        axes=axes,
+    )
+
+
+async def _persist_opt_charts(
+    energy_data,
+    grad_data,
+    kwargs,
+    existing=None,
+    criterion_data=None,
+    conv_params=None,
+):
     node_runner = None if not kwargs else kwargs.get("node_runner")
     parent_id = _task_parent_id(kwargs)
+    if existing is None:
+        existing = {}
     if parent_id is None:
         return existing
     db = _get_db()
@@ -183,7 +260,7 @@ async def _persist_opt_charts(energy_data, grad_data, kwargs, existing=(None, No
         "PySCF optimization energy",
         "Energy (Ha)",
         parent_id,
-        existing[0],
+        existing.get("energy"),
     )
     logged_grad = []
     for row in list(grad_data)[-_OPT_CHART_STEPS:]:
@@ -205,16 +282,34 @@ async def _persist_opt_charts(energy_data, grad_data, kwargs, existing=(None, No
         "PySCF optimization log10 gradient norm",
         "log10(|g|)",
         parent_id,
-        existing[1],
+        existing.get("grad"),
     )
+    charts = {"energy": energy_chart, "grad": grad_chart}
+    if criterion_data:
+        if conv_params is None:
+            raise ValueError("optimization convergence params are required to plot criteria")
+        for value_key, limit_key, label, unit in _CRITERION_CHARTS:
+            if conv_params.get(limit_key) is None:
+                raise ValueError(f"optimization convergence is missing {limit_key}")
+            rows = _criterion_plot_rows(criterion_data, value_key, conv_params[limit_key])
+            if not rows:
+                continue
+            charts[value_key] = _opt_criterion_chart(
+                rows,
+                value_key,
+                f"PySCF optimization {label}",
+                f"{label} ({unit})",
+                parent_id,
+                existing.get(value_key),
+            )
     try:
-        await db.save(energy_chart)
-        await db.save(grad_chart)
+        for chart in charts.values():
+            await db.save(chart)
     except Exception as exc:
         if node_runner is not None:
             node_runner.warning(f"Failed to store optimization charts: {exc}")
         return existing
-    return energy_chart, grad_chart
+    return charts
 
 
 def _payload_from_mf(mf, mol, energy, hessian=None, freq_info=None):
@@ -381,11 +476,12 @@ class OptimizationSnapshotter:
         self.last_mol = None
         self.energy_history = []
         self.grad_history = []
+        self.criterion_history = []
         self.timing_history = []
         self.opt_geometries = []
         self.opt_wall_s = None
         self.opt_cpu_s = None
-        self.charts = (None, None)
+        self.charts = {}
         self._chart_steps = set()
         self.stdout_tee = None
         n_atoms = n_atoms_from_molecule(getattr(qm_input, "molecule", None) or source_molecule)
@@ -397,7 +493,9 @@ class OptimizationSnapshotter:
         self._iter_heartbeat = None
         self._timeout_logged = False
         self.opt_convergence_text = ""
+        self.opt_conv_params = None
         self.last_opt_step = None
+        self._prev_coords = None
 
     def _node_runner(self):
         return self.kwargs.get("node_runner")
@@ -418,33 +516,41 @@ class OptimizationSnapshotter:
         node_runner = self._node_runner()
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         timeout_text = "none" if timeout is None else f"{timeout:g}s"
+        progress = ""
+        last = self.last_opt_step
+        if self.opt_conv_params is not None and last is not None:
+            current = {}
+            if last.get("grad_norm") is not None:
+                if last.get("grms") is None or last.get("gmax") is None:
+                    raise ValueError("grms and gmax are required when grad_norm is set")
+                current["grms"] = last["grms"]
+                current["gmax"] = last["gmax"]
+            previous = last.get("previous_energy")
+            energy = last.get("energy")
+            if previous is not None and energy is not None:
+                current["energy_change"] = float(energy) - float(previous)
+            if "drms" in last or "dmax" in last:
+                if last.get("drms") is None or last.get("dmax") is None:
+                    raise ValueError("drms and dmax are required together")
+                current["drms"] = last["drms"]
+                current["dmax"] = last["dmax"]
+            progress = format_pyscf_opt_progress(self.opt_conv_params, current)
+        prefix = f"Optimization iteration {self.geom_iter}"
+        if progress:
+            prefix += f" {progress}"
         start_msg = (
             f"{stamp} Starting optimization iteration {self.geom_iter} "
             f"(timeout {timeout_text}, n_atoms={self.n_atoms}, "
             f"basis={self.basis_name or 'unknown'})"
         )
+        if progress:
+            start_msg += f" {progress}"
         if node_runner is not None:
             node_runner.log(start_msg)
             node_runner.info(start_msg)
         else:
             logger.info(start_msg)
         task_id = "" if node_runner is None else str(getattr(node_runner, "task_id", "") or "")
-        prefix = f"Optimization iteration {self.geom_iter}"
-        if self.opt_convergence_text:
-            prefix += f" {self.opt_convergence_text}"
-        last = self.last_opt_step
-        if last is not None and last.get("grad_norm") is not None:
-            if last.get("grms") is None or last.get("gmax") is None:
-                raise ValueError("grms and gmax are required when grad_norm is set")
-            prefix += (
-                f" |g|={float(last['grad_norm']):.6e}"
-                f" grms={float(last['grms']):.6e}"
-                f" gmax={float(last['gmax']):.6e} Ha/Bohr"
-            )
-            previous = last.get("previous_energy")
-            energy = last.get("energy")
-            if previous is not None and energy is not None:
-                prefix += f" dE={float(energy) - float(previous):.4e} Ha"
         heartbeat = ProcessHeartbeat(
             _HEARTBEAT_LOG,
             prefix,
@@ -592,21 +698,35 @@ class OptimizationSnapshotter:
             logger.info(msg)
         return stamp
 
-    def _record_opt_charts(self, step, energy, grad_norm, stamp=None):
+    def _record_opt_charts(self, step, energy, grad_norm, stamp=None, criteria=None):
         if energy is None or grad_norm is None:
             return
         if step is None:
             raise ValueError("step is required")
         step = int(step)
-        if step < 1 or step in self._chart_steps:
-            return
-        self._chart_steps.add(step)
-        self.energy_history.append(
-            {"step": step, "energy": float(energy), "timestamp": stamp}
-        )
-        self.grad_history.append(
-            {"step": step, "grad_norm": float(grad_norm), "timestamp": stamp}
-        )
+        if step < 1:
+            raise ValueError(f"optimization step must be positive, got {step}")
+        if criteria is not None and not isinstance(criteria, dict):
+            raise ValueError(f"optimization criteria must be a dict, got {criteria!r}")
+        if step not in self._chart_steps:
+            self._chart_steps.add(step)
+            self.energy_history.append(
+                {"step": step, "energy": float(energy), "timestamp": stamp}
+            )
+            self.grad_history.append(
+                {"step": step, "grad_norm": float(grad_norm), "timestamp": stamp}
+            )
+        if criteria:
+            row = next((item for item in self.criterion_history if item["step"] == step), None)
+            if row is None:
+                row = {"step": step, "timestamp": stamp}
+                self.criterion_history.append(row)
+            for key, value in criteria.items():
+                if key not in {item[0] for item in _CRITERION_CHARTS}:
+                    raise ValueError(f"unknown optimization criterion {key!r}")
+                if value is None:
+                    raise ValueError(f"{key} is required")
+                row[key] = float(value)
         try:
             self._flush_opt_charts()
         except Exception as exc:
@@ -620,7 +740,14 @@ class OptimizationSnapshotter:
         if not self.energy_history:
             return
         saved = _run_async(
-            _persist_opt_charts(self.energy_history, self.grad_history, self.kwargs, self.charts)
+            _persist_opt_charts(
+                self.energy_history,
+                self.grad_history,
+                self.kwargs,
+                self.charts,
+                self.criterion_history,
+                self.opt_conv_params,
+            )
         )
         if saved is not None:
             self.charts = saved
@@ -993,6 +1120,29 @@ def _optimize(mf, qm_input, snapshotter):
                 energy, grad = _apply_harmonic_to_gradient(energy, grad, mol, constraints)
             return energy, grad
         snapshotter.geom_iter += 1
+        coords = None
+        if np is not None and hasattr(mol, "atom_coords"):
+            try:
+                try:
+                    raw = mol.atom_coords(unit="Angstrom")
+                except TypeError:
+                    raw = np.asarray(mol.atom_coords(), dtype=float) * 0.5291772109
+                else:
+                    raw = np.asarray(raw, dtype=float)
+            except (TypeError, ValueError):
+                raw = None
+            if (
+                raw is not None
+                and raw.dtype.kind == "f"
+                and raw.size > 0
+                and raw.ndim == 2
+                and raw.shape[1] == 3
+            ):
+                coords = raw
+            elif raw is not None and raw.dtype.kind == "f" and raw.size > 0:
+                raise ValueError(
+                    f"molecule coordinates must have shape (n, 3), got {getattr(raw, 'shape', None)}"
+                )
         snapshotter._start_iter_timer()
         wall_start = time.monotonic()
         cpu_start = time.process_time()
@@ -1021,6 +1171,19 @@ def _optimize(mf, qm_input, snapshotter):
             previous_energy = (
                 None if snapshotter.last_opt_step is None else snapshotter.last_opt_step.get("energy")
             )
+            drms = None
+            dmax = None
+            if coords is not None and snapshotter._prev_coords is not None:
+                if snapshotter._prev_coords.shape != coords.shape:
+                    raise ValueError(
+                        "optimization geometry changed atom count from "
+                        f"{snapshotter._prev_coords.shape} to {coords.shape}"
+                    )
+                delta = (coords - snapshotter._prev_coords).ravel()
+                drms = float(np.sqrt(np.mean(np.square(delta))))
+                dmax = float(np.max(np.abs(delta)))
+            if coords is not None:
+                snapshotter._prev_coords = coords
             snapshotter.last_opt_step = {
                 "grad_norm": grad_norm,
                 "grms": grms,
@@ -1028,6 +1191,9 @@ def _optimize(mf, qm_input, snapshotter):
                 "energy": None if energy is None else float(energy),
                 "previous_energy": previous_energy,
             }
+            if drms is not None:
+                snapshotter.last_opt_step["drms"] = drms
+                snapshotter.last_opt_step["dmax"] = dmax
             stamp = snapshotter._log_opt_step(
                 energy, grad_norm, wall_s, cpu_s, grms=grms, gmax=gmax
             )
@@ -1041,8 +1207,17 @@ def _optimize(mf, qm_input, snapshotter):
                     "grad_norm": grad_norm,
                 }
             )
+            criteria = {}
+            if grms is not None:
+                criteria["grms"] = grms
+                criteria["gmax"] = gmax
+            if previous_energy is not None and energy is not None:
+                criteria["abs_de"] = abs(float(energy) - float(previous_energy))
+            if drms is not None:
+                criteria["drms"] = drms
+                criteria["dmax"] = dmax
             snapshotter._record_opt_charts(
-                int(snapshotter.geom_iter), energy, grad_norm, stamp
+                int(snapshotter.geom_iter), energy, grad_norm, stamp, criteria or None
             )
             if energy is not None:
                 snapshotter._raise_if_energy_oscillating()
@@ -1058,6 +1233,7 @@ def _optimize(mf, qm_input, snapshotter):
     convergence_text = format_pyscf_opt_convergence(accuracy_name, conv_params)
     if snapshotter is not None:
         snapshotter.opt_convergence_text = convergence_text
+        snapshotter.opt_conv_params = conv_params
         node_runner = snapshotter._node_runner()
         if node_runner is not None:
             node_runner.info(convergence_text)
