@@ -3,7 +3,13 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from molecular_qm_psi4.util.pyscf_hessian_h1 import h1_ip1_block, make_h1_memory
+import os
+
+from molecular_qm_psi4.util.pyscf_hessian_h1 import (
+    _release_h5_cache,
+    h1_ip1_block,
+    make_h1_memory,
+)
 
 
 class _Libxc:
@@ -36,28 +42,70 @@ def test_pbe0_make_h1_480_block_exceeds_a_32gb_container():
 
 
 def test_def2_tzvpp_block_is_below_pyscf_480():
-    # 2 * (3 + 1) * nao^2 * 8 plus the hybrid slice. 480 of those exceed 32 GB.
-    blk = h1_ip1_block(1600, 4000, 220, 27200, 10000, True)
-    assert blk == 101
+    # 9 * nao^2 * 8: int3c, its copy, coef, the (nao, nao) fit and that copy.
+    blk = h1_ip1_block(1600, 4000, 27200, 10000, True)
+    assert blk == 93
+    assert blk < 480
+
+
+def test_hybrid_fit_is_nao_by_nao_so_480_does_not_fit():
+    # The old nao*nocc term left blk at PySCF's 480 cap. The fit is nao*nao.
+    blk = h1_ip1_block(860, 8000, 27904, 4293, True)
+    assert blk == 443
     assert blk < 480
 
 
 def test_block_is_capped_by_the_aux_dimension():
-    assert h1_ip1_block(10, 20, 4, 8000, 100, True) == 20
+    assert h1_ip1_block(10, 20, 8000, 100, True) == 20
 
 
 def test_one_aux_function_that_does_not_fit_raises():
     with pytest.raises(ValueError, match="does not fit"):
-        h1_ip1_block(8000, 8000, 1000, 27200, 26000, True)
+        h1_ip1_block(8000, 8000, 27200, 26000, True)
 
 
 def test_block_size_rejects_missing_memory():
     with pytest.raises(ValueError, match="max_memory"):
-        h1_ip1_block(10, 20, 4, 0, 0, True)
+        h1_ip1_block(10, 20, 0, 0, True)
     with pytest.raises(ValueError, match="reserved_mb"):
-        h1_ip1_block(10, 20, 4, 8000, -1, True)
+        h1_ip1_block(10, 20, 8000, -1, True)
     with pytest.raises(ValueError, match="with_k"):
-        h1_ip1_block(10, 20, 4, 8000, 100, 1)
+        h1_ip1_block(10, 20, 8000, 100, 1)
+
+
+def test_h5_cache_release_requires_a_file_name():
+    class _File:
+        filename = None
+
+        def flush(self):
+            return None
+
+    with pytest.raises(ValueError, match="file name is required"):
+        _release_h5_cache(_File(), True)
+
+
+def test_h5_cache_release_drops_page_cache(tmp_path, monkeypatch):
+    path = tmp_path / "hess.h5"
+    path.write_bytes(b"x" * 32)
+    advised = {}
+
+    class _File:
+        filename = str(path)
+
+        def flush(self):
+            advised["flushed"] = True
+
+    def advise(fd, start, end, flag):
+        advised["span"] = (start, end)
+        advised["flag"] = flag
+        os.read(fd, 1)
+
+    monkeypatch.setattr(os, "posix_fadvise", advise, raising=False)
+    monkeypatch.setattr(os, "POSIX_FADV_DONTNEED", 4, raising=False)
+    assert _release_h5_cache(_File(), True) == str(path)
+    assert advised["flushed"] is True
+    assert advised["span"] == (0, 0)
+    assert advised["flag"] == 4
 
 
 def _water(xc):

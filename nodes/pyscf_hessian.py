@@ -641,7 +641,9 @@ async def pyscf_hessian_for_atoms(
                 task_id=heartbeat_task_id,
             ):
                 # PySCF make_h1 keeps a 480-function int3c2e_ip1 block and copies
-                # it. That SIGKILLs (-9) a 32 GB container on def2-TZVPP.
+                # it. The blocked contraction drops the HDF5 page cache first:
+                # that cache is in the cgroup and not in lib.current_memory, and
+                # a 480-block allocated on top of it is SIGKILL -9.
                 h1ao = make_df_rks_h1(
                     hessian,
                     mf.mo_coeff,

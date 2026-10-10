@@ -9,9 +9,14 @@ The atom list does not shrink the allocation: ``_gen_jk`` fills a Coulomb
 buffer for every atom and only afterwards yields the requested ones.
 
 The contractions below are the PySCF 2.14 ``_gen_jk`` terms. The aux block is
-the largest one whose 3-center tensor, its einsum copy, and the matching
-density-fit coefficient block fit beside the memory that is already resident.
+the largest one whose 3-center tensor, its einsum copy, the coefficient block,
+and the hybrid ``(blk, nao, nao)`` fit all stay inside the resident set.
+Density-fit coefficients are written to a temporary HDF5 file first. That
+file's page cache is charged to the Docker cgroup and is invisible to
+``lib.current_memory``, so it is dropped before the 3-center block is allocated.
 """
+
+import os
 
 try:
     import numpy as np
@@ -50,17 +55,18 @@ def _memory_mb(name, value) -> float:
     return memory
 
 
-def h1_ip1_block(nao, naux, nocc, max_memory_mb, reserved_mb, with_k) -> int:
+def h1_ip1_block(nao, naux, max_memory_mb, reserved_mb, with_k) -> int:
     """Largest aux block for ``int3c2e_ip1`` shaped ``(3, nao, nao, blk)``.
 
     ``reserved_mb`` stays allocated beside the block (resident PySCF memory,
-    the per-atom Coulomb buffer, and the overhead above). ``with_k`` includes
-    the occupied-orbital slice that hybrid exchange contracts with the block.
+    the per-atom Coulomb buffer, and the overhead above). A hybrid contracts
+    ``plj,Jj->plJ`` into a ``(blk, nao, nao)`` fit and ``lib.einsum`` copies
+    both that fit and the whole 3-center block. That is an ``nao x nao``
+    tensor, not an ``nao x nocc`` slice.
     """
     _require_numpy()
     orbitals = _positive_int("nao", nao)
     aux = _positive_int("naux", naux)
-    occ = _positive_int("nocc", nocc)
     if isinstance(with_k, np.bool_):
         with_k = bool(with_k)
     if not isinstance(with_k, bool):
@@ -69,9 +75,11 @@ def h1_ip1_block(nao, naux, nocc, max_memory_mb, reserved_mb, with_k) -> int:
     if budget <= 0:
         raise ValueError(f"max_memory must be positive, got {max_memory_mb!r}")
     reserved = _memory_mb("reserved_mb", reserved_mb)
-    # int3c (3, nao, nao) plus the einsum copy, the (nao, nao) coefficient
-    # block plus its copy, and for hybrids the (nao, nocc) exchange slice.
-    per_mb = (2.0 * (3 + 1) * orbitals * orbitals + (2.0 * orbitals * occ if with_k else 0.0)) * 8 / 1e6
+    # Hybrid peak, per aux function: int3c (3), its einsum copy (3), coef (1),
+    # the (nao, nao) fit (1) and that fit's einsum copy (1). Pure DFT peaks
+    # while hstack still holds the coefficient pieces beside int3c: 3 + 2.
+    per_nao2 = 9.0 if with_k else 5.0
+    per_mb = per_nao2 * orbitals * orbitals * 8 / 1e6
     if per_mb <= 0:
         raise ValueError("DF Hessian make_h1 block size is not defined for this basis")
     remaining = budget - reserved
@@ -83,10 +91,47 @@ def h1_ip1_block(nao, naux, nocc, max_memory_mb, reserved_mb, with_k) -> int:
     if blk < 1:
         raise ValueError(
             f"DF Hessian make_h1 int3c2e_ip1 does not fit in max_memory={budget} MB "
-            f"(nao={orbitals}, naux={aux}, nocc={occ}, reserved={reserved} MB, "
+            f"(nao={orbitals}, naux={aux}, reserved={reserved} MB, "
             f"one aux function needs {per_mb:.1f} MB)"
         )
     return blk
+
+
+def _release_h5_cache(h5file, sync) -> str:
+    """Drop a temporary HDF5 file from the kernel page cache.
+
+    The cgroup memory limit includes that cache. ``lib.current_memory`` reads
+    RSS only, so a block sized against RSS is allocated on top of a cache that
+    already fills the container and the kernel SIGKILLs the process (exit -9).
+    ``sync`` must be true before the 3-center block: ``DONTNEED`` does not drop
+    dirty pages, and the coefficient file was just written.
+    """
+    if not isinstance(sync, bool):
+        raise ValueError(f"sync must be a bool, got {sync!r}")
+    flush = getattr(h5file, "flush", None)
+    if not callable(flush):
+        raise ValueError("HDF5 temporary file flush is required to release its cache")
+    flush()
+    name = getattr(h5file, "filename", None)
+    if not isinstance(name, str) or not name:
+        raise ValueError("HDF5 temporary file name is required to release its cache")
+    advise = getattr(os, "posix_fadvise", None)
+    if advise is None:
+        return name
+    flag = getattr(os, "POSIX_FADV_DONTNEED", None)
+    if flag is None:
+        raise ValueError("POSIX_FADV_DONTNEED is required to release the HDF5 page cache")
+    # Windows rejects fsync on a read-only descriptor. Linux accepts either.
+    fd = os.open(name, os.O_RDWR)
+    try:
+        if sync:
+            os.fsync(fd)
+        advise(fd, 0, 0, flag)
+    except OSError as exc:
+        raise ValueError(f"failed to release HDF5 page cache for {name}: {exc}") from exc
+    finally:
+        os.close(fd)
+    return name
 
 
 def make_h1_memory(mf, mol, max_memory) -> dict:
@@ -152,11 +197,13 @@ def make_h1_memory(mf, mol, max_memory) -> dict:
     h1ao_mb = natm * 3 * nao2 * 8 / 1e6
     int3c_mb = 3 * nao2 * blk * 8 / 1e6
     # Hybrid exchange passes the whole int3c block through lib.einsum, which
-    # copies that operand. Pure DFT only contracts density slices of it.
+    # copies that operand, and also holds the (blk, nao, nao) fit from
+    # plj,Jj->plJ plus that fit's copy. Pure DFT only contracts density slices.
     copy_mb = int3c_mb if with_k else 0.0
     rhok0_mb = naux * orbitals * nocc * 8 / 1e6 if with_k else 0.0
     int2c_mb = 3 * naux * naux * 8 / 1e6
     coef_mb = blk * nao2 * 8 / 1e6
+    fit_mb = 2.0 * coef_mb if with_k else 0.0
     vk1_mb = 3 * nao2 * 8 / 1e6
     current_mb = 0.0
     try:
@@ -173,6 +220,7 @@ def make_h1_memory(mf, mol, max_memory) -> dict:
         + rhok0_mb
         + int2c_mb
         + coef_mb
+        + fit_mb
         + vk1_mb
         + _H1_OVERHEAD_MB
         + current_mb
@@ -225,8 +273,18 @@ def _wj_in_one_piece(out_mb, coef_mb, current_mb, budget) -> bool:
 
 
 def _hstack_aux(group, start, stop, natm):
-    """Aux slice ``[start, stop)`` stacked in atom order along the AO axis."""
-    return np.hstack([np.asarray(group[f"{atom:04d}"][start:stop]) for atom in range(natm)])
+    """Aux slice ``[start, stop)`` stacked in atom order along the AO axis.
+
+    The numpy result is a copy. The file pages that supplied it are then
+    dropped so they are not still charged to the cgroup when the 3-center
+    einsum allocates its own copy.
+    """
+    stacked = np.hstack([np.asarray(group[f"{atom:04d}"][start:stop]) for atom in range(natm)])
+    parent = getattr(group, "file", None)
+    if parent is None:
+        raise ValueError("HDF5 group file is required to release its page cache")
+    _release_h5_cache(parent, False)
+    return stacked
 
 
 def gen_df_jk(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, with_k, log=None):
@@ -316,19 +374,21 @@ def gen_df_jk(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, with_k, lo
                     a1 = int(aux_loc[shell1])
                     stored[a0:a1] = lib.einsum("xqp,pij->qixj", int2c_ip1[:, a0:a1], coef3c)
         del coef3c
+        _release_h5_cache(ftmp, False)
 
     get_int3c_ip1 = _int3c_wrapper(mol, auxmol, "int3c2e_ip1", "s1")
     get_int3c_ip2 = _int3c_wrapper(mol, auxmol, "int3c2e_ip2", "s1")
     vk1_buf = np.zeros((3, nao, nao))
+    h5_name = _release_h5_cache(ftmp, True)
+    h5_mb = os.path.getsize(h5_name) / 1e6
     current_mb = float(lib.current_memory()[0])
     vj1_mb = len(indexes) * 3 * nao * nao * 8 / 1e6
-    blk = h1_ip1_block(
-        nao, naux, nocc, budget, current_mb + vj1_mb + _H1_OVERHEAD_MB, exchange
-    )
+    blk = h1_ip1_block(nao, naux, budget, current_mb + vj1_mb + _H1_OVERHEAD_MB, exchange)
     if log is not None:
         log(
             f"make_h1 aux block {blk} functions for atoms {indexes[0]}-{indexes[-1]} "
-            f"at max_memory={budget} MB (reserved {current_mb + vj1_mb + _H1_OVERHEAD_MB:.0f} MB)"
+            f"at max_memory={budget} MB (reserved {current_mb + vj1_mb + _H1_OVERHEAD_MB:.0f} MB, "
+            f"h5 file {h5_mb:.0f} MB, page cache released)"
         )
     blocks = shell_blocks(aux_loc, 0, nbas_aux, blk)
     position = {atom: slot for slot, atom in enumerate(indexes)}
@@ -336,6 +396,7 @@ def gen_df_jk(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, with_k, lo
     for shell0, shell1 in blocks:
         a0 = int(aux_loc[shell0])
         a1 = int(aux_loc[shell1])
+        _release_h5_cache(ftmp, False)
         int3c_ip1 = get_int3c_ip1((0, nbas, 0, nbas, shell0, shell1))
         coef3c = _hstack_aux(rho0_pij, a0, a1, int(mol.natm))
         for atom, (_shl0, _shl1, q0, q1) in enumerate(aoslices):
@@ -359,6 +420,7 @@ def gen_df_jk(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, with_k, lo
         for shell0, shell1 in blocks:
             a0 = int(aux_loc[shell0])
             a1 = int(aux_loc[shell1])
+            _release_h5_cache(ftmp, False)
             int3c_ip1 = get_int3c_ip1((shl0, shl1, 0, nbas, shell0, shell1))
             vj1[:, p0:p1] -= np.einsum("xijp,p->xij", int3c_ip1, rhoj0[a0:a1])
             if exchange:
@@ -375,6 +437,7 @@ def gen_df_jk(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, with_k, lo
                 for shell0, shell1 in shell_blocks(aux_loc, ashl0, ashl1, blk):
                     b0 = int(aux_loc[shell0])
                     b1 = int(aux_loc[shell1])
+                    _release_h5_cache(ftmp, False)
                     int3c_ip2 = get_int3c_ip2((0, nbas, 0, nbas, shell0, shell1))
                     rhoj1 = np.einsum("xijp,ji->xp", int3c_ip2, dm0)
                     coef3c = _hstack_aux(rho0_pij, b0, b1, int(mol.natm))

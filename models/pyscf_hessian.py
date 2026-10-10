@@ -130,9 +130,11 @@ class PySCFHessianMemoryRecord(Model):
     and a partial child, ``required_memory_mb`` is the density-fitted partial
     peak from ``df_hessian_memory``. For an atom batch it is the ``make_h1``
     peak at PySCF's 480-function aux block: the XC derivative, a Coulomb
-    buffer for every atom, ``int3c2e_ip1``, and the hybrid einsum copy. That
-    is the allocation that SIGKILLs a 32 GB atom VM. Shrinking the block so
-    the partial estimate fits does not reduce this peak.
+    buffer for every atom, ``int3c2e_ip1``, the hybrid einsum copy, and the
+    ``(blk, nao, nao)`` exchange fit. That is the allocation that SIGKILLs a
+    32 GB atom VM when the temporary HDF5 page cache is still charged to the
+    cgroup. Shrinking the block so the partial estimate fits does not reduce
+    this peak.
     """
 
     field_name: str = "PySCFHessianMemoryRecord"
