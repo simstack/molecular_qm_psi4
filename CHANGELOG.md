@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.13.0 (2026-10-10)
+
+### Features
+
+- Run PySCF thermochemistry benchmarks from dataset selections
+  ([`a68d9dc`](https://github.com/simstack/molecular_qm_psi4/commit/a68d9dcbbf9207eadef7d80cde938222a519539c))
+
+Add thermo_benchmark2, which optimizes both conformers before comparing method rows, and a dataset
+  node that submits it for each selected molecule, protocol, and target.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.12.3 (2026-10-10)
 
 ### Bug Fixes
