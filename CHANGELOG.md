@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v0.13.1 (2026-10-10)
+
+### Bug Fixes
+
+- Compute a blank molecule formula in thermo_benchmark2
+  ([`052895d`](https://github.com/simstack/molecular_qm_psi4/commit/052895df332b973c49fee5aa191f5be8817a8858))
+
+A stored empty formula was rejected instead of being generated from the structure.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+### Testing
+
+- Cover thermo_benchmark2 and thermo_benchmark_dataset contracts
+  ([`a1c71b1`](https://github.com/simstack/molecular_qm_psi4/commit/a1c71b13af2eaee22110577be43fe9a59a550264))
+
+Check the node signatures, documented SimstackResult outputs, method-step fields, and dataset row
+  labels.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.13.0 (2026-10-10)
 
 ### Features
