@@ -1,0 +1,107 @@
+import inspect
+from types import SimpleNamespace
+
+import pytest
+
+from molecular_qm_models import (
+    GridType,
+    Molecule,
+    OptimizationAccuracy,
+    QMInput,
+    SCFAccuracy,
+)
+from molecular_qm_models.basis_set import BasisSetEnum
+from molecular_qm_psi4 import (
+    ThermoBenchmark2MethodList,
+    ThermoBenchmark2Step,
+    thermo_benchmark2,
+    thermo_benchmark_dataset,
+)
+from molecular_qm_psi4.nodes.multistep_optimizer import PreOptimizerInput
+from molecular_qm_psi4.nodes.thermo_benchmark_dataset import _row_label
+from simstack.models import DataSetSelection
+from simstack.util.docstring_parser import DocstringParser
+
+
+def test_thermo_benchmark2_takes_preopt_and_methods():
+    params = inspect.signature(inspect.unwrap(thermo_benchmark2)).parameters
+    assert list(params)[:4] == ["qm_input", "preopt", "molecule", "methods"]
+    assert params["qm_input"].annotation is QMInput
+    assert params["preopt"].annotation is PreOptimizerInput
+    assert params["molecule"].annotation is Molecule
+    assert params["methods"].annotation is ThermoBenchmark2MethodList
+
+
+def test_thermo_benchmark2_documents_table_output():
+    parsed = DocstringParser(inspect.unwrap(thermo_benchmark2).__doc__)
+    results = parsed.simstack_results()
+    assert results is not None
+    assert results["table"]["type"] == "SimpleTable"
+    assert parsed.called_nodes() == ["multistep_optimizer", "compare_conformers"]
+
+
+def test_thermo_benchmark2_step_carries_accuracy_without_engine():
+    step = ThermoBenchmark2Step.model_validate(
+        {
+            "basis_set": {"basis_set": BasisSetEnum.Def2_TZVP.value},
+            "functional": {"functional": "PBE0"},
+            "scf_accuracy": SCFAccuracy.Tight.value,
+            "dft_grid": GridType.Grid4.value,
+            "optimization_accuracy": OptimizationAccuracy.Tight.value,
+        }
+    )
+    methods = ThermoBenchmark2MethodList(elements=[step])
+    assert methods[0].field_name == "ThermoBenchmark2Step"
+    assert "engine" not in ThermoBenchmark2Step.model_fields
+    assert methods[0].basis_set.basis_set == BasisSetEnum.Def2_TZVP
+    assert methods[0].functional.functional.value == "PBE0"
+    assert methods[0].scf_accuracy is SCFAccuracy.Tight
+    assert methods[0].dft_grid is GridType.Grid4
+    assert methods[0].optimization_accuracy is OptimizationAccuracy.Tight
+    for name in ("scf_accuracy", "dft_grid", "optimization_accuracy"):
+        extra = ThermoBenchmark2Step.model_fields[name].json_schema_extra
+        assert "enum" in extra
+
+
+def test_thermo_benchmark_dataset_selects_three_datasets():
+    params = inspect.signature(inspect.unwrap(thermo_benchmark_dataset)).parameters
+    assert list(params)[:3] == ["molecules", "protocol", "target"]
+    assert params["molecules"].annotation is DataSetSelection
+    assert params["protocol"].annotation is DataSetSelection
+    assert params["target"].annotation is DataSetSelection
+    node_parameters = inspect.unwrap(thermo_benchmark_dataset)._node_parameters
+    assert node_parameters.force_rerun is True
+    assert node_parameters.in_docker is False
+
+
+def test_thermo_benchmark_dataset_documents_table_output():
+    parsed = DocstringParser(inspect.unwrap(thermo_benchmark_dataset).__doc__)
+    results = parsed.simstack_results()
+    assert results is not None
+    assert results["table"]["type"] == "SimpleTable"
+    assert parsed.called_nodes() == ["thermo_benchmark2"]
+
+
+def test_row_label_reads_name_value():
+    assert _row_label({"name": SimpleNamespace(value="boat")}, "row-1", "molecule") == "boat"
+
+
+def test_row_label_uses_row_name_when_name_is_absent():
+    assert _row_label({}, "row-1", "molecule") == "row-1"
+
+
+def test_row_label_rejects_empty_name():
+    with pytest.raises(ValueError, match="molecule row row-1 name is empty"):
+        _row_label({"name": SimpleNamespace(value="  ")}, "row-1", "molecule")
+
+
+def test_row_label_rejects_empty_row_name():
+    with pytest.raises(ValueError, match="protocol row name is empty"):
+        _row_label({}, "  ", "protocol")
+
+
+def test_package_exports_thermo_benchmark_nodes():
+    assert ThermoBenchmark2Step.__name__ == "ThermoBenchmark2Step"
+    assert ThermoBenchmark2MethodList.__name__ == "ThermoBenchmark2MethodList"
+    assert thermo_benchmark2.__name__ == "thermo_benchmark2"
+    assert thermo_benchmark_dataset.__name__ == "thermo_benchmark_dataset"
