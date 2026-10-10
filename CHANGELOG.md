@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.11.0 (2026-10-10)
+
+### Features
+
+- Add a stock PySCF reference calculator for frequency checks
+  ([`79004ab`](https://github.com/simstack/molecular_qm_psi4/commit/79004ab7443cc01a4e947258b5701bf16ab9a2a7))
+
+Run SCF, Hessian.kernel, and harmonic analysis in one process so water frequencies can be compared
+  with the orchestrated calculator.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.18 (2026-10-10)
 
 
