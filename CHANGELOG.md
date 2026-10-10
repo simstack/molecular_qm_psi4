@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.12.1 (2026-10-10)
+
+### Bug Fixes
+
+- Drop Hessian HDF5 page cache before the make_h1 aux block
+  ([`f53da3f`](https://github.com/simstack/molecular_qm_psi4/commit/f53da3fd851c3059ba1ce883c64f01f8523cf296))
+
+The cgroup counts that cache, lib.current_memory does not, and the 480-function block was SIGKILLed
+  on top of it.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.12.0 (2026-10-10)
 
 
