@@ -63,6 +63,7 @@ class CompareConformersResult(Model):
     qm_input: QMInput = Reference()
     fallback_smiles: Optional[str] = None
     fallback_formula: Optional[str] = None
+    fallback_name: Optional[str] = None
     fallback_basis_set: Optional[str] = None
     fallback_functional: Optional[str] = None
     delta_delta_g: float = Field(None, description="Delta Delta G of the conformers in kcal/mol")
@@ -109,6 +110,12 @@ class CompareConformersResult(Model):
         if formula is None:
             formula = self.fallback_formula
 
+        name = molecule.field_name if molecule is not None else None
+        if not isinstance(name, str) or not name.strip():
+            name = self.fallback_name
+        if isinstance(name, str):
+            name = name.strip() or None
+
         basis_set = _basis_set_name(self.qm_input.basis_set) if self.qm_input else None
         if basis_set is None:
             basis_set = self.fallback_basis_set
@@ -118,6 +125,7 @@ class CompareConformersResult(Model):
             functional = self.fallback_functional
 
         return {
+            "name": name,
             "smiles": smiles,
             "formula": formula,
             "basis_set": basis_set,
@@ -267,12 +275,19 @@ def _functional_name(functional) -> Optional[str]:
     return getattr(value, "value", value)
 
 
-def _final_structure_molecule(qm_result) -> Optional[Molecule]:
+def _final_structure_molecule(qm_result, source: Optional[Molecule] = None) -> Optional[Molecule]:
     structure = None if qm_result is None else getattr(qm_result, "final_structure", None)
     atoms = getattr(structure, "atoms", None) if structure is not None else None
     if not atoms:
         return None
-    return Molecule.from_molecule(structure)
+    copied = Molecule.from_molecule(structure)
+    if source is None:
+        return copied
+    source_name = source.field_name
+    if not isinstance(source_name, str) or not source_name.strip():
+        raise ValueError("molecule field_name is empty")
+    copied.field_name = source_name.strip()
+    return copied
 
 
 def _engine_name(engine) -> Optional[str]:
@@ -422,6 +437,7 @@ def _qm_input_copy(
 
 def empty_compare_conformers_method_table(name: str) -> SimpleTable:
     table = SimpleTable(name=name)
+    table.add_column("name", "string")
     table.add_column("smiles", "string")
     table.add_column("formula", "string")
     table.add_column("basis_set", "string")
@@ -493,6 +509,7 @@ async def _fill_compare_conformers_method_table(
 
 def empty_compare_conformers_table(name: str = "Compare Conformers") -> SimpleTable:
     table = SimpleTable(name=name)
+    table.add_column("name", "string")
     table.add_column("smiles", "string")
     table.add_column("formula", "string")
     table.add_column("basis_set", "string")
@@ -568,6 +585,7 @@ def _compare_conformers_outputs(
         qm_input=arg.qm_input,
         fallback_smiles=row_molecule.smiles if row_molecule is not None else None,
         fallback_formula=row_molecule.formula if row_molecule is not None else None,
+        fallback_name=row_molecule.field_name if row_molecule is not None else None,
         fallback_basis_set=_basis_set_name(arg.qm_input.basis_set),
         fallback_functional=_functional_name(arg.qm_input.functional),
         delta_delta_g=delta_delta_g,
@@ -661,7 +679,7 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
 
         if calc_result.status == TaskStatus.COMPLETED:
             qm_result, qm_error = _child_qm_result(calc_result)
-            final_mol = _final_structure_molecule(qm_result)
+            final_mol = _final_structure_molecule(qm_result, molecule)
             if final_mol is not None:
                 final_mol = await _persist_step_molecule(
                     final_mol, node_runner, f"compare-mol{i + 1}"
@@ -1134,7 +1152,7 @@ async def thermo_benchmark(
         qm_result, error = _child_qm_result(calc_result)
         if error:
             return node_runner.fail(f"DFTB optimization failed for molecule {i}: {error}")
-        next_mol = _final_structure_molecule(qm_result)
+        next_mol = _final_structure_molecule(qm_result, current)
         if next_mol is None:
             return node_runner.fail(
                 f"DFTB optimization returned no final_structure for molecule {i}"
@@ -1168,7 +1186,7 @@ async def thermo_benchmark(
             return node_runner.fail(
                 f"PBE/def2-SVP optimization failed for molecule {i}: {error}"
             )
-        next_mol = _final_structure_molecule(qm_result)
+        next_mol = _final_structure_molecule(qm_result, current)
         if next_mol is None:
             return node_runner.fail(
                 f"PBE/def2-SVP optimization returned no final_structure for molecule {i}"
