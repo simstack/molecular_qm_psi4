@@ -1097,6 +1097,9 @@ async def pyscf_hessian_init(opts: PySCFHessianStageInput, **kwargs) -> Simstack
         if not hasattr(mf, "do_nlc"):
             raise ValueError("mean field do_nlc is required")
         include_nlc = mf.do_nlc()
+        # libxc is_nlc is a C int. ``False or 0`` returns 0, not False.
+        if type(include_nlc) is int and include_nlc in (0, 1):
+            include_nlc = bool(include_nlc)
         if not isinstance(include_nlc, bool):
             raise ValueError(f"mean field do_nlc must return bool, got {include_nlc!r}")
         auxmol = attach_df_auxmol(mf, mol)

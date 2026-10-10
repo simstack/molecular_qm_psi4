@@ -34,8 +34,9 @@ class PySCFHessianPlan(Model):
     """Batch size and aux-shell groups for one Hessian, without a live mean field.
 
     ``shell_starts[i]:shell_ends[i]`` is one aux-shell group. ``include_nlc``
-    is the mean field's ``do_nlc()`` result. The orchestrator launches cloud
-    children from this plan and from rows already stored for the task.
+    records whether the mean field includes VV10. PySCF ``do_nlc()`` returns
+    that as a bool or as the libxc integers 0 and 1. The orchestrator launches
+    cloud children from this plan and from rows already stored for the task.
     """
 
     field_name: str = "PySCFHessianPlan"

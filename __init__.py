@@ -12,6 +12,7 @@ from molecular_qm_psi4.nodes.pyscf_calculator import (
     pyscf_optimization,
     pyscf_thermochemistry,
 )
+from molecular_qm_psi4.nodes.pyscf_reference_calculator import pyscf_reference_calculator
 from molecular_qm_psi4.nodes.pyscf_hessian import (
     pyscf_hessian,
     pyscf_hessian_for_atoms,
@@ -92,6 +93,7 @@ except ImportError:  # pragma: no cover
 
 __all__ = [
     "pyscf_calculator",
+    "pyscf_reference_calculator",
     "pyscf_optimization",
     "pyscf_thermochemistry",
     "pyscf_hessian",
