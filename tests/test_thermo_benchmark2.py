@@ -1,9 +1,13 @@
+import importlib.util
 import inspect
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from molecular_qm_models import (
+    Atom,
     GridType,
     Molecule,
     OptimizationAccuracy,
@@ -11,16 +15,34 @@ from molecular_qm_models import (
     SCFAccuracy,
 )
 from molecular_qm_models.basis_set import BasisSetEnum
-from molecular_qm_psi4 import (
-    ThermoBenchmark2MethodList,
-    ThermoBenchmark2Step,
-    thermo_benchmark2,
-    thermo_benchmark_dataset,
-)
 from molecular_qm_psi4.nodes.multistep_optimizer import PreOptimizerInput
-from molecular_qm_psi4.nodes.thermo_benchmark_dataset import _row_label
+from molecular_qm_psi4.util.qm_engine import QMEngine
 from simstack.models import DataSetSelection
 from simstack.util.docstring_parser import DocstringParser
+
+
+def _load_workspace_module(module_name, relative_path):
+    path = Path(__file__).parents[1] / relative_path
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+thermo_benchmark2_node = _load_workspace_module(
+    "molecular_qm_psi4.nodes.thermo_benchmark2",
+    "nodes/thermo_benchmark2.py",
+)
+thermo_benchmark_dataset_node = _load_workspace_module(
+    "molecular_qm_psi4.nodes.thermo_benchmark_dataset",
+    "nodes/thermo_benchmark_dataset.py",
+)
+ThermoBenchmark2MethodList = thermo_benchmark2_node.ThermoBenchmark2MethodList
+ThermoBenchmark2Step = thermo_benchmark2_node.ThermoBenchmark2Step
+thermo_benchmark2 = thermo_benchmark2_node.thermo_benchmark2
+thermo_benchmark_dataset = thermo_benchmark_dataset_node.thermo_benchmark_dataset
+_row_label = thermo_benchmark_dataset_node._row_label
 
 
 def test_thermo_benchmark2_takes_preopt_and_methods():
@@ -38,6 +60,65 @@ def test_thermo_benchmark2_documents_table_output():
     assert results is not None
     assert results["table"]["type"] == "SimpleTable"
     assert parsed.called_nodes() == ["multistep_optimizer", "compare_conformers"]
+
+
+@pytest.mark.asyncio
+async def test_thermo_benchmark2_fills_blank_formula(monkeypatch):
+    monkeypatch.setattr(Molecule, "make_formula", lambda self: "C1")
+    molecule = Molecule(
+        field_name="boat",
+        smiles="C",
+        formula="  ",
+        atoms=[Atom(element="C", x=0.0, y=0.0, z=0.0)],
+    )
+    other = Molecule(
+        field_name="chair",
+        smiles="C",
+        formula="C1",
+        atoms=[Atom(element="C", x=0.0, y=0.0, z=0.0)],
+    )
+    saved = []
+
+    async def save(obj):
+        saved.append(obj)
+
+    async def initialize():
+        return None
+
+    async def stop_persist(*args, **kwargs):
+        raise RuntimeError("formula-filled")
+
+    monkeypatch.setattr(
+        thermo_benchmark2_node,
+        "context",
+        SimpleNamespace(initialize=initialize, db=SimpleNamespace(save=save)),
+    )
+    monkeypatch.setattr(thermo_benchmark2_node, "_persist_qm_input", stop_persist)
+
+    step = ThermoBenchmark2Step.model_validate(
+        {
+            "basis_set": {"basis_set": BasisSetEnum.Def2_TZVP.value},
+            "functional": {"functional": "PBE0"},
+            "scf_accuracy": SCFAccuracy.Tight.value,
+            "dft_grid": GridType.Grid4.value,
+            "optimization_accuracy": OptimizationAccuracy.Tight.value,
+        }
+    )
+    with pytest.raises(RuntimeError, match="formula-filled"):
+        await inspect.unwrap(thermo_benchmark2)(
+            QMInput(
+                molecule=molecule,
+                basis_set=step.basis_set,
+                functional=step.functional,
+            ),
+            PreOptimizerInput(engine=QMEngine.PYSCF),
+            other,
+            ThermoBenchmark2MethodList(elements=[step]),
+            node_runner=SimpleNamespace(),
+        )
+
+    assert molecule.formula == "C1"
+    assert molecule in saved
 
 
 def test_thermo_benchmark2_step_carries_accuracy_without_engine():

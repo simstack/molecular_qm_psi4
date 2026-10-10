@@ -115,15 +115,15 @@ async def thermo_benchmark2(
             pairs, each with SCF accuracy, DFT grid, and optimization accuracy.
             Dispersion is the functional's own dispersion correction.
 
-    Called Nodes:
-        multistep_optimizer
-        compare_conformers
-
     SimstackResult:
         table (SimpleTable): One row per basis-set and functional pair with
             name, smiles, formula, engine, basis_set, functional,
             dispersion_correction, DDG, DDZ, DDH, G_minus_elec_1,
             G_minus_elec_2, DDG_minus_elec, DE_scf, DE_thermo, and DS.
+
+    Called Nodes:
+        multistep_optimizer
+        compare_conformers
     """
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
@@ -153,12 +153,14 @@ async def thermo_benchmark2(
         ("molecule", molecule),
     ):
         changed = False
-        if current.smiles is None:
+        smiles = current.smiles
+        if smiles is None or (isinstance(smiles, str) and not smiles.strip()):
             current.smiles = current.make_smiles()
             changed = True
         if not isinstance(current.smiles, str) or not current.smiles.strip():
             raise ValueError(f"SMILES is empty for {label}")
-        if current.formula is None:
+        formula = current.formula
+        if formula is None or (isinstance(formula, str) and not formula.strip()):
             current.formula = current.make_formula()
             changed = True
         if not isinstance(current.formula, str) or not current.formula.strip():

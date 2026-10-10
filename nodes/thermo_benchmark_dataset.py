@@ -111,12 +111,12 @@ async def thermo_benchmark_dataset(
         protocol (DataSetSelection): Selected multistep-optimizer protocols.
         target (DataSetSelection): Selected basis-set and functional targets.
 
-    Called Nodes:
-        thermo_benchmark2
-
     SimstackResult:
         table (SimpleTable): One row per thermo_benchmark2 result row, labeled
             with molecule, protocol, and target.
+
+    Called Nodes:
+        thermo_benchmark2
     """
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
