@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       distribute:
-        description: Mirror to simstack.de :5000
+        description: Mirror to simstack.de :5000 and push SIF to GHCR
         type: boolean
         default: true
 
@@ -164,3 +164,37 @@ jobs:
             "${RUNNER_TEMP}/apptainer-work/${SIF_NAME}" \
             "docker-archive://${RUNNER_TEMP}/apptainer-work/image.tar"
           ls -lh "${RUNNER_TEMP}/apptainer-work/${SIF_NAME}"
+
+      - name: Push SIF to GHCR
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | apptainer registry login \
+            --username "${{ github.actor }}" --password-stdin docker://ghcr.io
+          sif="${RUNNER_TEMP}/apptainer-work/${SIF_NAME}"
+          dest="oras://ghcr.io/${{ github.repository_owner }}/molecular-qm-psi4-sif"
+          apptainer push "$sif" "${dest}:${{ github.sha }}"
+          if [ "${{ github.ref }}" = "refs/heads/${{ github.event.repository.default_branch }}" ]; then
+            apptainer push "$sif" "${dest}:latest"
+          fi
+
+      - name: Upload SIF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SIF_NAME }}
+          path: ${{ runner.temp }}/apptainer-work/${{ env.SIF_NAME }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish SIF GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: container-sif
+          name: Apptainer SIF
+          target_commitish: ${{ github.sha }}
+          files: ${{ runner.temp }}/apptainer-work/${{ env.SIF_NAME }}
+          fail_on_unmatched_files: true
+          make_latest: false
+          body: |
+            Pre-built Apptainer image (`${{ env.SIF_NAME }}`).
+            On 2FA-only hosts, download with a PAT (no interactive login):
+            `curl -L -H "Authorization: Bearer $GITHUB_TOKEN" -o ${{ env.SIF_NAME }} https://github.com/${{ github.repository }}/releases/download/container-sif/${{ env.SIF_NAME }}`
