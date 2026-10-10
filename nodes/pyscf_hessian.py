@@ -640,10 +640,10 @@ async def pyscf_hessian_for_atoms(
                 interval_s=_HEARTBEAT_INTERVAL_S,
                 task_id=heartbeat_task_id,
             ):
-                # PySCF make_h1 keeps a 480-function int3c2e_ip1 block and copies
-                # it. The blocked contraction drops the HDF5 page cache first:
-                # that cache is in the cgroup and not in lib.current_memory, and
-                # a 480-block allocated on top of it is SIGKILL -9.
+                # The coefficient file is fsynced and dropped after each atom.
+                # Its dirty page cache is in the cgroup and not in
+                # lib.current_memory. Leaving every atom dirty until the
+                # 480-function int3c2e_ip1 block is SIGKILL -9.
                 h1ao = make_df_rks_h1(
                     hessian,
                     mf.mo_coeff,

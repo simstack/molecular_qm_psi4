@@ -131,10 +131,10 @@ class PySCFHessianMemoryRecord(Model):
     peak from ``df_hessian_memory``. For an atom batch it is the ``make_h1``
     peak at PySCF's 480-function aux block: the XC derivative, a Coulomb
     buffer for every atom, ``int3c2e_ip1``, the hybrid einsum copy, and the
-    ``(blk, nao, nao)`` exchange fit. That is the allocation that SIGKILLs a
-    32 GB atom VM when the temporary HDF5 page cache is still charged to the
-    cgroup. Shrinking the block so the partial estimate fits does not reduce
-    this peak.
+    ``(blk, nao, nao)`` exchange fit. The coefficient HDF5 file is not in
+    this peak. Its page cache is fsynced and dropped after each atom; a
+    def2-SVP file for the whole molecule is tens of GB and SIGKILLs a 32 GB
+    cgroup while those pages are still dirty.
     """
 
     field_name: str = "PySCFHessianMemoryRecord"

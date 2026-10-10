@@ -48,6 +48,15 @@ def test_def2_tzvpp_block_is_below_pyscf_480():
     assert blk < 480
 
 
+def test_one_piece_response_counts_its_hdf5_page_cache_copy():
+    from molecular_qm_psi4.util.pyscf_hessian_h1 import _H1_OVERHEAD_MB, _wj_in_one_piece
+
+    # RSS holds the einsum result and the cgroup holds a second dirty copy.
+    out_mb = 1000.0
+    assert _wj_in_one_piece(out_mb, 0.0, 2.0 * out_mb + _H1_OVERHEAD_MB) is True
+    assert _wj_in_one_piece(out_mb, 0.0, 2.0 * out_mb + _H1_OVERHEAD_MB - 1) is False
+
+
 def test_hybrid_fit_is_nao_by_nao_so_480_does_not_fit():
     # The old nao*nocc term left blk at PySCF's 480 cap. The fit is nao*nao.
     blk = h1_ip1_block(860, 8000, 27904, 4293, True)

@@ -13,7 +13,11 @@ the largest one whose 3-center tensor, its einsum copy, the coefficient block,
 and the hybrid ``(blk, nao, nao)`` fit all stay inside the resident set.
 Density-fit coefficients are written to a temporary HDF5 file first. That
 file's page cache is charged to the Docker cgroup and is invisible to
-``lib.current_memory``, so it is dropped before the 3-center block is allocated.
+``lib.current_memory``. ``DONTNEED`` does not drop dirty pages, so the cache
+is fsynced and dropped after each atom. Waiting until every atom is written
+leaves the whole coefficient file (rho plus the aux response, about
+``4 * naux * nao**2``) resident and SIGKILLs a 32 GB cgroup before the
+3-center block is allocated.
 """
 
 import os
@@ -141,9 +145,9 @@ def make_h1_memory(mf, mol, max_memory) -> dict:
     allocates that same shape for every atom and ``int3c2e_ip1`` of shape
     ``(3, nao, nao, blk)``. ``blk`` is capped at 480, and a hybrid
     ``lib.einsum`` copies the 3-center tensor. A partial-Hessian estimate that
-    shrinks ``blk`` to fit the budget does not describe this peak. A 32 GB
-    atom batch dies here with SIGKILL (-9) while the heartbeat still says
-    ``make_h1``.
+    shrinks ``blk`` to fit the budget does not describe this peak. The
+    coefficient file is not included: ``gen_df_jk`` fsyncs and drops its page
+    cache after each atom, so the whole-molecule file is not resident here.
     """
     if max_memory is None:
         raise ValueError("max_memory is required")
@@ -267,9 +271,13 @@ def _as_bool(name, value) -> bool:
     return value
 
 
-def _wj_in_one_piece(out_mb, coef_mb, current_mb, budget) -> bool:
-    """True when one atom's aux-response tensor fits beside the resident set."""
-    return current_mb + out_mb + coef_mb + _H1_OVERHEAD_MB <= budget
+def _wj_in_one_piece(out_mb, current_mb, budget) -> bool:
+    """True when one atom's aux-response tensor fits beside the resident set.
+
+    The einsum result stays in RSS, and the HDF5 write puts a second copy in
+    the cgroup page cache until that copy is fsynced and dropped.
+    """
+    return current_mb + 2.0 * out_mb + _H1_OVERHEAD_MB <= budget
 
 
 def _hstack_aux(group, start, stop, natm):
@@ -340,6 +348,17 @@ def gen_df_jk(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, with_k, lo
             )
     rhoj0 = np.zeros(naux)
     rhok0 = np.empty((naux, nao, nocc)) if exchange else None
+    # rho0 is (naux, nao, nao). The aux response adds three Cartesian copies.
+    # Both stay dirty in the page cache until fsync, and that cache is not in
+    # lib.current_memory. Releasing after each atom keeps one atom's image,
+    # not the whole molecule, inside the cgroup.
+    coefficient_file_mb = naux * nao * nao * (4.0 if response else 1.0) * 8 / 1e6
+    if log is not None:
+        log(
+            f"make_h1 coefficient file {coefficient_file_mb:.0f} MB "
+            f"(naux={naux}, nao={nao}, response={response}); "
+            f"page cache released after each atom"
+        )
     for atom, (shl0, shl1, p0, p1) in enumerate(aoslices):
         p0 = int(p0)
         p1 = int(p1)
@@ -350,21 +369,24 @@ def gen_df_jk(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, with_k, lo
         rhoj0 += np.einsum("pkl,kl->p", coef3c, dm0[p0:p1])
         if exchange:
             rhok0[:, p0:p1] = lib.einsum("pij,jk->pik", coef3c, mocc_2)
+        _release_h5_cache(ftmp, True)
         if response:
             # ``(naux, nao_i, 3, nao)`` is several GB at def2-TZVPP. One shot
             # matches PySCF; otherwise write aux blocks so the peak stays in budget.
             out_mb = naux * (p1 - p0) * 3 * nao * 8 / 1e6
-            coef_mb = naux * (p1 - p0) * nao * 8 / 1e6
-            if _wj_in_one_piece(out_mb, coef_mb, float(lib.current_memory()[0]), budget):
+            if _wj_in_one_piece(out_mb, float(lib.current_memory()[0]), budget):
                 wj_ip1_pij[f"{atom:04d}"] = lib.einsum("xqp,pij->qixj", int2c_ip1, coef3c)
+                _release_h5_cache(ftmp, True)
             else:
                 width = max(int(aux_loc[i + 1]) - int(aux_loc[i]) for i in range(nbas_aux))
                 piece_mb = width * (p1 - p0) * 3 * nao * 8 / 1e6
-                if float(lib.current_memory()[0]) + piece_mb > budget:
+                resident = float(lib.current_memory()[0])
+                if resident + 2.0 * piece_mb + _H1_OVERHEAD_MB > budget:
                     raise ValueError(
                         f"DF Hessian make_h1 aux response for atom {atom} does not fit "
                         f"in max_memory={budget} MB (nao={nao}, naux={naux}, "
-                        f"shell={width} functions, piece={piece_mb:.0f} MB)"
+                        f"shell={width} functions, piece={piece_mb:.0f} MB in RAM "
+                        f"and again in the page cache, resident={resident:.0f} MB)"
                     )
                 stored = wj_ip1_pij.create_dataset(
                     f"{atom:04d}", shape=(naux, p1 - p0, 3, nao), dtype="f8"
@@ -373,8 +395,8 @@ def gen_df_jk(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, with_k, lo
                     a0 = int(aux_loc[shell0])
                     a1 = int(aux_loc[shell1])
                     stored[a0:a1] = lib.einsum("xqp,pij->qixj", int2c_ip1[:, a0:a1], coef3c)
+                    _release_h5_cache(ftmp, True)
         del coef3c
-        _release_h5_cache(ftmp, False)
 
     get_int3c_ip1 = _int3c_wrapper(mol, auxmol, "int3c2e_ip1", "s1")
     get_int3c_ip2 = _int3c_wrapper(mol, auxmol, "int3c2e_ip2", "s1")
