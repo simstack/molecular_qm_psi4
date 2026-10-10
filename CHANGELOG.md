@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.10.17 (2026-10-09)
+
+### Bug Fixes
+
+- Fail unconverged PySCF optimizations and export Molden modes
+  ([`b24f16e`](https://github.com/simstack/molecular_qm_psi4/commit/b24f16e6dd37fde58e4996a11568c88048ee9a92))
+
+Geometry optimization now stops when the iteration limit is reached without convergence. Frequency
+  results include a vibrations.molden file for Molden and Avogadro.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.10.16 (2026-10-09)
 
 ### Bug Fixes
