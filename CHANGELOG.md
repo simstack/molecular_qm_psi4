@@ -2,6 +2,30 @@
 
 <!-- version list -->
 
+## v0.12.3 (2026-10-10)
+
+### Bug Fixes
+
+- Add fallback namefix handling: and add de `-fallbackduplicate_name thermo` rows and
+  ([`b7be69e`](https://github.com/simstack/molecular_qm_psi4/commit/b7be69e9fb56d4424b4cc0e9de8703c45b52c8c7))
+
+enhanceAdd table ` logicfallback for_name conform`er field comparisons and
+
+logicIntroduce for ` assigningfallback molecule_name names` when support missing for or conform
+  invalider. processing Ensure and thermo ensure_results molecule table names de are-
+  properlyduplicates handled incoming throughout rows. and Enhance combines table with generation
+  existing by data dropping efficiently duplicate. rows and updating the thermo results table within
+  the database.
+
+- Release dirty Hessian coefficient pages after each atom
+  ([`b4ae51e`](https://github.com/simstack/molecular_qm_psi4/commit/b4ae51e24b0ca24fea8b2e878a04627141b1e763))
+
+DONTNEED does not drop dirty HDF5 pages, so the whole-molecule coefficient file stayed in the cgroup
+  and SIGKILLed the 32 GB atom batch before the aux block.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.12.2 (2026-10-10)
 
 ### Bug Fixes
