@@ -762,8 +762,9 @@ async def pyscf_hessian_partial_ext(
     compares that with ``SlurmParameters.time``.
 
     SimstackResult:
-        This node stores a partial Hessian contribution on the task and does not
-        attach result models.
+        record (PySCFHessianPartialContribution): Partial Hessian block stored
+            for this piece. An aux span keeps the last memory-sized block
+            written in this call.
     """
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
@@ -851,9 +852,10 @@ async def pyscf_hessian_partial_ext(
                 array = partial_xc_and_e1(
                     hessian, mf.mo_energy, mf.mo_coeff, mf.mo_occ, budget_mb
                 )
-            await store_partial_contribution(
+            record = await store_partial_contribution(
                 hessian_task_id, "xc", 0, 0, n_atoms, array, {}, row_dir
             )
+            node_runner.record = record
             node_runner.info(f"Stored XC partial for task {hessian_task_id}")
             return node_runner.succeed()
         if piece == "nlc":
@@ -868,9 +870,10 @@ async def pyscf_hessian_partial_ext(
                 task_id=heartbeat_task_id,
             ):
                 array = partial_nlc(hessian, mf.mo_coeff, mf.mo_occ, budget_mb)
-            await store_partial_contribution(
+            record = await store_partial_contribution(
                 hessian_task_id, "nlc", 0, 0, n_atoms, array, {}, row_dir
             )
+            node_runner.record = record
             node_runner.info(f"Stored NLC partial for task {hessian_task_id}")
             return node_runner.succeed()
         auxmol = attach_df_auxmol(mf, mol)
@@ -999,7 +1002,7 @@ async def pyscf_hessian_partial_ext(
                     response_arrays["wk_ip2"] = wk_ip2
                 if wk_ip2_lr is not None:
                     response_arrays["wk_ip2_lr"] = wk_ip2_lr
-                await store_partial_contribution(
+                record = await store_partial_contribution(
                     hessian_task_id,
                     "aux",
                     block_start,
@@ -1009,6 +1012,7 @@ async def pyscf_hessian_partial_ext(
                     response_arrays,
                     row_dir,
                 )
+                node_runner.record = record
                 completed_s += time.time() - block_started
                 node_runner.info(
                     f"Stored JK partial block {block_number}/{len(pending_blocks)} "
