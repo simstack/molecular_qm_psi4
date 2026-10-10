@@ -76,6 +76,21 @@ class CompareConformersResult(Model):
     delta_s: Optional[float] = Field(
         default=None, description="Entropy difference (S tot) in kcal/mol/K"
     )
+    delta_h: Optional[float] = Field(
+        default=None, description="Enthalpy difference (H tot) in kcal/mol"
+    )
+    g_minus_elec_1: Optional[float] = Field(
+        default=None,
+        description="Conformer 1 Gibbs free energy minus its electronic part, in kcal/mol",
+    )
+    g_minus_elec_2: Optional[float] = Field(
+        default=None,
+        description="Conformer 2 Gibbs free energy minus its electronic part, in kcal/mol",
+    )
+    delta_g_minus_elec: Optional[float] = Field(
+        default=None,
+        description="Conformer 2 minus conformer 1 of (G tot - G elec), in kcal/mol",
+    )
     final_molecule1: Optional[Molecule] = None
     final_molecule2: Optional[Molecule] = None
 
@@ -114,6 +129,10 @@ class CompareConformersResult(Model):
             "temperature": self.temperature,
             "DDG": self.delta_delta_g,
             "DDZ": self.delta_delta_zpe_tot,
+            "DDH": self.delta_h,
+            "G_minus_elec_1": self.g_minus_elec_1,
+            "G_minus_elec_2": self.g_minus_elec_2,
+            "DDG_minus_elec": self.delta_g_minus_elec,
             "DE_scf": self.delta_e_scf,
             "DE_thermo": self.delta_e_thermo,
             "DS": self.delta_s,
@@ -366,6 +385,10 @@ def _kcal_per_mol_from_hartree(value: Optional[float]) -> Optional[float]:
 def _add_compare_delta_columns(table: SimpleTable) -> None:
     table.add_column("DDG", "number")
     table.add_column("DDZ", "number")
+    table.add_column("DDH", "number")
+    table.add_column("G_minus_elec_1", "number")
+    table.add_column("G_minus_elec_2", "number")
+    table.add_column("DDG_minus_elec", "number")
     table.add_column("DE_scf", "number")
     table.add_column("DE_thermo", "number")
     table.add_column("DS", "number")
@@ -456,6 +479,10 @@ async def _fill_compare_conformers_method_table(
                 "functional": functional_name,
                 "DDG": compare_result.delta_delta_g,
                 "DDZ": compare_result.delta_delta_zpe_tot,
+                "DDH": compare_result.delta_h,
+                "G_minus_elec_1": compare_result.g_minus_elec_1,
+                "G_minus_elec_2": compare_result.g_minus_elec_2,
+                "DDG_minus_elec": compare_result.delta_g_minus_elec,
                 "DE_scf": compare_result.delta_e_scf,
                 "DE_thermo": compare_result.delta_e_thermo,
                 "DS": compare_result.delta_s,
@@ -497,6 +524,10 @@ def _compare_conformers_outputs(
     delta_e_scf,
     delta_e_thermo,
     delta_s,
+    delta_h,
+    g_minus_elec_1,
+    g_minus_elec_2,
+    delta_g_minus_elec,
     final_molecule1=None,
     final_molecule2=None,
 ):
@@ -504,6 +535,20 @@ def _compare_conformers_outputs(
         node_runner.info(f"Computed Delta Delta G: {delta_delta_g} kcal/mol")
     if delta_delta_zpe_tot is not None:
         node_runner.info(f"Computed Delta Delta ZPE Total: {delta_delta_zpe_tot} kcal/mol")
+    if delta_h is not None:
+        node_runner.info(f"Computed Delta Delta H: {delta_h} kcal/mol")
+    if g_minus_elec_1 is not None:
+        node_runner.info(
+            f"Conformer 1 G minus electronic energy: {g_minus_elec_1} kcal/mol"
+        )
+    if g_minus_elec_2 is not None:
+        node_runner.info(
+            f"Conformer 2 G minus electronic energy: {g_minus_elec_2} kcal/mol"
+        )
+    if delta_g_minus_elec is not None:
+        node_runner.info(
+            f"Computed Delta (G minus electronic energy): {delta_g_minus_elec} kcal/mol"
+        )
     if delta_e_scf is not None:
         node_runner.info(f"Computed Delta E (SCF): {delta_e_scf} kcal/mol")
     if delta_e_thermo is not None:
@@ -530,6 +575,10 @@ def _compare_conformers_outputs(
         delta_e_scf=delta_e_scf,
         delta_e_thermo=delta_e_thermo,
         delta_s=delta_s,
+        delta_h=delta_h,
+        g_minus_elec_1=g_minus_elec_1,
+        g_minus_elec_2=g_minus_elec_2,
+        delta_g_minus_elec=delta_g_minus_elec,
         final_molecule1=final_molecule1,
         final_molecule2=final_molecule2,
     )
@@ -557,9 +606,11 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
             execution, including the computed results when successful.
 
     SimstackResult:
-        result (CompareConformersResult): Delta-delta G, delta-delta ZPE, SCF delta-E,
+        result (CompareConformersResult): Delta-delta G, delta-delta ZPE, delta-delta H,
+            per-conformer G minus electronic energy, their difference, SCF delta-E,
             thermochemistry delta-E, and delta-S.
-        table (SimpleTable): One-row report with DDG, DDZ, DE_scf, DE_thermo, and DS.
+        table (SimpleTable): One-row report with DDG, DDZ, DDH, G_minus_elec_1,
+            G_minus_elec_2, DDG_minus_elec, DE_scf, DE_thermo, and DS.
     Called Nodes:
         psi4_calculator
         pyscf_calculator
@@ -577,6 +628,8 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
 
     g_values = []
     zpe_values = []
+    h_values = []
+    g_minus_elec_values = []
     scf_values = []
     e_thermo_values = []
     s_values = []
@@ -635,6 +688,28 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
             g_values.append(g_tot)
             node_runner.info(f"Molecule {i+1} Gibbs Free Energy: {g_tot}")
 
+            g_elec = _thermo_component(calc_result, "G", "elec")
+            if g_elec is None:
+                node_runner.error(
+                    f"G elec not found in thermochemistry output for molecule {i+1}"
+                )
+                return node_runner.fail(
+                    f"Electronic Gibbs free energy is missing for molecule {i+1}"
+                )
+            g_minus_elec_values.append(g_tot - g_elec)
+            node_runner.info(
+                f"Molecule {i+1} G minus electronic energy: {g_tot - g_elec}"
+            )
+
+            h_tot = _thermo_component(calc_result, "H")
+            if h_tot is None:
+                node_runner.error(
+                    f"H tot not found in thermochemistry output for molecule {i+1}"
+                )
+                return node_runner.fail(f"Enthalpy calculation failed for molecule {i+1}")
+            h_values.append(h_tot)
+            node_runner.info(f"Molecule {i+1} Enthalpy H tot: {h_tot}")
+
             zpe_tot = _thermo_component(calc_result, "ZPE")
             if zpe_tot is not None:
                 node_runner.info(f"Molecule {i+1} ZPE Total: {zpe_tot}")
@@ -666,6 +741,10 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
         _kcal_per_mol_from_hartree(_pair_difference(scf_values)),
         _kcal_per_mol_from_hartree(_pair_difference(e_thermo_values)),
         _pair_difference(s_values),
+        _kcal_per_mol_from_hartree(_pair_difference(h_values)),
+        _kcal_per_mol_from_hartree(g_minus_elec_values[0]),
+        _kcal_per_mol_from_hartree(g_minus_elec_values[1]),
+        _kcal_per_mol_from_hartree(g_minus_elec_values[1] - g_minus_elec_values[0]),
         final_molecule1=optimized_mols[0] if len(optimized_mols) == 2 else None,
         final_molecule2=optimized_mols[1] if len(optimized_mols) == 2 else None,
     )
@@ -693,7 +772,8 @@ async def compare_conformers_over_basis_sets(
 
     SimstackResult:
         table (SimpleTable): One row per basis set with smiles, formula, basis_set,
-            functional, DDG, DDZ, DE_scf, DE_thermo, and DS.
+            functional, DDG, DDZ, DDH, G_minus_elec_1, G_minus_elec_2,
+            DDG_minus_elec, DE_scf, DE_thermo, and DS.
     """
     node_runner = kwargs.get("node_runner")
     await context.initialize()
@@ -751,7 +831,8 @@ async def compare_conformers_over_functionals(
 
     SimstackResult:
         table (SimpleTable): One row per functional with smiles, formula, basis_set,
-            functional, DDG, DDZ, DE_scf, DE_thermo, and DS.
+            functional, DDG, DDZ, DDH, G_minus_elec_1, G_minus_elec_2,
+            DDG_minus_elec, DE_scf, DE_thermo, and DS.
     """
     node_runner = kwargs["node_runner"]
     await context.initialize()
@@ -812,9 +893,11 @@ async def compare_conformers_preopt(
         pyscf_thermochemistry
 
     SimstackResult:
-        result (CompareConformersResult): Delta-delta G, delta-delta ZPE, SCF delta-E,
+        result (CompareConformersResult): Delta-delta G, delta-delta ZPE, delta-delta H,
+            per-conformer G minus electronic energy, their difference, SCF delta-E,
             thermochemistry delta-E, and delta-S.
-        table (SimpleTable): One-row report with DDG, DDZ, DE_scf, DE_thermo, and DS.
+        table (SimpleTable): One-row report with DDG, DDZ, DDH, G_minus_elec_1,
+            G_minus_elec_2, DDG_minus_elec, DE_scf, DE_thermo, and DS.
     """
     node_runner = kwargs.get("node_runner")
     await context.initialize()
@@ -834,6 +917,8 @@ async def compare_conformers_preopt(
 
     g_values = []
     zpe_values = []
+    h_values = []
+    g_minus_elec_values = []
     scf_values = []
     e_thermo_values = []
     s_values = []
@@ -895,6 +980,22 @@ async def compare_conformers_preopt(
         g_values.append(g_tot)
         node_runner.info(f"Molecule {i + 1} Gibbs Free Energy: {g_tot}")
 
+        g_elec = _thermo_component(thermo_calc_result, "G", "elec")
+        if g_elec is None:
+            return node_runner.fail(
+                f"Electronic Gibbs free energy is missing for molecule {i + 1}"
+            )
+        g_minus_elec_values.append(g_tot - g_elec)
+        node_runner.info(
+            f"Molecule {i + 1} G minus electronic energy: {g_tot - g_elec}"
+        )
+
+        h_tot = _thermo_component(thermo_calc_result, "H")
+        if h_tot is None:
+            return node_runner.fail(f"Enthalpy calculation failed for molecule {i + 1}")
+        h_values.append(h_tot)
+        node_runner.info(f"Molecule {i + 1} Enthalpy H tot: {h_tot}")
+
         scf_energy = None if qm_result is None else qm_result.final_energy
         if scf_energy is None:
             node_runner.warning(f"SCF energy not found for molecule {i + 1}")
@@ -931,6 +1032,10 @@ async def compare_conformers_preopt(
         _kcal_per_mol_from_hartree(_pair_difference(scf_values)),
         _kcal_per_mol_from_hartree(_pair_difference(e_thermo_values)),
         _pair_difference(s_values),
+        _kcal_per_mol_from_hartree(_pair_difference(h_values)),
+        _kcal_per_mol_from_hartree(g_minus_elec_values[0]),
+        _kcal_per_mol_from_hartree(g_minus_elec_values[1]),
+        _kcal_per_mol_from_hartree(g_minus_elec_values[1] - g_minus_elec_values[0]),
     )
     return node_runner.succeed()
 
@@ -965,7 +1070,8 @@ async def thermo_benchmark(
 
     SimstackResult:
         table (SimpleTable): One row per method with smiles, formula, engine,
-            basis_set, functional, DDG, DDZ, DE_scf, DE_thermo, and DS.
+            basis_set, functional, DDG, DDZ, DDH, G_minus_elec_1,
+            G_minus_elec_2, DDG_minus_elec, DE_scf, DE_thermo, and DS.
     """
     node_runner = kwargs.get("node_runner")
     await context.initialize()
@@ -1151,6 +1257,10 @@ async def thermo_benchmark(
                 "functional": functional_name,
                 "DDG": compare_result.delta_delta_g,
                 "DDZ": compare_result.delta_delta_zpe_tot,
+                "DDH": compare_result.delta_h,
+                "G_minus_elec_1": compare_result.g_minus_elec_1,
+                "G_minus_elec_2": compare_result.g_minus_elec_2,
+                "DDG_minus_elec": compare_result.delta_g_minus_elec,
                 "DE_scf": compare_result.delta_e_scf,
                 "DE_thermo": compare_result.delta_e_thermo,
                 "DS": compare_result.delta_s,

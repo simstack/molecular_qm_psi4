@@ -125,6 +125,10 @@ def test_make_table_entries_includes_accuracy_and_grid_settings():
         delta_e_scf=0.10,
         delta_e_thermo=0.20,
         delta_s=1.5,
+        delta_h=0.8,
+        g_minus_elec_1=10.0,
+        g_minus_elec_2=11.2,
+        delta_g_minus_elec=1.2,
     )
 
     entries = result.make_table_entries()
@@ -133,6 +137,10 @@ def test_make_table_entries_includes_accuracy_and_grid_settings():
     assert entries["grid_type"] == "Grid4"
     assert entries["DDG"] == 1.23
     assert entries["DDZ"] == 0.45
+    assert entries["DDH"] == 0.8
+    assert entries["G_minus_elec_1"] == 10.0
+    assert entries["G_minus_elec_2"] == 11.2
+    assert entries["DDG_minus_elec"] == 1.2
     assert entries["DE_scf"] == 0.10
     assert entries["DE_thermo"] == 0.20
     assert entries["DS"] == 1.5
@@ -144,6 +152,10 @@ def test_make_table_entries_includes_accuracy_and_grid_settings():
         "grid_type",
         "DDG",
         "DDZ",
+        "DDH",
+        "G_minus_elec_1",
+        "G_minus_elec_2",
+        "DDG_minus_elec",
         "DE_scf",
         "DE_thermo",
         "DS",
@@ -169,10 +181,16 @@ def test_compare_conformers_result_loads_without_new_delta_fields():
     assert result.delta_e_scf is None
     assert result.delta_e_thermo is None
     assert result.delta_s is None
+    assert result.delta_h is None
+    assert result.g_minus_elec_1 is None
+    assert result.g_minus_elec_2 is None
+    assert result.delta_g_minus_elec is None
     entries = result.make_table_entries()
     assert entries["DE_scf"] is None
     assert entries["DE_thermo"] is None
     assert entries["DS"] is None
+    assert entries["DDH"] is None
+    assert entries["DDG_minus_elec"] is None
 
 
 def test_compare_conformers_tables_include_energy_and_entropy_deltas():
@@ -180,7 +198,7 @@ def test_compare_conformers_tables_include_energy_and_entropy_deltas():
         empty_compare_conformers_table(),
         empty_compare_conformers_method_table("method"),
     ):
-        for column in ("DDG", "DDZ", "DE_scf", "DE_thermo", "DS"):
+        for column in ("DDG", "DDZ", "DDH", "G_minus_elec_1", "G_minus_elec_2", "DDG_minus_elec", "DE_scf", "DE_thermo", "DS"):
             assert column in table.heading
 
 
@@ -235,16 +253,26 @@ def test_compare_conformers_outputs_attaches_delta_table():
     node_runner = type("NodeRunner", (), {})()
     node_runner.info = lambda message: None
 
-    _compare_conformers_outputs(node_runner, arg, 1.0, 0.2, 0.3, 0.4, 1.5)
+    _compare_conformers_outputs(
+        node_runner, arg, 1.0, 0.2, 0.3, 0.4, 1.5, 0.8, 10.0, 11.2, 1.2
+    )
 
     assert node_runner.result.delta_delta_g == 1.0
     assert node_runner.result.delta_delta_zpe_tot == 0.2
     assert node_runner.result.delta_e_scf == 0.3
     assert node_runner.result.delta_e_thermo == 0.4
     assert node_runner.result.delta_s == 1.5
+    assert node_runner.result.delta_h == 0.8
+    assert node_runner.result.g_minus_elec_1 == 10.0
+    assert node_runner.result.g_minus_elec_2 == 11.2
+    assert node_runner.result.delta_g_minus_elec == 1.2
     row = node_runner.table.row[0]
     assert row["DDG"] == 1.0
     assert row["DDZ"] == 0.2
+    assert row["DDH"] == 0.8
+    assert row["G_minus_elec_1"] == 10.0
+    assert row["G_minus_elec_2"] == 11.2
+    assert row["DDG_minus_elec"] == 1.2
     assert row["DE_scf"] == 0.3
     assert row["DE_thermo"] == 0.4
     assert row["DS"] == 1.5
@@ -307,7 +335,7 @@ def test_compare_conformers_outputs_stores_final_molecules():
     node_runner.info = lambda message: None
 
     _compare_conformers_outputs(
-        node_runner, arg, 1.0, 0.2, 0.3, 0.4, 1.5, mol, other
+        node_runner, arg, 1.0, 0.2, 0.3, 0.4, 1.5, 0.8, 10.0, 11.2, 1.2, mol, other
     )
 
     assert node_runner.result.final_molecule1 is mol
