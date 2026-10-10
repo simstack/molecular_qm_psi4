@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.12.2 (2026-10-10)
+
+### Bug Fixes
+
+- Declare the partial Hessian contribution as a SimstackResult output
+  ([`ba82276`](https://github.com/simstack/molecular_qm_psi4/commit/ba82276a52c7f00c3b5a42d5185afbd3fed5330e))
+
+The node table parser skipped the prose docstring and warned that pyscf_hessian_partial_ext defined
+  no outputs.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.12.1 (2026-10-10)
 
 ### Bug Fixes
