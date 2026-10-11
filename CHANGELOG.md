@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.14.2 (2026-10-11)
+
+### Bug Fixes
+
+- Accept default conformer names in thermo_benchmark2
+  ([`18ea70e`](https://github.com/simstack/molecular_qm_psi4/commit/18ea70ed49d53e8bc304f25b4f9e05179eccee90))
+
+Molecule and molecule are unset labels, so use the formula instead of failing after optimization.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.14.1 (2026-10-11)
 
 ### Bug Fixes
