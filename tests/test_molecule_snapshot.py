@@ -19,6 +19,7 @@ from molecular_qm_psi4.nodes.psi4_calculator import (
     _task_id_from_kwargs,
     _wavefunction_from_gradient_result,
     _forces_storage_from_wfn,
+    _persist_opt_charts,
     run_single_point,
 )
 from simstack.models.charts_artifact import ChartArtifactModel
@@ -264,6 +265,33 @@ def test_energy_and_grad_norm_from_wfn():
     assert abs(grad_norm - 0.5) < 1e-12
 
 
+def test_opt_energy_chart_uses_one_integer_when_the_hartree_part_changes(monkeypatch):
+    class FakeDb:
+        def __init__(self):
+            self.saved = []
+
+        async def save(self, obj):
+            self.saved.append(obj)
+            return obj
+
+    db = FakeDb()
+    monkeypatch.setattr("molecular_qm_psi4.nodes.psi4_calculator._get_db", lambda: db)
+    energy = [
+        {"step": 1, "energy": -76.9},
+        {"step": 2, "energy": -77.1},
+    ]
+    grad = [
+        {"step": 1, "grad_norm": 0.2},
+        {"step": 2, "grad_norm": 0.1},
+    ]
+    asyncio.run(
+        _persist_opt_charts(energy, grad, {"task_id": str(ObjectId()), "node_runner": MagicMock()})
+    )
+    chart = next(item for item in db.saved if item.series[0].yKey == "fractional_energy_mha")
+    assert chart.axes[1].title == "1000 * (E - (-76)) (mHa)"
+    assert [row["fractional_energy_mha"] for row in chart.data] == pytest.approx([-900.0, -1100.0])
+
+
 def test_snapshotter_writes_opt_charts_every_ten_steps(tmp_path, monkeypatch):
     task_id = ObjectId()
     step = {"n": 0}
@@ -326,7 +354,7 @@ def test_snapshotter_writes_opt_charts_every_ten_steps(tmp_path, monkeypatch):
     assert [row["step"] for row in energy_charts[-1].data] == list(range(6, 26))
     assert energy_charts[-1].data[-1]["step"] == 25
     assert energy_charts[-1].data[-1]["fractional_energy_mha"] == pytest.approx(-250.0)
-    assert energy_charts[-1].axes[1].title == "1000 * (E - trunc(E)) (mHa)"
+    assert energy_charts[-1].axes[1].title == "1000 * (E - (-76)) (mHa)"
     assert energy_charts[0].id == energy_charts[-1].id
     assert grad_charts[0].id == grad_charts[-1].id
     assert energy_charts[-1].title.text == "Psi4 optimization energy"

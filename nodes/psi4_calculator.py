@@ -816,14 +816,24 @@ async def _persist_opt_charts(energy_data, grad_data, kwargs, existing=(None, No
     db = _get_db()
     if db is None:
         return existing
+    history = list(energy_data)
+    if not history:
+        raise ValueError("energy history is required to plot the fractional milliHartree")
+    first = history[0]
+    if "energy" not in first or first["energy"] is None:
+        raise ValueError(
+            f"energy is required to plot the fractional milliHartree, got {first!r}"
+        )
+    # One integer for the whole optimization. Per-point trunc jumps by 1000 mHa
+    # when the Hartree part changes.
+    offset = math.trunc(float(first["energy"]))
     fractional_energy = []
-    for row in list(energy_data)[-_OPT_CHART_STEPS:]:
+    for row in history[-_OPT_CHART_STEPS:]:
         if "energy" not in row or row["energy"] is None:
             raise ValueError(f"energy is required to plot the fractional milliHartree, got {row!r}")
-        fractional, _integer = math.modf(float(row["energy"]))
         plotted = {
             "step": row["step"],
-            "fractional_energy_mha": fractional * 1000.0,
+            "fractional_energy_mha": (float(row["energy"]) - offset) * 1000.0,
         }
         if "timestamp" in row:
             plotted["timestamp"] = row["timestamp"]
@@ -832,7 +842,7 @@ async def _persist_opt_charts(energy_data, grad_data, kwargs, existing=(None, No
         fractional_energy,
         "fractional_energy_mha",
         "Psi4 optimization energy",
-        "1000 * (E - trunc(E)) (mHa)",
+        f"1000 * (E - ({offset})) (mHa)",
         parent_id,
         existing[0],
     )
