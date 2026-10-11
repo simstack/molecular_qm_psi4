@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.14.1 (2026-10-11)
+
+### Bug Fixes
+
+- Derive a blank thermo formula from the structure
+  ([`67d4d7e`](https://github.com/simstack/molecular_qm_psi4/commit/67d4d7e6f750832bafad4a20a46422837a2765f7))
+
+Use the Hill formula from molecular_qm_util instead of a PubChem IUPAC name.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+### Testing
+
+- Cover parallel molecule pair optimizations
+  ([`68e123c`](https://github.com/simstack/molecular_qm_psi4/commit/68e123cc1aa5b4595e517083301fcd01e7860412))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.14.0 (2026-10-11)
 
 ### Features
