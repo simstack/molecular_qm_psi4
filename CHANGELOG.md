@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.14.4 (2026-10-11)
+
+### Bug Fixes
+
+- Contract Hessian partials with GEMM instead of full-tensor einsum
+  ([`24a56a3`](https://github.com/simstack/molecular_qm_psi4/commit/24a56a354f12cb5814447fd76817eb3d936e130c))
+
+The vk2buf einsum kept a multi-index intermediate large enough to SIGKILL the worker.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.14.3 (2026-10-11)
 
 ### Bug Fixes
