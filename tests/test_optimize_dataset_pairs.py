@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import inspect
 import sys
@@ -212,6 +213,36 @@ async def test_optimize_dataset_pairs_writes_selected_rows(monkeypatch):
     assert row["chair_energy"].value == pytest.approx(-3.0)
     assert "M01-cis" not in section
     assert dataset["data/Month1"]["M01-cis"]["boat"].atoms[0].x == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_optimize_dataset_pairs_runs_optimizers_together(monkeypatch):
+    dataset = _dataset()
+    saved = []
+    active = {"count": 0, "max": 0}
+
+    async def fake_optimizer(current_input, preopt, **kwargs):
+        active["count"] += 1
+        active["max"] = max(active["max"], active["count"])
+        await asyncio.sleep(0.01)
+        active["count"] -= 1
+        optimized = Molecule.from_molecule(current_input.molecule)
+        return QMResult(final_energy=-1.0, final_structure=optimized)
+
+    _patch_context(monkeypatch, dataset, saved)
+    monkeypatch.setattr(
+        optimize_dataset_pairs_node, "multistep_optimizer", fake_optimizer
+    )
+    status = await inspect.unwrap(optimize_dataset_pairs)(
+        _selection(dataset, [0, 1]),
+        StringData(field_name="section_name", value="optimized"),
+        _qm_input(),
+        PreOptimizerInput(engine=QMEngine.PYSCF),
+        node_runner=_Runner(),
+    )
+    assert status == "ok"
+    assert active["max"] == 4
+    assert list(dataset["optimized"].keys()) == ["M01-cis", "M01-trans"]
 
 
 @pytest.mark.asyncio
