@@ -1,3 +1,5 @@
+import asyncio
+
 from molecular_qm_models import Molecule, QMInput, QMResult
 from molecular_qm_psi4.nodes.multistep_optimizer import (
     PreOptimizerInput,
@@ -32,9 +34,10 @@ async def optimize_dataset_pairs(
     Every selected row has a ``name`` and exactly two molecules. ``qm_input``
     is the shared template passed to ``multistep_optimizer``; its molecule is
     replaced for each conformer. ``preopt`` is the multistep optimizer input.
-    ``section_name`` is the section written on the same dataset. A result row
-    keeps that name and the optimized molecules. A row is omitted when either
-    optimization fails.
+    ``section_name`` is the section written on the same dataset. Every
+    ``multistep_optimizer`` call is started together. A result row keeps that
+    name and the optimized molecules. A row is omitted when either optimization
+    fails.
 
     Parameters:
         selection (DataSetSelection): Selected rows. Each row has a name and two molecules.
@@ -144,13 +147,8 @@ async def optimize_dataset_pairs(
     if len({name for name, _row in selected}) != len(selected):
         raise ValueError("selected rows do not have distinct names")
 
-    result_section = DataSetSection()
-    failed = []
+    prepared = []
     for name, row in selected:
-        output_row = {
-            "name": StringData(field_name="name", value=name),
-        }
-        row_error = None
         for column in molecule_columns:
             molecule = row[column]
             label = molecule.field_name
@@ -164,33 +162,63 @@ async def optimize_dataset_pairs(
             current_input.optimization = True
             current_input.field_name = "QMInput"
             current_input = await _persist_qm_input(current_input, node_runner)
-            kwargs["custom_name"] = f"{name}-{column}"
-            node_runner.info(f"optimizing {name} {column} with multistep_optimizer")
-            try:
-                calc_result = await multistep_optimizer(
-                    current_input, preopt, **kwargs
-                )
-            except Exception as exc:
-                row_error = f"{name} {column}: {exc}"
-                break
-            qm_result, error = _child_qm_result(calc_result)
-            if error:
-                row_error = f"{name} {column}: {error}"
-                break
-            if not isinstance(qm_result, QMResult):
-                row_error = f"{name} {column}: no QMResult"
-                break
-            structure = getattr(qm_result, "final_structure", None)
-            atoms = getattr(structure, "atoms", None) if structure is not None else None
-            if not atoms:
-                row_error = f"{name} {column}: no final_structure"
-                break
-            energy = qm_result.final_energy
-            if energy is None:
-                row_error = f"{name} {column}: no final_energy"
-                break
+            prepared.append((name, column, label.strip(), current_input))
+
+    async def optimize_one(name, column, current_input):
+        child_kwargs = dict(kwargs)
+        child_kwargs["custom_name"] = f"{name}-{column}"
+        node_runner.info(f"optimizing {name} {column} with multistep_optimizer")
+        try:
+            calc_result = await multistep_optimizer(
+                current_input, preopt, **child_kwargs
+            )
+        except Exception as exc:
+            return name, column, None, f"{name} {column}: {exc}"
+        qm_result, error = _child_qm_result(calc_result)
+        if error:
+            return name, column, None, f"{name} {column}: {error}"
+        if not isinstance(qm_result, QMResult):
+            return name, column, None, f"{name} {column}: no QMResult"
+        structure = getattr(qm_result, "final_structure", None)
+        atoms = getattr(structure, "atoms", None) if structure is not None else None
+        if not atoms:
+            return name, column, None, f"{name} {column}: no final_structure"
+        energy = qm_result.final_energy
+        if energy is None:
+            return name, column, None, f"{name} {column}: no final_energy"
+        return name, column, (structure, energy), None
+
+    outcomes = await asyncio.gather(
+        *(
+            optimize_one(name, column, current_input)
+            for name, column, _label, current_input in prepared
+        )
+    )
+    labels = {
+        (name, column): label for name, column, label, _current_input in prepared
+    }
+    by_name = {name: {} for name, _row in selected}
+    errors = {name: [] for name, _row in selected}
+    for name, column, payload, error in outcomes:
+        if error:
+            errors[name].append(error)
+            continue
+        by_name[name][column] = payload
+
+    result_section = DataSetSection()
+    failed = []
+    for name, _row in selected:
+        row_errors = errors[name]
+        if row_errors or any(column not in by_name[name] for column in molecule_columns):
+            detail = "; ".join(row_errors) if row_errors else f"{name}: incomplete"
+            failed.append(detail)
+            node_runner.info(f"skipping {name}: {detail}")
+            continue
+        output_row = {"name": StringData(field_name="name", value=name)}
+        for column in molecule_columns:
+            structure, energy = by_name[name][column]
             optimized = Molecule.from_molecule(structure)
-            optimized.field_name = label.strip()
+            optimized.field_name = labels[(name, column)]
             optimized = await _persist_step_molecule(
                 optimized, node_runner, f"{name}-{column}-opt"
             )
@@ -198,10 +226,6 @@ async def optimize_dataset_pairs(
             output_row[f"{column}_energy"] = FloatData(
                 field_name=f"{column}_energy", value=float(energy)
             )
-        if row_error is not None:
-            failed.append(row_error)
-            node_runner.info(f"skipping {name}: {row_error}")
-            continue
         result_section.add_row(output_row, name=name)
 
     if len(result_section) == 0:
