@@ -2,6 +2,42 @@
 
 <!-- version list -->
 
+## v0.14.3 (2026-10-11)
+
+### Bug Fixes
+
+- Keep one Hartree offset on the optimizer energy chart
+  ([`58d0065`](https://github.com/simstack/molecular_qm_psi4/commit/58d00654c6e96c27bb645f8c848221c5dd2411f4))
+
+Per-point truncation jumps by 1000 mHa when the integer before the decimal changes.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+- Keep the Hessian TaskGroup child error in the failure text
+  ([`96e7b23`](https://github.com/simstack/molecular_qm_psi4/commit/96e7b238839c93a77ab02be8b45db5a0d3ff6762))
+
+str(ExceptionGroup) drops the child, so a failed aux partial was stored as an empty TaskGroup
+  summary.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+- Log each large Hessian partial buffer before and after allocation
+  ([`e6006d7`](https://github.com/simstack/molecular_qm_psi4/commit/e6006d70fc055b66293757df1b82700c90eeb294))
+
+A killed aux partial kept no traceback, so the last allocating line is the buffer that did not
+  return.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+- Plot optimizer energy as fractional milliHartree and criteria as log10
+  ([`0ea80a9`](https://github.com/simstack/molecular_qm_psi4/commit/0ea80a949b4b8840ce77996db60bd9928e95a015))
+
+The integer Hartree hides the energy change, and log-axis ticks for the small grms-scale values all
+  render as zero.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.14.2 (2026-10-11)
 
 ### Bug Fixes
