@@ -19,7 +19,7 @@ except ImportError:
 
 from odmantic import ObjectId
 
-from molecular_qm_models import QMInput, QMResult, Molecule, MoleculeSnapshot
+from molecular_qm_models import Atom, QMInput, QMResult, Molecule, MoleculeSnapshot
 from molecular_qm_psi4.util.psi4_calculator import (
     OptimizationNotConvergedError,
     OptimizationOscillationError,
@@ -45,6 +45,7 @@ from molecular_qm_psi4.util.opt_structures import (
     optimization_structure_list,
     write_optimization_structure,
 )
+from molecular_qm_psi4.util.frequency_table import FREQ_ZERO_CM1, wavenumbers_cm1
 from molecular_qm_psi4.util.pyscf_result import PySCFResult
 from molecular_qm_psi4.util.pyscf_thermo import run_pyscf_thermo
 from molecular_qm_psi4.util.vibration_molden import (
@@ -78,6 +79,9 @@ _WATCHDOG_SIDECAR = "optimization_watchdog_timeout.txt"
 _HEARTBEAT_LOG = "heartbeat.log"
 _FREQ_KEY = "frequency_analysis"
 _HEARTBEAT_INTERVAL_S = 300.0
+_SADDLE_STEP_ANGSTROM = 0.15
+_SADDLE_ESCAPE_ATTEMPTS = 2
+_MODE_IMAG_TOL = 1e-8
 _CRITERION_CHARTS = (
     ("abs_de", "convergence_energy", "|dE|", "Ha"),
     ("grms", "convergence_grms", "grms", "Ha/Bohr"),
@@ -373,6 +377,134 @@ def _load_payload(path: Path):
     if not load_path.exists() and not str(load_path).endswith(".npy"):
         load_path = Path(str(load_path) + ".npy")
     return np.load(str(load_path), allow_pickle=True).item()
+
+
+def imaginary_frequencies_cm1(freq_info):
+    """Modes whose signed wavenumber is below ``-FREQ_ZERO_CM1``."""
+    if not isinstance(freq_info, dict):
+        raise ValueError("freq_info is required")
+    raw = freq_info.get("freq_wavenumber")
+    if raw is None:
+        raise ValueError("freq_info has no freq_wavenumber")
+    values = wavenumbers_cm1(raw)
+    return [
+        (index, value) for index, value in enumerate(values) if value < -FREQ_ZERO_CM1
+    ]
+
+
+def saddle_displaced_molecules(source, payload, freq_info):
+    """Both signs of each imaginary Cartesian mode, displaced by 0.15 Angstrom.
+
+    ``payload["atom"]`` is the stationary geometry in Angstrom. ``norm_mode``
+    is a Cartesian direction; only its direction is used.
+    """
+    if np is None:
+        raise ValueError("numpy is required")
+    if source is None:
+        raise ValueError("source molecule is required")
+    if not isinstance(payload, dict):
+        raise ValueError("wavefunction payload is required")
+    atom = payload.get("atom")
+    if not atom:
+        raise ValueError("wavefunction payload has no atom geometry")
+    if not isinstance(freq_info, dict):
+        raise ValueError("freq_info is required")
+    raw_modes = freq_info.get("norm_mode")
+    if raw_modes is None:
+        raise ValueError("freq_info has no norm_mode")
+    imaginary = imaginary_frequencies_cm1(freq_info)
+    if not imaginary:
+        raise ValueError("freq_info has no imaginary frequencies")
+    modes = np.asarray(raw_modes)
+    if np.iscomplexobj(modes):
+        if float(np.max(np.abs(modes.imag))) > _MODE_IMAG_TOL:
+            raise ValueError("normal modes have a non-zero imaginary part")
+        modes = np.real(modes)
+    modes = np.asarray(modes, dtype=float)
+    n_atoms = len(atom)
+    if modes.ndim != 3 or modes.shape[1:] != (n_atoms, 3):
+        raise ValueError(
+            f"norm_mode shape {tuple(modes.shape)} does not match (nmode, {n_atoms}, 3)"
+        )
+    if modes.shape[0] < max(index for index, _value in imaginary) + 1:
+        raise ValueError(
+            f"norm_mode has {modes.shape[0]} modes, frequencies need "
+            f"{max(index for index, _value in imaginary) + 1}"
+        )
+    base = []
+    elements = []
+    for index, row in enumerate(atom):
+        if len(row) != 4:
+            raise ValueError(f"wavefunction atom {index} must be element, x, y, z")
+        element, x, y, z = row
+        elements.append(element)
+        base.append([float(x), float(y), float(z)])
+    base = np.asarray(base, dtype=float)
+    smiles = getattr(source, "smiles", None)
+    formula = getattr(source, "formula", None)
+    properties = getattr(source, "properties", None)
+    displaced = []
+    for index, _value in imaginary:
+        mode = modes[index]
+        norm = float(np.linalg.norm(mode))
+        if norm == 0.0:
+            raise ValueError(f"normal mode {index} has zero length")
+        step = mode / norm * _SADDLE_STEP_ANGSTROM
+        for sign in (1.0, -1.0):
+            coords = base + sign * step
+            molecule = Molecule()
+            for element, xyz in zip(elements, coords):
+                molecule.add_atom(
+                    Atom.from_coords(
+                        element=str(element),
+                        coords=[float(xyz[0]), float(xyz[1]), float(xyz[2])],
+                    )
+                )
+            molecule.smiles = smiles
+            molecule.formula = formula
+            if properties is not None:
+                molecule.properties = properties
+            displaced.append(molecule)
+    return displaced
+
+
+def _frequency_payload(wavefunction):
+    if wavefunction is None:
+        raise ValueError("wavefunction is required")
+    downloaded = Path(wavefunction.get(local_dir=Path(".")))
+    payload = _load_payload(downloaded)
+    freq_info = payload.get(_FREQ_KEY)
+    if not freq_info:
+        raise ValueError("wavefunction payload has no frequency analysis")
+    return payload, freq_info
+
+
+_HESSIAN_RESULT_FIELDS = (
+    "vibrational_frequencies",
+    "thermodynamics_table",
+    "G_tot",
+    "ZPE_tot",
+    "E_tot",
+    "S_tot",
+)
+
+
+def _store_hessian_outputs(node_runner, hess_result, qm_result):
+    for name in _HESSIAN_RESULT_FIELDS:
+        value = getattr(hess_result, name, None)
+        if value is not None:
+            setattr(node_runner, name, value)
+    if getattr(node_runner, "vibrational_frequencies", None) is not None:
+        qm_result.vibrational_frequencies = node_runner.vibrational_frequencies
+    updated = getattr(hess_result, "wavefunction", None)
+    if updated is not None:
+        qm_result.files.append(updated)
+    attach_vibration_molden(
+        node_runner,
+        getattr(hess_result, "vibration_molden", None),
+        qm_result,
+    )
+    return getattr(node_runner, "thermodynamics_table", None)
 
 
 def _is_wavefunction_artifact(name: str) -> bool:
@@ -1479,7 +1611,10 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
             were computed. Frequency jobs run as a child ``pyscf_hessian_orchestrator`` node.
             Optimization runs as a child ``pyscf_optimization`` node and is reused
-            when that Hessian fails.
+            when that Hessian fails. Frequencies below -50 cm^-1 are left by
+            displacing 0.15 Angstrom along each imaginary mode, reoptimizing both
+            signs, and recomputing the Hessian at the lowest result. That escape
+            is repeated once. Remaining imaginary modes fail the node.
         vibration_molden (FileStack): Normal modes in Molden format
             (``vibrations.molden``) for visualization in Molden or Avogadro when
             frequencies were computed.
@@ -1680,33 +1815,71 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 from molecular_qm_psi4.models.pyscf_hessian import PySCFHessianInput
                 from molecular_qm_psi4.nodes.pyscf_hessian import pyscf_hessian_orchestrator
 
-                node_runner.info("Starting pyscf_hessian_orchestrator for frequencies")
-                hess_result = await pyscf_hessian_orchestrator(
-                    PySCFHessianInput(qm_input=qm_input, wavefunction=wfn_fs),
-                    **kwargs,
-                )
-                for name in (
-                    "vibrational_frequencies",
-                    "thermodynamics_table",
-                    "G_tot",
-                    "ZPE_tot",
-                    "E_tot",
-                    "S_tot",
-                ):
-                    value = getattr(hess_result, name, None)
-                    if value is not None:
-                        setattr(node_runner, name, value)
-                if getattr(node_runner, "vibrational_frequencies", None) is not None:
-                    qm_result.vibrational_frequencies = node_runner.vibrational_frequencies
-                updated = getattr(hess_result, "wavefunction", None)
-                if updated is not None:
-                    qm_result.files.append(updated)
-                attach_vibration_molden(
-                    node_runner,
-                    getattr(hess_result, "vibration_molden", None),
-                    qm_result,
-                )
-                thermodynamics_table = getattr(node_runner, "thermodynamics_table", thermodynamics_table)
+                hessian_input = qm_input
+                for attempt in range(_SADDLE_ESCAPE_ATTEMPTS + 1):
+                    node_runner.info("Starting pyscf_hessian_orchestrator for frequencies")
+                    hess_result = await pyscf_hessian_orchestrator(
+                        PySCFHessianInput(qm_input=hessian_input, wavefunction=wfn_fs),
+                        **kwargs,
+                    )
+                    hessian_error = getattr(hess_result, "error_message", None)
+                    if hessian_error:
+                        raise ValueError(hessian_error)
+                    thermodynamics_table = _store_hessian_outputs(
+                        node_runner, hess_result, qm_result
+                    )
+                    updated = getattr(hess_result, "wavefunction", None)
+                    payload, freq_info = _frequency_payload(updated)
+                    imaginary = imaginary_frequencies_cm1(freq_info)
+                    if not imaginary:
+                        break
+                    details = ", ".join(
+                        f"mode {index + 1}={value:.2f} cm^-1" for index, value in imaginary
+                    )
+                    if attempt == _SADDLE_ESCAPE_ATTEMPTS:
+                        for name in _HESSIAN_RESULT_FIELDS:
+                            setattr(node_runner, name, None)
+                        qm_result.vibrational_frequencies = None
+                        raise ValueError(
+                            "Imaginary frequencies remain after saddle escape: " + details
+                        )
+                    node_runner.info(
+                        f"Imaginary frequencies below -{FREQ_ZERO_CM1:g} cm^-1: {details}. "
+                        f"Displacing {_SADDLE_STEP_ANGSTROM:g} Angstrom along each mode "
+                        "and reoptimizing"
+                    )
+                    best_energy = None
+                    best_input = None
+                    best_result = None
+                    for molecule in saddle_displaced_molecules(
+                        hessian_input.molecule, payload, freq_info
+                    ):
+                        opt_input = hessian_input.model_copy(
+                            update={"molecule": molecule, "optimization": True}
+                        )
+                        node_runner.info("Starting pyscf_optimization from an imaginary mode")
+                        opt_result = await pyscf_optimization(opt_input, **kwargs)
+                        opt_error = getattr(opt_result, "error_message", None)
+                        if opt_error:
+                            raise ValueError(opt_error)
+                        opt_qm = getattr(opt_result, "qm_result", None)
+                        if opt_qm is None or getattr(opt_qm, "final_energy", None) is None:
+                            raise ValueError("pyscf_optimization did not return a final energy")
+                        energy = float(opt_qm.final_energy)
+                        if getattr(opt_result, "wavefunction", None) is None:
+                            raise ValueError("pyscf_optimization did not return a wavefunction")
+                        if best_energy is None or energy < best_energy:
+                            best_energy = energy
+                            best_input = opt_input
+                            best_result = opt_result
+                    if best_result is None or best_input is None:
+                        raise ValueError("saddle escape produced no optimized wavefunction")
+                    qm_result = best_result.qm_result
+                    wfn_fs = best_result.wavefunction
+                    hessian_input = best_input
+                    node_runner.info(
+                        f"Lowest imaginary-mode optimization energy is {best_energy:.12f} Ha"
+                    )
 
             node_runner.info("PySCF calculation finished successfully")
             node_runner.qm_result = qm_result

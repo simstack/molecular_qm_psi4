@@ -22,6 +22,7 @@ from molecular_qm_psi4.models.pyscf_hessian import (
 from molecular_qm_psi4.nodes.pyscf_calculator import (
     _FREQ_KEY,
     _WFN_NPY_NAME,
+    _apply_harmonic_to_gradient,
     _load_payload,
     _write_payload,
 )
@@ -30,9 +31,11 @@ from molecular_qm_psi4.util.pyscf_calculator import (
     PySCFCalculator,
     attach_df_auxmol,
     df_hessian_memory,
+    harmonic_cartesian_constraints,
     largest_aux_blk,
     pyscf_basis_name,
     pyscf_functional_name,
+    pyscf_opt_conv_params,
 )
 from molecular_qm_psi4.util.pyscf_hessian_analytical import (
     analytical_hessian_plan,
@@ -466,6 +469,98 @@ def molecule_from_payload(qm_input, payload):
         verbose=0,
         symmetry=False,
     )
+
+
+def max_cartesian_displacement_angstrom(molecule, payload):
+    """Largest atom displacement from the QMInput molecule to the payload geometry.
+
+    Both geometries are Cartesian Angstrom. The payload geometry is the one
+    ``molecule_from_payload`` builds, not ``qm_input.molecule``.
+    """
+    if np is None:
+        raise ValueError("numpy is required")
+    if not isinstance(payload, dict):
+        raise ValueError("wavefunction payload is required")
+    atom = payload.get("atom")
+    if not atom:
+        raise ValueError("wavefunction payload has no atom geometry")
+    if molecule is None:
+        raise ValueError("qm_input molecule is required")
+    sites = getattr(molecule, "atoms", None)
+    if not sites:
+        raise ValueError("qm_input molecule has no atoms")
+    sites = list(sites)
+    if len(sites) != len(atom):
+        raise ValueError(
+            f"QMInput molecule has {len(sites)} atoms, wavefunction geometry has {len(atom)}"
+        )
+    max_disp = 0.0
+    for index, (site, row) in enumerate(zip(sites, atom)):
+        if len(row) != 4:
+            raise ValueError(f"wavefunction atom {index} must be element, x, y, z")
+        element, x, y, z = row
+        site_element = getattr(site, "element", None)
+        if site_element is None or str(site_element) != str(element):
+            raise ValueError(
+                f"atom {index} element {site_element!r} does not match "
+                f"wavefunction element {element!r}"
+            )
+        for name in ("x", "y", "z"):
+            if getattr(site, name) is None:
+                raise ValueError(f"qm_input molecule atom {index} coordinate {name} is required")
+        delta = np.array(
+            [float(site.x) - float(x), float(site.y) - float(y), float(site.z) - float(z)],
+            dtype=float,
+        )
+        max_disp = max(max_disp, float(np.linalg.norm(delta)))
+    return max_disp
+
+
+def assert_hessian_geometry_stationary(mf, mol, qm_input, payload, node_runner):
+    """Require the Hessian geometry to meet the optimizer gradient threshold.
+
+    The compared gradient includes harmonic Cartesian springs. Those springs
+    are part of the optimizer gradient and are absent from the analytical Hessian.
+    """
+    if np is None:
+        raise ValueError("numpy is required")
+    if mf is None or mol is None or qm_input is None or node_runner is None:
+        raise ValueError("mean field, molecule, qm_input, and node_runner are required")
+    displacement = max_cartesian_displacement_angstrom(qm_input.molecule, payload)
+    node_runner.info(
+        "Hessian geometry maximum atom displacement from the QMInput molecule is "
+        f"{displacement:.6f} Angstrom"
+    )
+    grad_method = getattr(mf, "nuc_grad_method", None)
+    if not callable(grad_method):
+        raise ValueError("mean field nuc_grad_method is required")
+    grad = grad_method().kernel()
+    if grad is None:
+        raise ValueError("nuclear gradient is required")
+    grad = np.asarray(grad, dtype=float)
+    if grad.shape != (int(mol.natm), 3):
+        raise ValueError(
+            f"nuclear gradient shape {tuple(grad.shape)} does not match ({int(mol.natm)}, 3)"
+        )
+    constraints = harmonic_cartesian_constraints(qm_input)
+    if constraints:
+        _, grad = _apply_harmonic_to_gradient(0.0, grad, mol, constraints)
+        grad = np.asarray(grad, dtype=float)
+    grms = float(np.sqrt(np.mean(np.square(grad))))
+    accuracy = getattr(qm_input, "optimization_accuracy", None)
+    limit = pyscf_opt_conv_params(accuracy).get("convergence_grms")
+    if limit is None:
+        raise ValueError("convergence_grms is required")
+    limit = float(limit)
+    node_runner.info(
+        f"Hessian geometry gradient RMS is {grms:.6e} Ha/Bohr "
+        f"(convergence_grms {limit:.6e} Ha/Bohr)"
+    )
+    if not grms < limit:
+        raise ValueError(
+            f"Hessian geometry is not stationary: gradient RMS {grms:.6e} Ha/Bohr "
+            f"is outside convergence_grms {limit:.6e} Ha/Bohr"
+        )
 
 
 def equilibrium_mean_field(qm_input, mol, payload, node_runner, budget_mb, num_threads):
@@ -1641,6 +1736,7 @@ async def pyscf_hessian(opts: PySCFHessianStageInput, **kwargs) -> SimstackResul
         de2 = de2 + hess_nuc(mol)
         if hessian_obj.base.do_disp():
             de2 = de2 + hessian_obj.get_dispersion()
+        assert_hessian_geometry_stationary(mf, mol, opts.qm_input, payload, node_runner)
         from pyscf.hessian import thermo as pyscf_thermo
 
         freq_info = pyscf_thermo.harmonic_analysis(mol, de2)
