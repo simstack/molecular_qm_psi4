@@ -467,6 +467,7 @@ def test_pyscf_persist_opt_charts_keeps_last_20_steps(monkeypatch):
 
 def test_pyscf_persist_opt_charts_plots_each_criterion_and_its_threshold(monkeypatch):
     import asyncio
+    import math
 
     from odmantic import ObjectId
 
@@ -522,23 +523,30 @@ def test_pyscf_persist_opt_charts_plots_each_criterion_and_its_threshold(monkeyp
     by_key = {}
     for chart in db.saved:
         y_keys = [series.yKey for series in chart.series]
-        if "threshold" in y_keys:
+        if "log10_threshold" in y_keys:
             by_key[y_keys[0]] = chart
-    assert set(by_key) == {"abs_de", "grms", "gmax", "drms", "dmax"}
-    grms = by_key["grms"]
+    assert set(by_key) == {"log10_abs_de", "log10_grms", "log10_gmax", "log10_drms", "log10_dmax"}
+    grms = by_key["log10_grms"]
     assert grms.title.text == "PySCF optimization grms"
-    assert grms.axes[1].type == "log"
-    assert grms.axes[1].title == "grms (Ha/Bohr)"
-    assert [series.yKey for series in grms.series] == ["grms", "threshold"]
-    assert grms.series[1].title == "threshold"
+    assert grms.axes[1].type == "number"
+    assert grms.axes[1].title == "log10(grms) (Ha/Bohr)"
+    assert [series.yKey for series in grms.series] == ["log10_grms", "log10_threshold"]
+    assert grms.series[1].title == "log10(threshold)"
     assert grms.series[1].lineDash == [6, 4]
     assert [row["step"] for row in grms.data] == [1, 2, 3]
-    assert [row["threshold"] for row in grms.data] == [1.0e-5, 1.0e-5, 1.0e-5]
-    assert [row["grms"] for row in grms.data] == [1.0e-3, 5.0e-4, 1.0e-5]
-    assert [row["step"] for row in by_key["abs_de"].data] == [2, 3]
-    assert [row["threshold"] for row in by_key["abs_de"].data] == [1.0e-8, 1.0e-8]
-    assert [row["step"] for row in by_key["drms"].data] == [2, 3]
-    assert [row["step"] for row in by_key["dmax"].data] == [2, 3]
+    assert [row["log10_threshold"] for row in grms.data] == [math.log10(1.0e-5)] * 3
+    assert [row["log10_grms"] for row in grms.data] == [
+        math.log10(1.0e-3),
+        math.log10(5.0e-4),
+        math.log10(1.0e-5),
+    ]
+    assert [row["step"] for row in by_key["log10_abs_de"].data] == [2, 3]
+    assert [row["log10_threshold"] for row in by_key["log10_abs_de"].data] == [
+        math.log10(1.0e-8),
+        math.log10(1.0e-8),
+    ]
+    assert [row["step"] for row in by_key["log10_drms"].data] == [2, 3]
+    assert [row["step"] for row in by_key["log10_dmax"].data] == [2, 3]
     try:
         asyncio.run(
             mod._persist_opt_charts(

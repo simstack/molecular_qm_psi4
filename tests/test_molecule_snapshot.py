@@ -313,15 +313,20 @@ def test_snapshotter_writes_opt_charts_every_ten_steps(tmp_path, monkeypatch):
                 wrapped("pbe")
             assert [row["step"] for row in snapshotter.energy_history] == list(range(1, 26))
             assert len(db.saved) >= 2
-            assert {chart.series[0].yKey for chart in db.saved} == {"energy", "log10_grad_norm"}
+            assert {chart.series[0].yKey for chart in db.saved} == {
+                "fractional_energy_mha",
+                "log10_grad_norm",
+            }
 
     assert all(isinstance(chart, ChartArtifactModel) for chart in db.saved)
     assert all(chart.parent_id == task_id for chart in db.saved)
-    energy_charts = [c for c in db.saved if c.series[0].yKey == "energy"]
+    energy_charts = [c for c in db.saved if c.series[0].yKey == "fractional_energy_mha"]
     grad_charts = [c for c in db.saved if c.series[0].yKey == "log10_grad_norm"]
     assert len(energy_charts) >= 2
     assert [row["step"] for row in energy_charts[-1].data] == list(range(6, 26))
     assert energy_charts[-1].data[-1]["step"] == 25
+    assert energy_charts[-1].data[-1]["fractional_energy_mha"] == pytest.approx(-250.0)
+    assert energy_charts[-1].axes[1].title == "1000 * (E - trunc(E)) (mHa)"
     assert energy_charts[0].id == energy_charts[-1].id
     assert grad_charts[0].id == grad_charts[-1].id
     assert energy_charts[-1].title.text == "Psi4 optimization energy"

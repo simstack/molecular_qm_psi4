@@ -195,8 +195,12 @@ def _criterion_plot_rows(history, value_key, threshold):
             raise ValueError(f"{value_key} is required")
         number = float(value)
         if not number > 0.0:
-            raise ValueError(f"{value_key} must be positive to plot against its threshold, got {number}")
-        plotted = {"step": row["step"], value_key: number, "threshold": cutoff}
+            raise ValueError(f"{value_key} must be positive to plot its log, got {number}")
+        plotted = {
+            "step": row["step"],
+            f"log10_{value_key}": math.log10(number),
+            "log10_threshold": math.log10(cutoff),
+        }
         if "timestamp" in row:
             plotted["timestamp"] = row["timestamp"]
         rows.append(plotted)
@@ -204,10 +208,11 @@ def _criterion_plot_rows(history, value_key, threshold):
 
 
 def _opt_criterion_chart(data, value_key, title, y_label, parent_id, existing=None):
+    log_key = f"log10_{value_key}"
     value_series = AGLineSeriesConfig(
         type="line",
         xKey="step",
-        yKey=value_key,
+        yKey=log_key,
         title=y_label,
         data=data,
         marker={"enabled": False},
@@ -215,15 +220,15 @@ def _opt_criterion_chart(data, value_key, title, y_label, parent_id, existing=No
     threshold_series = AGLineSeriesConfig(
         type="line",
         xKey="step",
-        yKey="threshold",
-        title="threshold",
+        yKey="log10_threshold",
+        title="log10(threshold)",
         data=data,
         marker={"enabled": False},
         lineDash=[6, 4],
     )
     axes = [
         AGChartAxisConfig(type="number", position="bottom", title="Optimization step"),
-        AGChartAxisConfig(type="log", position="left", title=y_label),
+        AGChartAxisConfig(type="number", position="left", title=y_label),
     ]
     series = [value_series, threshold_series]
     if existing is not None:
@@ -303,7 +308,7 @@ async def _persist_opt_charts(
                 rows,
                 value_key,
                 f"PySCF optimization {label}",
-                f"{label} ({unit})",
+                f"log10({label}) ({unit})",
                 parent_id,
                 existing.get(value_key),
             )

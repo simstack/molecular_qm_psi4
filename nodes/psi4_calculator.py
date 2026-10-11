@@ -816,11 +816,23 @@ async def _persist_opt_charts(energy_data, grad_data, kwargs, existing=(None, No
     db = _get_db()
     if db is None:
         return existing
+    fractional_energy = []
+    for row in list(energy_data)[-_OPT_CHART_STEPS:]:
+        if "energy" not in row or row["energy"] is None:
+            raise ValueError(f"energy is required to plot the fractional milliHartree, got {row!r}")
+        fractional, _integer = math.modf(float(row["energy"]))
+        plotted = {
+            "step": row["step"],
+            "fractional_energy_mha": fractional * 1000.0,
+        }
+        if "timestamp" in row:
+            plotted["timestamp"] = row["timestamp"]
+        fractional_energy.append(plotted)
     energy_chart = _opt_line_chart(
-        list(energy_data)[-_OPT_CHART_STEPS:],
-        "energy",
+        fractional_energy,
+        "fractional_energy_mha",
         "Psi4 optimization energy",
-        "Energy (Ha)",
+        "1000 * (E - trunc(E)) (mHa)",
         parent_id,
         existing[0],
     )
