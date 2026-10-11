@@ -44,6 +44,7 @@ from molecular_qm_psi4.util.pyscf_hessian_h1 import make_df_rks_h1, make_h1_memo
 from molecular_qm_psi4.util.pyscf_hessian_partial import (
     aux_blocks_cover,
     aux_shell_groups,
+    note_hessian_allocation,
     partial_jk_span,
     partial_nlc,
     partial_response2_cross,
@@ -886,7 +887,12 @@ async def pyscf_hessian_partial_ext(
                 task_id=heartbeat_task_id,
             ):
                 array = partial_xc_and_e1(
-                    hessian, mf.mo_energy, mf.mo_coeff, mf.mo_occ, budget_mb
+                    hessian,
+                    mf.mo_energy,
+                    mf.mo_coeff,
+                    mf.mo_occ,
+                    budget_mb,
+                    node_runner=node_runner,
                 )
             record = await store_partial_contribution(
                 hessian_task_id, "xc", 0, 0, n_atoms, array, {}, row_dir
@@ -905,7 +911,9 @@ async def pyscf_hessian_partial_ext(
                 interval_s=_HEARTBEAT_INTERVAL_S,
                 task_id=heartbeat_task_id,
             ):
-                array = partial_nlc(hessian, mf.mo_coeff, mf.mo_occ, budget_mb)
+                array = partial_nlc(
+                    hessian, mf.mo_coeff, mf.mo_occ, budget_mb, node_runner=node_runner
+                )
             record = await store_partial_contribution(
                 hessian_task_id, "nlc", 0, 0, n_atoms, array, {}, row_dir
             )
@@ -925,8 +933,13 @@ async def pyscf_hessian_partial_ext(
             arrays = await materialize_hessian_contribution(record, row_dir)
             rho_rows.append(arrays["rhoj1"])
             weight_rows.append(arrays["wj1"])
+        stacked_shape = (n_atoms,) + tuple(int(dim) for dim in rho_rows[0].shape)
+        note_hessian_allocation(node_runner, "allocating", "rhoj1 stack", stacked_shape)
         rhoj1 = np.stack(rho_rows, axis=0)
+        note_hessian_allocation(node_runner, "allocated", "rhoj1 stack", rhoj1.shape)
+        note_hessian_allocation(node_runner, "allocating", "wj1 stack", stacked_shape)
         wj1 = np.stack(weight_rows, axis=0)
+        note_hessian_allocation(node_runner, "allocated", "wj1 stack", wj1.shape)
         # The per-atom arrays are copies. Drop them before sizing the aux block
         # so the resident set matches the memory held for the contractions.
         del rho_rows, weight_rows
@@ -1030,6 +1043,7 @@ async def pyscf_hessian_partial_ext(
                     rhoj1,
                     wj1,
                     blk,
+                    node_runner=node_runner,
                 )
                 response_arrays = {}
                 if wj_ip2 is not None:

@@ -21,6 +21,43 @@ def _require_numpy():
         raise ValueError("numpy is required to assemble a partial Hessian")
 
 
+def note_hessian_allocation(node_runner, phase, name, shape):
+    """Log one large Hessian buffer before it is created and after it exists.
+
+    A killed container keeps the last ``allocating`` line and never writes the
+    matching ``allocated`` line. ``shape`` is the float64 count about to be
+    requested, or the array's real shape once the allocation has returned.
+    """
+    if node_runner is None or not hasattr(node_runner, "info"):
+        raise ValueError("node_runner is required")
+    if phase not in {"allocating", "allocated"}:
+        raise ValueError(f"allocation phase must be allocating or allocated, got {phase!r}")
+    if name is None or not str(name).strip():
+        raise ValueError("allocation name is required")
+    if isinstance(shape, (str, bytes)) or shape is None:
+        raise ValueError(f"allocation shape must be a sequence of ints, got {shape!r}")
+    if any(isinstance(dim, bool) for dim in shape):
+        raise ValueError(f"allocation shape must be a sequence of ints, got {shape!r}")
+    try:
+        dims = tuple(int(dim) for dim in shape)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"allocation shape must be a sequence of ints, got {shape!r}") from exc
+    if not dims or any(dim < 0 for dim in dims):
+        raise ValueError(f"allocation shape must be non-negative, got {shape!r}")
+    count = 1
+    for dim in dims:
+        count *= dim
+    from pyscf import lib
+
+    current = lib.current_memory()
+    if current is None or len(tuple(current)) < 1:
+        raise ValueError(f"PySCF current_memory is required, got {current!r}")
+    rss = float(current[0])
+    node_runner.info(
+        f"Hessian {phase} {name} shape={dims} ~{count * 8 / 1e6:.0f} MB rss={rss:.0f} MB"
+    )
+
+
 def _ao_loc_list(ao_loc):
     if ao_loc is None:
         raise ValueError("aux ao_loc is required")
@@ -173,7 +210,19 @@ def _symmetrize(matrix):
 
 
 def _partial_ejk_window(
-    hessobj, mo_energy, mo_coeff, mo_occ, shell0, shell1, rhoj1, wj1, with_k, with_j, block_limit
+    hessobj,
+    mo_energy,
+    mo_coeff,
+    mo_occ,
+    shell0,
+    shell1,
+    rhoj1,
+    wj1,
+    with_k,
+    with_j,
+    block_limit,
+    *,
+    node_runner,
 ):
     """JK contribution of aux shells ``[shell0, shell1)`` to ``ej`` and ``ek``.
 
@@ -182,6 +231,8 @@ def _partial_ejk_window(
     pass sets ``with_j`` false and keeps only ``ek``.
     """
     _require_numpy()
+    if node_runner is None:
+        raise ValueError("node_runner is required")
     from pyscf import lib
     from pyscf.df.hessian.rhf import _gen_metric_solver, _int3c_wrapper
 
@@ -211,6 +262,15 @@ def _partial_ejk_window(
             f"aux shells {start}:{stop} have {ao1 - ao0} functions, above the block size "
             f"{limit} that fits in max_memory={budget} MB"
         )
+
+    def note(phase, name, shape):
+        note_hessian_allocation(
+            node_runner,
+            phase,
+            f"{name} shells {start}:{stop} j={with_j} k={with_k}",
+            shape,
+        )
+
     mocc = mo_coeff[:, mo_occ > 0]
     nocc = int(mocc.shape[1])
     if nocc < 1:
@@ -239,24 +299,43 @@ def _partial_ejk_window(
     aoslices = mol.aoslice_by_atom()
     auxslices = auxmol.aoslice_by_atom()
     natm = mol.natm
+    note("allocating", "int2c2e", (naux, naux))
     int2c = auxmol.intor("int2c2e", aosym="s1")
+    note("allocated", "int2c2e", int2c.shape)
     solve_j2c = _gen_metric_solver(int2c)
+    note("allocating", "int2c2e_ip1", (3, naux, naux))
     int2c_ip1 = auxmol.intor("int2c2e_ip1", aosym="s1")
+    note("allocated", "int2c2e_ip1", int2c_ip1.shape)
     get_int3c = _int3c_wrapper(mol, auxmol, "int3c2e", "s1")
     rhoj0 = np.zeros(naux)
-    rhok0 = np.empty((naux, nao, nocc)) if with_k else None
-    for _atom, (shl0, shl1, p0, p1) in enumerate(aoslices):
+    if with_k:
+        note("allocating", "rhok0", (naux, nao, nocc))
+        rhok0 = np.empty((naux, nao, nocc))
+        note("allocated", "rhok0", rhok0.shape)
+    else:
+        rhok0 = None
+    for atom_index, (shl0, shl1, p0, p1) in enumerate(aoslices):
+        note("allocating", f"int3c2e atom {atom_index}", (p1 - p0, nao, naux))
         int3c = get_int3c((shl0, shl1, 0, nbas, 0, auxmol.nbas))
+        note("allocated", f"int3c2e atom {atom_index}", int3c.shape)
         rhoj0 += lib.einsum("klp,kl->p", int3c, dm0[p0:p1])
         if with_k:
+            solved_shape = (naux, p1 - p0, nocc)
+            note("allocating", f"rhok0 solve atom {atom_index}", solved_shape)
             solved = solve_j2c(lib.einsum("ijp,jk->pik", int3c, mocc_2).reshape(naux, -1))
+            note("allocated", f"rhok0 solve atom {atom_index}", solved.shape)
             rhok0[:, p0:p1] = solved.reshape(naux, p1 - p0, nocc)
         int3c = None
+    note("allocating", "rhoj0 solve", (naux,))
     rhoj0 = solve_j2c(rhoj0)
+    note("allocated", "rhoj0 solve", rhoj0.shape)
 
     window = (0, nbas, 0, nbas, start, stop)
     get_int3c_ipip1 = _int3c_wrapper(mol, auxmol, "int3c2e_ipip1", "s1")
+    nwin = ao1 - ao0
+    note("allocating", "int3c2e_ipip1", (9, nao, nao, nwin))
     int3c_ipip1 = get_int3c_ipip1(window)
+    note("allocated", "int3c2e_ipip1", int3c_ipip1.shape)
     vj1_diag = lib.einsum("xijp,p->xij", int3c_ipip1, rhoj0[ao0:ao1]).reshape(3, 3, nao, nao)
     vk1_diag = None
     if with_k:
@@ -268,24 +347,42 @@ def _partial_ejk_window(
     ikp_atoms = []
     pki_atoms = []
 
-    def solved_ip1(shl0, shl1, p0, p1):
+    def solved_ip1(shl0, shl1, p0, p1, atom_index, label):
+        note(
+            "allocating",
+            f"int3c2e_ip1 {label} atom {atom_index}",
+            (3, p1 - p0, nao, naux),
+        )
         int3c_ip1 = get_int3c_ip1((shl0, shl1, 0, nbas, 0, auxmol.nbas))
-        solved = solve_j2c(int3c_ip1.reshape(-1, naux).T).reshape(naux, 3, p1 - p0, nao)
+        note("allocated", f"int3c2e_ip1 {label} atom {atom_index}", int3c_ip1.shape)
+        solved_shape = (naux, 3, p1 - p0, nao)
+        note("allocating", f"solve_j2c {label} atom {atom_index}", solved_shape)
+        solved = solve_j2c(int3c_ip1.reshape(-1, naux).T).reshape(*solved_shape)
+        note("allocated", f"solve_j2c {label} atom {atom_index}", solved.shape)
         return solved
 
     for ia in range(natm):
         shl0, shl1, p0, p1 = aoslices[ia]
         if not with_k:
             break
-        solved = solved_ip1(shl0, shl1, p0, p1)
+        solved = solved_ip1(shl0, shl1, p0, p1, ia, "ao")
         # A slice of the full-aux contraction is a view. Holding one per atom
         # retains 3*nao*naux*nao floats and SIGKILLs a 32 GB VM (rc=137).
+        window_shape = (nwin, 3, p1 - p0, nao)
+        note("allocating", f"ip1 window atom {ia}", window_shape)
         window_solved = np.copy(solved[ao0:ao1])
+        note("allocated", f"ip1 window atom {ia}", window_solved.shape)
         del solved
+        transformed_shape = (nao, p1 - p0, nwin, 3)
+        note("allocating", f"ip1 transform atom {ia}", transformed_shape)
         transformed = lib.einsum("pykl,li->ikpy", window_solved, dm0)
+        note("allocated", f"ip1 transform atom {ia}", transformed.shape)
         del window_solved
         ikp_atoms.append(transformed)
-        pki_atoms.append(np.copy(transformed.transpose(2, 1, 0, 3)))
+        note("allocating", f"ip1 transpose atom {ia}", transformed.shape)
+        transposed = np.copy(transformed.transpose(2, 1, 0, 3))
+        note("allocated", f"ip1 transpose atom {ia}", transposed.shape)
+        pki_atoms.append(transposed)
 
     ej = np.zeros((natm, natm, 3, 3))
     ek = np.zeros_like(ej)
@@ -294,23 +391,36 @@ def _partial_ejk_window(
 
     vk2buf = np.zeros((3, 3, nao, nao))
     if with_k:
+        note("allocating", "int3c2e_ip1 window", (3, nao, nao, nwin))
         int3c_ip1 = get_int3c_ip1(window)
+        note("allocated", "int3c2e_ip1 window", int3c_ip1.shape)
+        loaded_shape = (nwin, nao, nao, 3)
+        note("allocating", "ip1 atom stack", loaded_shape)
         loaded = np.concatenate(pki_atoms, axis=1)
+        note("allocated", "ip1 atom stack", loaded.shape)
         vk2buf += lib.einsum("xijp,pkjy->xyki", int3c_ip1, loaded)
         int3c_ip1 = None
 
     response = int(hessobj.auxbasis_response)
     get_int3c_ip2 = _int3c_wrapper(mol, auxmol, "int3c2e_ip2", "s1")
+    note("allocating", "int3c2e_ip2", (3, nao, nao, nwin))
     int3c_ip2 = get_int3c_ip2(window)
+    note("allocated", "int3c2e_ip2", int3c_ip2.shape)
     wj_ip2 = np.zeros((naux, 3))
     if with_j:
         wj_ip2[ao0:ao1] = lib.einsum("yklp,lk->py", int3c_ip2, dm0)
     wk_ip2 = None
     wk_ip2_p = None
     if with_k:
+        wk_shape = (nao, nwin, 3, nao)
+        note("allocating", "wk_ip2", wk_shape)
         wk_ip2 = lib.einsum("yklp,il->ipyk", int3c_ip2, dm0)
+        note("allocated", "wk_ip2", wk_ip2.shape)
         if response > 1:
+            wk_p_shape = (nwin, nocc, nocc, 3)
+            note("allocating", "wk_ip2_p", wk_p_shape)
             wk_ip2_p = lib.einsum("xuvp,ui,vj->pxij", int3c_ip2, mocc_2, mocc_2)
+            note("allocated", "wk_ip2_p", wk_ip2_p.shape)
     int3c_ip2 = None
 
     get_int3c_ipvip1 = _int3c_wrapper(mol, auxmol, "int3c2e_ipvip1", "s1")
@@ -320,12 +430,22 @@ def _partial_ejk_window(
         atom_window = (shl0, shl1, 0, nbas, start, stop)
         vk1 = None
         if with_k:
+            note(
+                "allocating",
+                f"int3c2e_ip1 pair atom {i0}",
+                (3, p1 - p0, nao, nwin),
+            )
             int3c_ip1 = get_int3c_ip1(atom_window)
+            note("allocated", f"int3c2e_ip1 pair atom {i0}", int3c_ip1.shape)
+            note("allocating", f"ikp stack atom {i0}", (p1 - p0, nao, nwin, 3))
             loaded = np.concatenate([block[p0:p1] for block in ikp_atoms], axis=1)
+            note("allocated", f"ikp stack atom {i0}", loaded.shape)
             vk1 = lib.einsum("xijp,ikpy->xykj", int3c_ip1, loaded)
             vk1[:, :, :, p0:p1] += vk2buf[:, :, :, p0:p1]
             int3c_ip1 = None
+        note("allocating", f"int3c2e_ipvip1 atom {i0}", (9, nao, p1 - p0, nwin))
         int3c_ipvip1 = get_int3c_ipvip1(atom_window)
+        note("allocated", f"int3c2e_ipvip1 atom {i0}", int3c_ipvip1.shape)
         if with_j:
             vj1 = lib.einsum("xijp,p->xji", int3c_ipvip1, rhoj0[ao0:ao1]).reshape(3, 3, nao, p1 - p0)
         else:
@@ -346,9 +466,18 @@ def _partial_ejk_window(
                 ek[i0, j0] += lib.einsum("xypq,pq->xy", vk1[:, :, q0:q1], dm0[q0:q1])
         if not hessobj.auxbasis_response:
             continue
-        wk1_pij = solved_ip1(shl0, shl1, p0, p1)
+        wk1_pij = solved_ip1(shl0, shl1, p0, p1, i0, "response")
         rhoj1_p = lib.einsum("pxij,ji->px", wk1_pij, dm0[:, p0:p1])
-        int3c_ip1ip2 = get_int3c_ip1ip2(atom_window) if with_j or with_k else None
+        if with_j or with_k:
+            note(
+                "allocating",
+                f"int3c2e_ip1ip2 atom {i0}",
+                (3, nao, p1 - p0, nwin),
+            )
+            int3c_ip1ip2 = get_int3c_ip1ip2(atom_window)
+            note("allocated", f"int3c2e_ip1ip2 atom {i0}", int3c_ip1ip2.shape)
+        else:
+            int3c_ip1ip2 = None
         wj11 = None
         if with_j:
             contracted = lib.einsum("xijp,ji->xp", int3c_ip1ip2, dm0[:, p0:p1])
@@ -397,7 +526,9 @@ def _partial_ejk_window(
         from pyscf.df.hessian.rhf import _pinv
 
         int2c_inv = _pinv(int2c, lindep=LINEAR_DEP_THRESHOLD)
+        note("allocating", "int2c2e_ipip1", (9, naux, naux))
         int2c_ipip1 = auxmol.intor("int2c2e_ipip1", aosym="s1")
+        note("allocated", "int2c2e_ipip1", int2c_ipip1.shape)
         if int2c_ip1.shape != (3, naux, naux):
             raise ValueError(
                 f"int2c2e_ip1 has shape {int2c_ip1.shape}, expected {(3, naux, naux)}"
@@ -407,8 +538,12 @@ def _partial_ejk_window(
                 f"int2c2e_ipip1 has shape {getattr(int2c_ipip1, 'shape', None)}, "
                 f"expected {(9, naux, naux)}"
             )
+        note("allocating", "int2c_ip_ip", (3, 3, naux, naux))
         int2c_ip_ip = lib.einsum("xpq,qr,ysr->xyps", int2c_ip1, int2c_inv, int2c_ip1)
+        note("allocated", "int2c_ip_ip", int2c_ip_ip.shape)
+        note("allocating", "int2c2e_ip1ip2", (9, naux, naux))
         ip1ip2 = auxmol.intor("int2c2e_ip1ip2", aosym="s1")
+        note("allocated", "int2c2e_ip1ip2", getattr(ip1ip2, "shape", (int(np.size(ip1ip2)),)))
         if int(np.size(ip1ip2)) != 9 * naux * naux:
             raise ValueError(
                 f"int2c2e_ip1ip2 has size {np.size(ip1ip2)}, expected {9 * naux * naux}"
@@ -418,8 +553,12 @@ def _partial_ejk_window(
         rhok0_pp = None
         rho2c_0 = None
         if with_k:
+            note("allocating", "rhok0_pp", (naux, nocc, nocc))
             rhok0_pp = lib.einsum("plj,li->pij", rhok0, mocc_2)
+            note("allocated", "rhok0_pp", rhok0_pp.shape)
+            note("allocating", "rho2c_0", (naux, naux))
             rho2c_0 = lib.einsum("pij,qji->pq", rhok0_pp, rhok0_pp)
+            note("allocated", "rho2c_0", rho2c_0.shape)
         get_int3c_ipip2 = _int3c_wrapper(mol, auxmol, "int3c2e_ipip2", "s1")
         for i0 in range(natm):
             atom_p0 = int(auxslices[i0, 2])
@@ -430,7 +569,13 @@ def _partial_ejk_window(
                 continue
             shell_left = loc.index(left)
             shell_right = loc.index(right)
+            note(
+                "allocating",
+                f"int3c2e_ipip2 atom {i0}",
+                (9, nao, nao, right - left),
+            )
             int3c_ipip2 = get_int3c_ipip2((0, nbas, 0, nbas, shell_left, shell_right))
+            note("allocated", f"int3c2e_ipip2 atom {i0}", int3c_ipip2.shape)
             if with_j:
                 ej[i0, i0] += lib.einsum(
                     "xijp,ji,p->x", int3c_ipip2, dm0, rhoj0[left:right]
@@ -500,7 +645,17 @@ def _partial_ejk_window(
 
 
 def partial_jk_span(
-    hessobj, mo_energy, mo_coeff, mo_occ, shell0, shell1, rhoj1, wj1, block_limit
+    hessobj,
+    mo_energy,
+    mo_coeff,
+    mo_occ,
+    shell0,
+    shell1,
+    rhoj1,
+    wj1,
+    block_limit,
+    *,
+    node_runner,
 ):
     """Additive JK piece of one aux-shell range, without the one-electron term.
 
@@ -516,6 +671,8 @@ def partial_jk_span(
     those once the windows have been stacked.
     """
     _require_numpy()
+    if node_runner is None:
+        raise ValueError("node_runner is required")
 
     mol, mf, _, _ = _closed_shell_df_rks(hessobj)
     ni = mf._numint
@@ -541,6 +698,7 @@ def partial_jk_span(
         hybrid,
         True,
         block_limit,
+        node_runner=node_runner,
     )
     de2 = _ej - float(hyb) * ek
     wk_ip2_lr = None
@@ -558,6 +716,7 @@ def partial_jk_span(
                 True,
                 False,
                 block_limit,
+                node_runner=node_runner,
             )
         de2 = de2 - ek_lr * (float(alpha) - float(hyb))
         if _wj_lr is not None:
@@ -752,13 +911,15 @@ def partial_response2_cross(hessobj, wj_ip2, wk_ip2, wk_ip2_lr):
     return de2
 
 
-def partial_xc_and_e1(hessobj, mo_energy, mo_coeff, mo_occ, max_memory_mb):
+def partial_xc_and_e1(hessobj, mo_energy, mo_coeff, mo_occ, max_memory_mb, *, node_runner):
     """One-electron partial plus the XC grid second derivative.
 
     ``_get_vxc_diag`` and ``_get_vxc_deriv2`` build every atom. They are one
     cloud task. VV10 is not included.
     """
     _require_numpy()
+    if node_runner is None:
+        raise ValueError("node_runner is required")
     from pyscf import lib
     from pyscf.hessian import rhf as rhf_hess
     from pyscf.hessian import rks as rks_hess
@@ -780,11 +941,25 @@ def partial_xc_and_e1(hessobj, mo_energy, mo_coeff, mo_occ, max_memory_mb):
     dm0 = np.dot(mocc, mocc.T) * 2
     dme0 = lib.einsum("pi,qi,i->pq", mocc, mocc, mo_energy[mo_occ > 0]) * 2
     aoslices = mol.aoslice_by_atom()
+    note_hessian_allocation(node_runner, "allocating", "XC overlap derivatives", (3, 3, nao, nao))
     s1aa, s1ab, _s1a = rhf_hess.get_ovlp(mol)
+    note_hessian_allocation(node_runner, "allocated", "XC overlap s1aa", s1aa.shape)
+    note_hessian_allocation(node_runner, "allocated", "XC overlap s1ab", s1ab.shape)
     hcore_deriv = hessobj.hcore_generator(mol)
     de2 = np.zeros((natm, natm, 3, 3))
+    note_hessian_allocation(node_runner, "allocating", "XC veff_diag", (9, nao, nao))
     veff_diag = rks_hess._get_vxc_diag(hessobj, mo_coeff, mo_occ, budget)
+    note_hessian_allocation(node_runner, "allocated", "XC veff_diag", veff_diag.shape)
+    note_hessian_allocation(node_runner, "allocating", "XC vxc_deriv2", (natm, 9, nao, nao))
     vxc = rks_hess._get_vxc_deriv2(hessobj, mo_coeff, mo_occ, budget)
+    if hasattr(vxc, "shape"):
+        note_hessian_allocation(node_runner, "allocated", "XC vxc_deriv2", vxc.shape)
+    else:
+        if vxc is None or len(vxc) < 1 or not hasattr(vxc[0], "shape"):
+            raise ValueError(f"XC vxc_deriv2 did not return arrays, got {type(vxc).__name__}")
+        note_hessian_allocation(
+            node_runner, "allocated", f"XC vxc_deriv2 count {len(vxc)}", vxc[0].shape
+        )
     for i0 in range(natm):
         _shl0, _shl1, p0, p1 = aoslices[i0]
         de2[i0, i0] -= lib.einsum("xypq,pq->xy", s1aa[:, :, p0:p1], dme0[p0:p1]) * 2
@@ -801,9 +976,11 @@ def partial_xc_and_e1(hessobj, mo_energy, mo_coeff, mo_occ, max_memory_mb):
     return de2
 
 
-def partial_nlc(hessobj, mo_coeff, mo_occ, max_memory_mb):
+def partial_nlc(hessobj, mo_coeff, mo_occ, max_memory_mb, *, node_runner):
     """VV10 second derivative. One cloud task; it is not an aux-shell sum."""
     _require_numpy()
+    if node_runner is None:
+        raise ValueError("node_runner is required")
     from pyscf import lib
     from pyscf.hessian import rks as rks_hess
 
@@ -830,7 +1007,15 @@ def partial_nlc(hessobj, mo_coeff, mo_occ, max_memory_mb):
             f"(nao={nao}, available={available:.0f} bytes, "
             f"{grids.coords.shape[0]} grid points)"
         )
+    n_points = int(grids.coords.shape[0])
+    note_hessian_allocation(
+        node_runner,
+        "allocating",
+        f"NLC enlc_deriv2 grid {n_points}",
+        (int(mol.natm), int(mol.natm), 3, 3),
+    )
     de2 = np.asarray(rks_hess._get_enlc_deriv2(hessobj, mo_coeff, mo_occ, budget), dtype=float)
+    note_hessian_allocation(node_runner, "allocated", "NLC enlc_deriv2", de2.shape)
     if de2.shape != (mol.natm, mol.natm, 3, 3):
         raise ValueError(f"NLC partial has shape {de2.shape}")
     return de2

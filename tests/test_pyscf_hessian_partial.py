@@ -52,6 +52,16 @@ def test_aux_shell_groups_and_blocks_tile_the_basis():
         shell_blocks(loc, 0, 4, 1)
 
 
+class _AllocationLog:
+    def __init__(self):
+        self.messages = []
+
+    def info(self, message):
+        if not isinstance(message, str) or not message.strip():
+            raise ValueError(f"allocation log must be text, got {message!r}")
+        self.messages.append(message)
+
+
 def test_partial_chunks_match_pyscf_partial_hess_elec():
     from pyscf import dft, gto
 
@@ -87,6 +97,7 @@ def test_partial_chunks_match_pyscf_partial_hess_elec():
     rhoj1 = np.stack([slices[index][0] for index in indexes], axis=0)
     wj1 = np.stack([slices[index][1] for index in indexes], axis=0)
     aux_loc = mf.with_df.auxmol.ao_loc
+    allocation_log = _AllocationLog()
     responses = [int(hessian.auxbasis_response)]
     if 1 not in responses:
         responses.append(1)
@@ -97,7 +108,16 @@ def test_partial_chunks_match_pyscf_partial_hess_elec():
         response_blocks = []
         for shell0, shell1 in shell_blocks(aux_loc, 0, len(aux_loc) - 1, 8):
             piece, wj, wk, wk_lr = partial_jk_span(
-                hessian, mf.mo_energy, mf.mo_coeff, mf.mo_occ, shell0, shell1, rhoj1, wj1, 8
+                hessian,
+                mf.mo_energy,
+                mf.mo_coeff,
+                mf.mo_occ,
+                shell0,
+                shell1,
+                rhoj1,
+                wj1,
+                8,
+                node_runner=allocation_log,
             )
             total += piece
             arrays = {}
@@ -116,16 +136,26 @@ def test_partial_chunks_match_pyscf_partial_hess_elec():
             total += partial_response2_cross(hessian, stacked["wj_ip2"], wk, wk_lr)
         elif response_blocks:
             raise AssertionError("aux response vectors were returned for auxbasis_response 1")
-        total += partial_xc_and_e1(hessian, mf.mo_energy, mf.mo_coeff, mf.mo_occ, 8000)
+        total += partial_xc_and_e1(
+            hessian, mf.mo_energy, mf.mo_coeff, mf.mo_occ, 8000, node_runner=allocation_log
+        )
         if not hasattr(mf, "do_nlc"):
             raise AssertionError("RKS do_nlc is required")
         if mf.do_nlc():
-            total += partial_nlc(hessian, mf.mo_coeff, mf.mo_occ, 8000)
+            total += partial_nlc(
+                hessian, mf.mo_coeff, mf.mo_occ, 8000, node_runner=allocation_log
+            )
         if not np.allclose(total, reference, rtol=1e-6, atol=1e-8):
             raise AssertionError(
                 f"auxbasis_response {response} chunks differ from partial_hess_elec "
                 f"by {np.max(np.abs(total - reference))}"
             )
+    logged = allocation_log.messages
+    for name in ("rhok0", "int3c2e_ipip1", "int2c2e", "XC veff_diag"):
+        if not any(message.startswith(f"Hessian allocating {name}") for message in logged):
+            raise AssertionError(f"missing allocating log for {name}")
+        if not any(message.startswith(f"Hessian allocated {name}") for message in logged):
+            raise AssertionError(f"missing allocated log for {name}")
 
 
 def test_hessian_failure_text_keeps_the_task_group_child():
