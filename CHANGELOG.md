@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.14.0 (2026-10-11)
+
+### Features
+
+- Write successful pair optimizations into a selected dataset section
+  ([`f759aec`](https://github.com/simstack/molecular_qm_psi4/commit/f759aec5a404e34284e298e6f730ba1275ab6c55))
+
+Run the multistep optimizer on each selected row of two molecules and store only the pairs that
+  succeed.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.13.1 (2026-10-10)
 
 ### Bug Fixes
