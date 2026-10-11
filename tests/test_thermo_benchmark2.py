@@ -12,6 +12,7 @@ from molecular_qm_models import (
     Molecule,
     OptimizationAccuracy,
     QMInput,
+    QMResult,
     SCFAccuracy,
 )
 from molecular_qm_models.basis_set import BasisSetEnum
@@ -65,7 +66,7 @@ def test_thermo_benchmark2_documents_table_output():
 @pytest.mark.asyncio
 async def test_thermo_benchmark2_fills_blank_formula(monkeypatch):
     molecule = Molecule(
-        field_name="boat",
+        field_name="pair",
         smiles="C",
         formula="  ",
         atoms=[
@@ -74,7 +75,7 @@ async def test_thermo_benchmark2_fills_blank_formula(monkeypatch):
         ],
     )
     other = Molecule(
-        field_name="chair",
+        field_name="pair",
         smiles="C",
         formula="C1",
         atoms=[Atom(element="C", x=0.0, y=0.0, z=0.0)],
@@ -121,6 +122,92 @@ async def test_thermo_benchmark2_fills_blank_formula(monkeypatch):
 
     assert molecule.formula == "CH"
     assert molecule in saved
+
+
+def _method_step():
+    return ThermoBenchmark2Step.model_validate(
+        {
+            "basis_set": {"basis_set": BasisSetEnum.Def2_TZVP.value},
+            "functional": {"functional": "PBE0"},
+            "scf_accuracy": SCFAccuracy.Tight.value,
+            "dft_grid": GridType.Grid4.value,
+            "optimization_accuracy": OptimizationAccuracy.Tight.value,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_thermo_benchmark2_accepts_default_conformer_field_names(monkeypatch):
+    atoms = [Atom(element="C", x=0.0, y=0.0, z=0.0)]
+    first = Molecule(field_name="Molecule", smiles="C", formula="C", atoms=atoms)
+    second = Molecule(field_name="molecule", smiles="C", formula="C", atoms=atoms)
+    names = []
+
+    async def initialize():
+        return None
+
+    async def persist_input(opts, node_runner, db=None):
+        return opts
+
+    async def persist_molecule(molecule, node_runner, step_name, db=None):
+        names.append(molecule.field_name)
+        return molecule
+
+    async def optimizer(qm_input, preopt, **kwargs):
+        return QMResult(final_structure=Molecule.from_molecule(qm_input.molecule))
+
+    monkeypatch.setattr(
+        thermo_benchmark2_node,
+        "context",
+        SimpleNamespace(initialize=initialize, db=SimpleNamespace(save=initialize)),
+    )
+    monkeypatch.setattr(thermo_benchmark2_node, "_persist_qm_input", persist_input)
+    monkeypatch.setattr(thermo_benchmark2_node, "_persist_step_molecule", persist_molecule)
+    monkeypatch.setattr(thermo_benchmark2_node, "multistep_optimizer", optimizer)
+
+    async def stop_compare(arg, **kwargs):
+        raise RuntimeError("past-names")
+
+    monkeypatch.setattr(thermo_benchmark2_node, "compare_conformers", stop_compare)
+    step = _method_step()
+    with pytest.raises(RuntimeError, match="past-names"):
+        await inspect.unwrap(thermo_benchmark2)(
+            QMInput(molecule=first, basis_set=step.basis_set, functional=step.functional),
+            PreOptimizerInput(engine=QMEngine.PYSCF),
+            second,
+            ThermoBenchmark2MethodList(elements=[step]),
+            node_runner=SimpleNamespace(info=lambda *args, **kwargs: None),
+        )
+    assert names == ["C", "C"]
+
+
+@pytest.mark.asyncio
+async def test_thermo_benchmark2_rejects_different_conformer_names(monkeypatch):
+    atoms = [Atom(element="C", x=0.0, y=0.0, z=0.0)]
+    first = Molecule(field_name="boat", smiles="C", formula="C", atoms=atoms)
+    second = Molecule(field_name="chair", smiles="C", formula="C", atoms=atoms)
+
+    async def initialize():
+        return None
+
+    async def optimizer(qm_input, preopt, **kwargs):
+        raise AssertionError("optimizer should not run")
+
+    monkeypatch.setattr(
+        thermo_benchmark2_node,
+        "context",
+        SimpleNamespace(initialize=initialize, db=SimpleNamespace(save=initialize)),
+    )
+    monkeypatch.setattr(thermo_benchmark2_node, "multistep_optimizer", optimizer)
+    step = _method_step()
+    with pytest.raises(ValueError, match="does not match"):
+        await inspect.unwrap(thermo_benchmark2)(
+            QMInput(molecule=first, basis_set=step.basis_set, functional=step.functional),
+            PreOptimizerInput(engine=QMEngine.PYSCF),
+            second,
+            ThermoBenchmark2MethodList(elements=[step]),
+            node_runner=SimpleNamespace(),
+        )
 
 
 def test_thermo_benchmark2_step_carries_accuracy_without_engine():

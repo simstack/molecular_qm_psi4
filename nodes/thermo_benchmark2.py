@@ -178,6 +178,30 @@ async def thermo_benchmark2(
     if kwargs.get("custom_name", None) is None:
         node_runner.custom_name = qm_input.molecule.formula
 
+    source_names = []
+    for label, current in (
+        ("QMInput.molecule", qm_input.molecule),
+        ("molecule", molecule),
+    ):
+        source_name = current.field_name
+        if not isinstance(source_name, str) or not source_name.strip():
+            raise ValueError(f"{label} field_name is empty")
+        source_name = source_name.strip()
+        if source_name.casefold() != "molecule":
+            source_names.append(source_name)
+    if len(set(source_names)) > 1:
+        raise ValueError(
+            f"conformer field_name {qm_input.molecule.field_name!r} does not match "
+            f"{molecule.field_name!r}"
+        )
+    if source_names:
+        pair_name = source_names[0]
+    else:
+        pair_name = qm_input.molecule.formula
+        if not isinstance(pair_name, str) or not pair_name.strip():
+            raise ValueError("formula is empty for QMInput.molecule")
+        pair_name = pair_name.strip()
+
     optimized = []
     for index, current in enumerate((qm_input.molecule, molecule), start=1):
         current_input = QMInput.from_model(qm_input)
@@ -204,10 +228,7 @@ async def thermo_benchmark2(
                 f"multistep_optimizer returned no final_structure for molecule {index}"
             )
         optimized_molecule = Molecule.from_molecule(structure)
-        source_name = current.field_name
-        if not isinstance(source_name, str) or not source_name.strip():
-            raise ValueError(f"molecule {index} field_name is empty")
-        optimized_molecule.field_name = source_name.strip()
+        optimized_molecule.field_name = pair_name
         optimized.append(
             await _persist_step_molecule(
                 optimized_molecule,
@@ -216,14 +237,6 @@ async def thermo_benchmark2(
             )
         )
     mol1, mol2 = optimized
-    pair_name = mol1.field_name
-    if not isinstance(pair_name, str) or not pair_name.strip():
-        raise ValueError("molecule field_name is empty")
-    if mol2.field_name != pair_name:
-        raise ValueError(
-            f"conformer field_name {mol1.field_name!r} does not match "
-            f"{mol2.field_name!r}"
-        )
 
     table = SimpleTable(name="Thermo Benchmark 2")
     table.add_column("name", "string")
