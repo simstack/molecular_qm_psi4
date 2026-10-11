@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v0.14.5 (2026-10-11)
+
+### Bug Fixes
+
+- Reoptimize saddles the BFGS Hessian reports as minima
+  ([`db86c3b`](https://github.com/simstack/molecular_qm_psi4/commit/db86c3b932dbc90b21e091fc6e9649a71eaac837))
+
+BFGS keeps the optimizer Hessian positive definite, so a converged geometry can still have large
+  imaginary modes. Follow those modes and refuse thermochemistry until the payload geometry is
+  stationary.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.14.4 (2026-10-11)
 
 ### Bug Fixes
