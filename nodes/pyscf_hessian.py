@@ -1,5 +1,6 @@
 import asyncio
 import time
+import traceback
 from pathlib import Path
 
 try:
@@ -65,6 +66,41 @@ from simstack.models import FileStack
 # At most three cloud VMs. The orchestrator does not run an atom batch itself.
 _MAX_HESSIAN_VMS = 3
 _HEARTBEAT_INTERVAL_S = 60.0
+
+def hessian_failure_text(exc):
+    """Text for ``node_runner.fail`` that keeps the exception which actually failed.
+
+    ``str`` of an ``ExceptionGroup`` from ``asyncio.TaskGroup`` is only
+    ``unhandled errors in a TaskGroup (N sub-exception)``. The child error is
+    in the group and in the traceback. Some exceptions, including a bare
+    ``MemoryError``, have an empty ``str``.
+    """
+    if not isinstance(exc, BaseException):
+        raise ValueError(f"exc must be an exception, got {exc!r}")
+    pending = [exc]
+    leaves = []
+    while pending:
+        current = pending.pop(0)
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+            continue
+        message = str(current).strip()
+        if message:
+            leaves.append(f"{type(current).__name__}: {message}")
+        else:
+            leaves.append(type(current).__name__)
+    if not leaves:
+        raise ValueError(f"exception text is empty for {exc!r}")
+    formatted = "".join(
+        traceback.format_exception(type(exc), exc, exc.__traceback__)
+    ).strip()
+    if not formatted:
+        raise ValueError(f"exception traceback is empty for {exc!r}")
+    head = "\n".join(leaves)
+    if formatted == head:
+        return head
+    return f"{head}\n{formatted}"
+
 
 _ARRAY_NAMES = ("mo1", "mo_e1", "h1ao", "rhoj1", "wj1")
 _ARRAY_SHAPES = {
@@ -716,7 +752,7 @@ async def pyscf_hessian_for_atoms(
                 )
         return node_runner.succeed()
     except Exception as exc:
-        return node_runner.fail(str(exc))
+        return node_runner.fail(hessian_failure_text(exc))
 
 
 @node
@@ -1020,7 +1056,7 @@ async def pyscf_hessian_partial_ext(
                 )
         return node_runner.succeed()
     except Exception as exc:
-        return node_runner.fail(str(exc))
+        return node_runner.fail(hessian_failure_text(exc))
 
 
 @node
@@ -1132,7 +1168,7 @@ async def pyscf_hessian_init(opts: PySCFHessianStageInput, **kwargs) -> Simstack
         )
         return node_runner.succeed()
     except Exception as exc:
-        return node_runner.fail(str(exc))
+        return node_runner.fail(hessian_failure_text(exc))
 
 
 @node
@@ -1407,7 +1443,7 @@ async def pyscf_hessian_orchestrator(
         return node_runner.succeed()
     except Exception as exc:
         if node_runner is not None:
-            return node_runner.fail(str(exc))
+            return node_runner.fail(hessian_failure_text(exc))
         raise
 
 
@@ -1619,5 +1655,5 @@ async def pyscf_hessian(opts: PySCFHessianStageInput, **kwargs) -> SimstackResul
         return node_runner.succeed()
     except Exception as exc:
         if node_runner is not None:
-            return node_runner.fail(str(exc))
+            return node_runner.fail(hessian_failure_text(exc))
         raise

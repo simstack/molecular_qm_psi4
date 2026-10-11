@@ -126,3 +126,32 @@ def test_partial_chunks_match_pyscf_partial_hess_elec():
                 f"auxbasis_response {response} chunks differ from partial_hess_elec "
                 f"by {np.max(np.abs(total - reference))}"
             )
+
+
+def test_hessian_failure_text_keeps_the_task_group_child():
+    from molecular_qm_psi4.nodes.pyscf_hessian import hessian_failure_text
+
+    child = RuntimeError(
+        "task_id: 6acb5be4876d9f8466615ff5 node: pyscf_hessian_partial_ext "
+        "terminated with status FAILED"
+    )
+    try:
+        raise ExceptionGroup("unhandled errors in a TaskGroup", [child])
+    except ExceptionGroup as exc:
+        text = hessian_failure_text(exc)
+    assert "unhandled errors in a TaskGroup (1 sub-exception)" == str(exc)
+    assert "pyscf_hessian_partial_ext" in text
+    assert "terminated with status FAILED" in text
+    assert text.startswith("RuntimeError:")
+
+
+def test_hessian_failure_text_names_a_blank_exception():
+    from molecular_qm_psi4.nodes.pyscf_hessian import hessian_failure_text
+
+    try:
+        raise MemoryError()
+    except MemoryError as exc:
+        text = hessian_failure_text(exc)
+    assert str(exc) == ""
+    assert text.startswith("MemoryError")
+    assert "MemoryError" in text
