@@ -33,6 +33,20 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The push SHA can already be behind main when a release commit landed
+      # first. Releasing from that parent is not a fast-forward and skips the image build.
+      - name: Fast-forward to the remote default branch
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          set -euo pipefail
+          branch="${{ github.event.repository.default_branch }}"
+          git fetch origin "$branch"
+          if git merge-base --is-ancestor HEAD "origin/${branch}"; then
+            git switch -C "$branch" "origin/${branch}"
+          else
+            echo "HEAD is not contained in origin/${branch}; releasing from the checked-out commit"
+          fi
+
       - name: Python Semantic Release
         id: release
         if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
