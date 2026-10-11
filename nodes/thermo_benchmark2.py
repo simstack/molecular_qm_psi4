@@ -26,6 +26,8 @@ from molecular_qm_psi4.nodes.multistep_optimizer import (
     multistep_optimizer,
 )
 from molecular_qm_psi4.util.qm_engine import QMEngine
+from molecular_qm_util import molecule_to_rdkit
+from rdkit.Chem.rdMolDescriptors import CalcMolFormula
 from simstack.core.context import context
 from simstack.core.definitions import TaskStatus
 from simstack.core.node import node
@@ -161,7 +163,12 @@ async def thermo_benchmark2(
             raise ValueError(f"SMILES is empty for {label}")
         formula = current.formula
         if formula is None or (isinstance(formula, str) and not formula.strip()):
-            current.formula = current.make_formula()
+            if not current.atoms:
+                raise ValueError(f"Cannot compute formula for empty {label}")
+            computed = CalcMolFormula(molecule_to_rdkit(current))
+            if not isinstance(computed, str) or not computed.strip():
+                raise ValueError(f"formula is empty for {label}")
+            current.formula = computed.strip()
             changed = True
         if not isinstance(current.formula, str) or not current.formula.strip():
             raise ValueError(f"formula is empty for {label}")

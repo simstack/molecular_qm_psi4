@@ -64,12 +64,14 @@ def test_thermo_benchmark2_documents_table_output():
 
 @pytest.mark.asyncio
 async def test_thermo_benchmark2_fills_blank_formula(monkeypatch):
-    monkeypatch.setattr(Molecule, "make_formula", lambda self: "C1")
     molecule = Molecule(
         field_name="boat",
         smiles="C",
         formula="  ",
-        atoms=[Atom(element="C", x=0.0, y=0.0, z=0.0)],
+        atoms=[
+            Atom(element="C", x=0.0, y=0.0, z=0.0),
+            Atom(element="H", x=1.0, y=0.0, z=0.0),
+        ],
     )
     other = Molecule(
         field_name="chair",
@@ -117,7 +119,7 @@ async def test_thermo_benchmark2_fills_blank_formula(monkeypatch):
             node_runner=SimpleNamespace(),
         )
 
-    assert molecule.formula == "C1"
+    assert molecule.formula == "CH"
     assert molecule in saved
 
 
