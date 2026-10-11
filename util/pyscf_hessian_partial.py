@@ -398,8 +398,28 @@ def _partial_ejk_window(
         note("allocating", "ip1 atom stack", loaded_shape)
         loaded = np.concatenate(pki_atoms, axis=1)
         note("allocated", "ip1 atom stack", loaded.shape)
-        vk2buf += lib.einsum("xijp,pkjy->xyki", int3c_ip1, loaded)
+        # pki_atoms is the same data as loaded. Drop it before the contraction.
+        del pki_atoms
+        if tuple(int3c_ip1.shape) != (3, nao, nao, nwin):
+            raise ValueError(
+                f"int3c2e_ip1 window has shape {int3c_ip1.shape}, expected {(3, nao, nao, nwin)}"
+            )
+        if tuple(loaded.shape) != (nwin, nao, nao, 3):
+            raise ValueError(
+                f"ip1 atom stack has shape {loaded.shape}, expected {(nwin, nao, nao, 3)}"
+            )
+        # sum_{j,p} int3c[x,i,j,p] * loaded[p,k,j,y] -> [x,y,k,i].
+        # lib.einsum on the two full tensors keeps (x,i,j,p,k) and SIGKILLs the VM.
+        note("allocating", "vk2buf gemm", (nao * nwin, nao))
+        jp = nao * nwin
+        for ix in range(3):
+            left = int3c_ip1[ix].reshape(nao, jp)
+            for iy in range(3):
+                right = np.ascontiguousarray(loaded[:, :, :, iy].transpose(2, 0, 1)).reshape(jp, nao)
+                vk2buf[ix, iy] += (left @ right).T
+        note("allocated", "vk2buf gemm", vk2buf.shape)
         int3c_ip1 = None
+        loaded = None
 
     response = int(hessobj.auxbasis_response)
     get_int3c_ip2 = _int3c_wrapper(mol, auxmol, "int3c2e_ip2", "s1")
@@ -412,14 +432,33 @@ def _partial_ejk_window(
     wk_ip2 = None
     wk_ip2_p = None
     if with_k:
+        if tuple(int3c_ip2.shape) != (3, nao, nao, nwin):
+            raise ValueError(
+                f"int3c2e_ip2 has shape {int3c_ip2.shape}, expected {(3, nao, nao, nwin)}"
+            )
+        if tuple(dm0.shape) != (nao, nao):
+            raise ValueError(f"dm0 has shape {dm0.shape}, expected {(nao, nao)}")
+        # sum_l int3c[y,k,l,p] * dm0[i,l] -> [i,p,y,k]. A full einsum keeps (y,k,l,p,i).
         wk_shape = (nao, nwin, 3, nao)
         note("allocating", "wk_ip2", wk_shape)
-        wk_ip2 = lib.einsum("yklp,il->ipyk", int3c_ip2, dm0)
+        wk_ip2 = np.empty(wk_shape)
+        for iy in range(3):
+            slab = np.ascontiguousarray(int3c_ip2[iy].transpose(1, 0, 2)).reshape(nao, nao * nwin)
+            wk_ip2[:, :, iy, :] = (dm0 @ slab).reshape(nao, nao, nwin).transpose(0, 2, 1)
         note("allocated", "wk_ip2", wk_ip2.shape)
         if response > 1:
-            wk_p_shape = (nwin, nocc, nocc, 3)
+            if tuple(mocc_2.shape) != (nao, nocc):
+                raise ValueError(f"mocc_2 has shape {mocc_2.shape}, expected {(nao, nocc)}")
+            # sum_{u,v} int3c[x,u,v,p] * mocc[u,i] * mocc[v,j] -> [p,x,i,j], one index at a time.
+            wk_p_shape = (nwin, 3, nocc, nocc)
             note("allocating", "wk_ip2_p", wk_p_shape)
-            wk_ip2_p = lib.einsum("xuvp,ui,vj->pxij", int3c_ip2, mocc_2, mocc_2)
+            wk_ip2_p = np.empty(wk_p_shape)
+            occ_dm = mocc_2.T
+            for ix in range(3):
+                slab = np.ascontiguousarray(int3c_ip2[ix].reshape(nao, nao * nwin))
+                # (i, u) @ (u, v, p) -> (p, i, v), then contract v with mocc[v,j].
+                half = (occ_dm @ slab).reshape(nocc, nao, nwin).transpose(2, 0, 1)
+                wk_ip2_p[:, ix] = half @ mocc_2
             note("allocated", "wk_ip2_p", wk_ip2_p.shape)
     int3c_ip2 = None
 
@@ -440,7 +479,24 @@ def _partial_ejk_window(
             note("allocating", f"ikp stack atom {i0}", (p1 - p0, nao, nwin, 3))
             loaded = np.concatenate([block[p0:p1] for block in ikp_atoms], axis=1)
             note("allocated", f"ikp stack atom {i0}", loaded.shape)
-            vk1 = lib.einsum("xijp,ikpy->xykj", int3c_ip1, loaded)
+            ni = p1 - p0
+            if tuple(int3c_ip1.shape) != (3, ni, nao, nwin):
+                raise ValueError(
+                    f"int3c2e_ip1 pair atom {i0} has shape {int3c_ip1.shape}, "
+                    f"expected {(3, ni, nao, nwin)}"
+                )
+            if tuple(loaded.shape) != (ni, nao, nwin, 3):
+                raise ValueError(
+                    f"ikp stack atom {i0} has shape {loaded.shape}, expected {(ni, nao, nwin, 3)}"
+                )
+            # sum_{i,p} int3c[x,i,j,p] * loaded[i,k,p,y] -> [x,y,k,j].
+            vk1 = np.zeros((3, 3, nao, nao))
+            ip = ni * nwin
+            for ix in range(3):
+                left = np.ascontiguousarray(int3c_ip1[ix].transpose(1, 0, 2)).reshape(nao, ip)
+                for iy in range(3):
+                    right = np.ascontiguousarray(loaded[:, :, :, iy].transpose(0, 2, 1)).reshape(ip, nao)
+                    vk1[ix, iy] = (left @ right).T
             vk1[:, :, :, p0:p1] += vk2buf[:, :, :, p0:p1]
             int3c_ip1 = None
         note("allocating", f"int3c2e_ipvip1 atom {i0}", (9, nao, p1 - p0, nwin))
@@ -538,8 +594,14 @@ def _partial_ejk_window(
                 f"int2c2e_ipip1 has shape {getattr(int2c_ipip1, 'shape', None)}, "
                 f"expected {(9, naux, naux)}"
             )
+        # sum_{q,r} ip1[x,p,q] * inv[q,r] * ip1[y,s,r] -> [x,y,p,s].
+        # One einsum over both ip1 copies keeps (x,p,q,y,s).
         note("allocating", "int2c_ip_ip", (3, 3, naux, naux))
-        int2c_ip_ip = lib.einsum("xpq,qr,ysr->xyps", int2c_ip1, int2c_inv, int2c_ip1)
+        int2c_ip_ip = np.empty((3, 3, naux, naux))
+        metric = [int2c_ip1[ix] @ int2c_inv for ix in range(3)]
+        for ix in range(3):
+            for iy in range(3):
+                int2c_ip_ip[ix, iy] = metric[ix] @ int2c_ip1[iy].T
         note("allocated", "int2c_ip_ip", int2c_ip_ip.shape)
         note("allocating", "int2c2e_ip1ip2", (9, naux, naux))
         ip1ip2 = auxmol.intor("int2c2e_ip1ip2", aosym="s1")
@@ -553,11 +615,18 @@ def _partial_ejk_window(
         rhok0_pp = None
         rho2c_0 = None
         if with_k:
+            if tuple(rhok0.shape) != (naux, nao, nocc):
+                raise ValueError(f"rhok0 has shape {rhok0.shape}, expected {(naux, nao, nocc)}")
+            # sum_l rhok0[p,l,j] * mocc[l,i] -> [p,i,j]. The einsum keeps (p,l,j,i).
             note("allocating", "rhok0_pp", (naux, nocc, nocc))
-            rhok0_pp = lib.einsum("plj,li->pij", rhok0, mocc_2)
+            packed = np.ascontiguousarray(rhok0.transpose(0, 2, 1)).reshape(naux * nocc, nao)
+            rhok0_pp = (packed @ mocc_2).reshape(naux, nocc, nocc).transpose(0, 2, 1)
             note("allocated", "rhok0_pp", rhok0_pp.shape)
+            # sum_{i,j} rhok0_pp[p,i,j] * rhok0_pp[q,j,i] -> [p,q].
             note("allocating", "rho2c_0", (naux, naux))
-            rho2c_0 = lib.einsum("pij,qji->pq", rhok0_pp, rhok0_pp)
+            flat = rhok0_pp.reshape(naux, nocc * nocc)
+            swapped = np.ascontiguousarray(rhok0_pp.transpose(0, 2, 1)).reshape(naux, nocc * nocc)
+            rho2c_0 = flat @ swapped.T
             note("allocated", "rho2c_0", rho2c_0.shape)
         get_int3c_ipip2 = _int3c_wrapper(mol, auxmol, "int3c2e_ipip2", "s1")
         for i0 in range(natm):
