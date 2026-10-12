@@ -209,6 +209,36 @@ def _symmetrize(matrix):
     return matrix
 
 
+def _aux_metric_pinv(metric):
+    """Pseudoinverse of the aux Coulomb metric.
+
+    Threaded float64 diagonalization of an ill-conditioned metric changes the
+    explicit inverse enough that the Coulomb response, which cancels terms of
+    order 1e7, moves by tenths of a Hartree/Bohr^2. One Schulz step in
+    longdouble, started from the thresholded pseudoinverse, makes that
+    response independent of the BLAS thread count.
+    """
+    from pyscf.df.grad.rhf import LINEAR_DEP_THRESHOLD
+    from pyscf.df.hessian.rhf import _pinv
+
+    matrix = np.asarray(metric, dtype=float)
+    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+        raise ValueError(f"aux metric must be square, got {matrix.shape}")
+    seed = np.asarray(_pinv(matrix, lindep=LINEAR_DEP_THRESHOLD), dtype=float)
+    if seed.shape != matrix.shape:
+        raise ValueError(f"aux metric inverse has shape {seed.shape}, expected {matrix.shape}")
+    naux = matrix.shape[0]
+    symmetric = np.asarray((matrix + matrix.T) * 0.5, dtype=np.longdouble)
+    seed_ld = np.asarray(seed, dtype=np.longdouble)
+    eye = np.eye(naux, dtype=np.longdouble)
+    refined = np.asarray(seed_ld @ ((eye * 2) - symmetric @ seed_ld), dtype=float)
+    if refined.shape != matrix.shape:
+        raise ValueError(
+            f"refined aux metric inverse has shape {refined.shape}, expected {matrix.shape}"
+        )
+    return refined
+
+
 def _partial_ejk_window(
     hessobj,
     mo_energy,
@@ -578,10 +608,7 @@ def _partial_ejk_window(
                 ek[i0, j_atom] += piece_k * k_factor
                 ek[j_atom, i0] += piece_k.T * k_factor
     if response > 1:
-        from pyscf.df.grad.rhf import LINEAR_DEP_THRESHOLD
-        from pyscf.df.hessian.rhf import _pinv
-
-        int2c_inv = _pinv(int2c, lindep=LINEAR_DEP_THRESHOLD)
+        int2c_inv = _aux_metric_pinv(int2c)
         note("allocating", "int2c2e_ipip1", (9, naux, naux))
         int2c_ipip1 = auxmol.intor("int2c2e_ipip1", aosym="s1")
         note("allocated", "int2c2e_ipip1", int2c_ipip1.shape)
@@ -820,8 +847,6 @@ def _response2_quadratic(auxmol, wj_ip2, wk_ip2, with_j, with_k):
     false. Terms that are linear in a single aux window are not included.
     """
     from pyscf import lib
-    from pyscf.df.grad.rhf import LINEAR_DEP_THRESHOLD
-    from pyscf.df.hessian.rhf import _pinv
 
     if not isinstance(with_j, bool) or not isinstance(with_k, bool):
         raise ValueError(f"with_j and with_k must be bools, got {with_j!r}, {with_k!r}")
@@ -850,7 +875,7 @@ def _response2_quadratic(auxmol, wj_ip2, wk_ip2, with_j, with_k):
     else:
         wk = None
     int2c = auxmol.intor("int2c2e", aosym="s1")
-    int2c_inv = _pinv(int2c, lindep=LINEAR_DEP_THRESHOLD)
+    int2c_inv = _aux_metric_pinv(int2c)
     if int2c_inv.shape != (naux, naux):
         raise ValueError(f"aux metric inverse has shape {int2c_inv.shape}, expected {(naux, naux)}")
     auxslices = auxmol.aoslice_by_atom()
