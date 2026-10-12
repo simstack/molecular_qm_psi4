@@ -100,6 +100,20 @@ RUN echo "uv git sources ${UV_GIT_SHAS}" \
  && python -c "from molecular_qm_psi4.nodes.pyscf_calculator import pyscf_calculator; import pyscf; print('pyscf node ok', pyscf.__version__)" \
  && python -c "from dftd3.library import get_api_version as d3v; from dftd4.library import get_api_version as d4v; import qcengine as qcng; print('dftd3 C-API', d3v()); print('dftd4 C-API', d4v()); print('s-dftd3', qcng.get_program('s-dftd3')); print('dftd4', qcng.get_program('dftd4'))"
 
+# pybel builds its format dict at import and unpacks every description on " -- ".
+# A plugin line without that separator raises ValueError and blocks import.
+RUN python -c "from pathlib import Path; \
+p = next(Path('/opt/conda/lib').glob('python*/site-packages/openbabel/pybel.py')); \
+t = p.read_text(); \
+old = 'broken = [(x, y.strip()) for x, y in broken]'; \
+new = 'broken = [(pair[0], pair[1].strip()) for pair in broken if len(pair) == 2]'; \
+assert old in t, p; p.write_text(t.replace(old, new, 1))" \
+ && python -c "from openbabel import pybel; \
+d = pybel._formatstodict(['xyz -- XYZ', 'brokenformat', 'mol -- MDL [Read-only]']); \
+assert d == {'xyz': 'XYZ', 'mol': 'MDL'}, d; \
+assert 'xyz' in pybel.informats; \
+print('pybel format filter', len(pybel.informats), 'inputs')"
+
 WORKDIR /app
 # Host simstack bind-mounts the task workdir at /tmp/simstack (CONTAINER_WORKDIR).
 # Older in-image simstack still uses /root/simstack under --in-docker.
