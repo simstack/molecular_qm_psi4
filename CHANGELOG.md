@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.14.7 (2026-10-12)
+
+### Bug Fixes
+
+- Stabilize the split Hessian aux-metric inverse across BLAS threads
+  ([`597639b`](https://github.com/simstack/molecular_qm_psi4/commit/597639b0949f4d6d5be89d12c4bc822f64e09924))
+
+A threaded float64 pseudoinverse of the ill-conditioned aux metric moved the Coulomb response by
+  tenths of a Hartree/Bohr^2 and produced a spurious imaginary frequency.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.14.6 (2026-10-12)
 
 ### Bug Fixes
