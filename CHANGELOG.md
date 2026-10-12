@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.14.6 (2026-10-12)
+
+### Bug Fixes
+
+- Ignore OpenBabel format lines that lack a description separator
+  ([`0d8fbbe`](https://github.com/simstack/molecular_qm_psi4/commit/0d8fbbee741d6efceb6d8004d6b7694dbe1c900a))
+
+pybel unpacks every format description on import, so a plugin line without ' -- ' raises ValueError
+  and blocks the image.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.14.5 (2026-10-11)
 
 ### Bug Fixes
