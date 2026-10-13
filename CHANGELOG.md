@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.14.8 (2026-10-13)
+
+### Bug Fixes
+
+- Judge Hessian stationarity with the geomeTRIC gradient
+  ([`9e89e30`](https://github.com/simstack/molecular_qm_psi4/commit/9e89e301f0dff2b1d1ce753676df0628490c66f8))
+
+A looser SCF tolerance was leaving a density error above VeryTight on a geometry geomeTRIC had
+  already accepted.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.14.7 (2026-10-12)
 
 ### Bug Fixes
