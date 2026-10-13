@@ -79,6 +79,8 @@ class _Gradient:
 class _MeanField:
     def __init__(self, values):
         self.values = values
+        self.conv_tol = 1e-9
+        self.converged = True
 
     def nuc_grad_method(self):
         return _Gradient(self.values)
@@ -119,6 +121,59 @@ def test_stationary_check_rejects_a_large_gradient_and_accepts_a_cancelling_spri
     assert_hessian_geometry_stationary(
         _MeanField([[-0.01, 0.0, 0.0]]), _Mol(), qm_input, payload, node_runner
     )
+
+
+def test_stationary_check_uses_geometric_per_atom_norms():
+    logs = []
+    node_runner = SimpleNamespace(info=lambda message: logs.append(message))
+    molecule = SimpleNamespace(
+        atoms=[SimpleNamespace(element="H", x=0.0, y=0.0, z=0.0)],
+        properties={},
+    )
+    payload = {"atom": [("H", 0.0, 0.0, 0.0)]}
+    qm_input = _qm_input(molecule.atoms)
+    qm_input.molecule = molecule
+    # Component RMS is 1.85e-4, under Medium convergence_grms 3e-4.
+    # The per-atom norm is 3.2e-4, which is the statistic geomeTRIC compares.
+    with pytest.raises(ValueError, match="not stationary"):
+        assert_hessian_geometry_stationary(
+            _MeanField([[3.2e-4, 0.0, 0.0]]), _Mol(), qm_input, payload, node_runner
+        )
+
+
+def test_stationary_check_tightens_scf_looser_than_the_energy_threshold():
+    logs = []
+    node_runner = SimpleNamespace(info=lambda message: logs.append(message))
+    molecule = SimpleNamespace(
+        atoms=[SimpleNamespace(element="H", x=0.0, y=0.0, z=0.0)],
+        properties={},
+    )
+    payload = {"atom": [("H", 0.0, 0.0, 0.0)]}
+    qm_input = _qm_input(molecule.atoms)
+    qm_input.molecule = molecule
+    refined = {"called": False}
+
+    class _Loose(_MeanField):
+        def kernel(self):
+            refined["called"] = True
+            assert self.conv_tol == pytest.approx(1e-6)
+            assert self.converged is False
+            self.values = [[0.0, 0.0, 0.0]]
+
+    mf = _Loose([[-0.01, 0.0, 0.0]])
+    mf.conv_tol = 1e-3
+    assert_hessian_geometry_stationary(mf, _Mol(), qm_input, payload, node_runner)
+    assert refined["called"]
+    assert any("Tightening SCF" in message for message in logs)
+
+    plain = _MeanField([[0.0, 0.0, 0.0]])
+    plain.conv_tol = 1e-3
+    with pytest.raises(ValueError, match="kernel is required"):
+        assert_hessian_geometry_stationary(plain, _Mol(), qm_input, payload, node_runner)
+    missing = _MeanField([[0.0, 0.0, 0.0]])
+    del missing.conv_tol
+    with pytest.raises(ValueError, match="conv_tol is required"):
+        assert_hessian_geometry_stationary(missing, _Mol(), qm_input, payload, node_runner)
 
 
 def test_imaginary_frequencies_use_the_minus_50_cutoff():

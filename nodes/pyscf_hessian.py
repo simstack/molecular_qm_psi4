@@ -519,8 +519,16 @@ def max_cartesian_displacement_angstrom(molecule, payload):
 def assert_hessian_geometry_stationary(mf, mol, qm_input, payload, node_runner):
     """Require the Hessian geometry to meet the optimizer gradient threshold.
 
-    The compared gradient includes harmonic Cartesian springs. Those springs
-    are part of the optimizer gradient and are absent from the analytical Hessian.
+    geomeTRIC converges on the RMS and the maximum of the per-atom gradient
+    norms, in Hartree/Bohr. The compared gradient includes dispersion and
+    harmonic Cartesian springs. Those terms are part of the optimizer gradient
+    and are absent from the analytical Hessian.
+
+    The stored SCF may have stopped at ``scf_accuracy``. When that tolerance is
+    looser than the optimization energy threshold, the leftover density error
+    shows up as a gradient above ``convergence_grms`` on a geometry geomeTRIC
+    already accepted. The density is tightened to ``convergence_energy`` before
+    that gradient is judged.
     """
     if np is None:
         raise ValueError("numpy is required")
@@ -534,6 +542,35 @@ def assert_hessian_geometry_stationary(mf, mol, qm_input, payload, node_runner):
     grad_method = getattr(mf, "nuc_grad_method", None)
     if not callable(grad_method):
         raise ValueError("mean field nuc_grad_method is required")
+    accuracy = getattr(qm_input, "optimization_accuracy", None)
+    conv = pyscf_opt_conv_params(accuracy)
+    limit = conv.get("convergence_grms")
+    gmax_limit = conv.get("convergence_gmax")
+    energy_limit = conv.get("convergence_energy")
+    if limit is None or gmax_limit is None or energy_limit is None:
+        raise ValueError(
+            "convergence_grms, convergence_gmax, and convergence_energy are required"
+        )
+    limit = float(limit)
+    gmax_limit = float(gmax_limit)
+    energy_limit = float(energy_limit)
+    conv_tol = getattr(mf, "conv_tol", None)
+    if conv_tol is None:
+        raise ValueError("mean field conv_tol is required")
+    conv_tol = float(conv_tol)
+    if conv_tol > energy_limit:
+        refine = getattr(mf, "kernel", None)
+        if not callable(refine):
+            raise ValueError(
+                "mean field kernel is required to resolve the optimization energy threshold"
+            )
+        node_runner.info(
+            f"Tightening SCF conv_tol from {conv_tol:.1e} to the optimization "
+            f"energy threshold {energy_limit:.1e} before the stationarity gradient"
+        )
+        mf.conv_tol = energy_limit
+        mf.converged = False
+        refine()
     grad = grad_method().kernel()
     if grad is None:
         raise ValueError("nuclear gradient is required")
@@ -546,20 +583,19 @@ def assert_hessian_geometry_stationary(mf, mol, qm_input, payload, node_runner):
     if constraints:
         _, grad = _apply_harmonic_to_gradient(0.0, grad, mol, constraints)
         grad = np.asarray(grad, dtype=float)
-    grms = float(np.sqrt(np.mean(np.square(grad))))
-    accuracy = getattr(qm_input, "optimization_accuracy", None)
-    limit = pyscf_opt_conv_params(accuracy).get("convergence_grms")
-    if limit is None:
-        raise ValueError("convergence_grms is required")
-    limit = float(limit)
+    per_atom = np.linalg.norm(grad, axis=1)
+    grms = float(np.sqrt(np.mean(np.square(per_atom))))
+    gmax = float(np.max(per_atom))
     node_runner.info(
-        f"Hessian geometry gradient RMS is {grms:.6e} Ha/Bohr "
-        f"(convergence_grms {limit:.6e} Ha/Bohr)"
+        f"Hessian geometry gradient RMS {grms:.6e} Ha/Bohr "
+        f"(convergence_grms {limit:.6e}) max {gmax:.6e} Ha/Bohr "
+        f"(convergence_gmax {gmax_limit:.6e})"
     )
-    if not grms < limit:
+    if not grms < limit or not gmax < gmax_limit:
         raise ValueError(
             f"Hessian geometry is not stationary: gradient RMS {grms:.6e} Ha/Bohr "
-            f"is outside convergence_grms {limit:.6e} Ha/Bohr"
+            f"is outside convergence_grms {limit:.6e} Ha/Bohr or max {gmax:.6e} Ha/Bohr "
+            f"is outside convergence_gmax {gmax_limit:.6e} Ha/Bohr"
         )
 
 
