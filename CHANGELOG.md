@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.15.1 (2026-10-17)
+
+### Bug Fixes
+
+- Accept BSON project ids in ddg_reference
+  ([`c84608c`](https://github.com/simstack/molecular_qm_psi4/commit/c84608ca8a4894d2e1d7f691c2a72f062da67cd6))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.15.0 (2026-10-17)
 
 ### Features
