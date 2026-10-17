@@ -8,7 +8,8 @@ from molecular_qm_psi4.nodes.compare_conformers import (
     CompareConformersResultList,
     compare_conformers_results_to_simple_table,
 )
-from odmantic import Model, ObjectId
+from bson import ObjectId
+from odmantic import Model
 from simstack.core.context import context
 from simstack.core.definitions import TaskStatus
 from simstack.core.node import node
