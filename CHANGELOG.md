@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.15.0 (2026-10-17)
+
+### Features
+
+- Aggregate completed thermo benchmark jobs into ddg_reference
+  ([`9875d4a`](https://github.com/simstack/molecular_qm_psi4/commit/9875d4ae667d255758e4d34c7cfe0d398dd52a36))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.14.8 (2026-10-13)
 
 ### Bug Fixes
