@@ -63,7 +63,7 @@ from molecular_qm_psi4.nodes.thermo_benchmark2 import (
 from molecular_qm_psi4.nodes.thermo_benchmark_dataset import thermo_benchmark_dataset
 from molecular_qm_psi4.nodes.temperature_analysis import temperature_analysis
 from molecular_qm_psi4.nodes.compare_conformers_table import (
-
+    ddg_reference,
     delta_g_table,
 )
 from molecular_qm_psi4.nodes.compute_energy import compute_energy
@@ -141,6 +141,7 @@ __all__ = [
     "compare_conformers_over_basis_sets",
     "compare_conformers_over_functionals",
     "delta_g_table",
+    "ddg_reference",
 
     "compute_energy",
     "crest",
