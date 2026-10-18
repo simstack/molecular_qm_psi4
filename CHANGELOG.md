@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.16.0 (2026-10-18)
+
+### Features
+
+- Evaluate thermo_benchmark_reference pairs in temperature analysis
+  ([`5ab71d0`](https://github.com/simstack/molecular_qm_psi4/commit/5ab71d0827eb931b494973a6a97bf1204eae6be8))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.15.2 (2026-10-18)
 
 ### Bug Fixes
