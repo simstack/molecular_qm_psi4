@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.15.2 (2026-10-18)
+
+### Bug Fixes
+
+- Use the job custom name for the ddg_reference name column
+  ([`68e8bda`](https://github.com/simstack/molecular_qm_psi4/commit/68e8bdac7008be907708d87da536cd3fe6c17c31))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.15.1 (2026-10-17)
 
 ### Bug Fixes
