@@ -124,8 +124,9 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
 
     Each row of that node's output table becomes one row. The first two
     columns are the root job's custom name and project name. An empty
-    custom name is replaced by the SMILES of the root input. The remaining
-    columns are that table row plus any scalar outputs of the root.
+    custom name is replaced by the SMILES of the root input. The table's
+    name column is that same custom name. The remaining columns are that
+    table row plus any scalar outputs of the root.
 
     SimstackResult:
         table (SimpleTable): Rows from completed thermo_benchmark_reference jobs.
@@ -298,7 +299,10 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
                                 raise ValueError(
                                     f"{_THERMO_BENCHMARK_REFERENCE} {job.id} repeats column {key}"
                                 )
-                            record[key] = table_row.get(column)
+                            if column == "name":
+                                record[key] = custom_name
+                            else:
+                                record[key] = table_row.get(column)
                         for key, value in scalars.items():
                             if key in record:
                                 raise ValueError(
