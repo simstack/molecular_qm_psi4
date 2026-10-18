@@ -74,6 +74,35 @@ def test_reference_pairs_follow_basis_functional_and_conformer_index():
     ]
 
 
+def test_reference_pairs_order_overwritten_names_by_creation_time():
+    identity = {
+        "basis_set": "def2-TZVP",
+        "functional": "B3LYP",
+        "dispersion": "D4",
+        "scf_accuracy": "tight",
+        "optimization_accuracy": "tight",
+        "grid_type": "fine",
+    }
+    records = [
+        {
+            "identity": identity,
+            "custom_name": "pristine-o-2-15-wB97X-V",
+            "created_at": 20,
+            "marker": "second",
+        },
+        {
+            "identity": identity,
+            "custom_name": "pristine-o-2-15-wB97X-V",
+            "created_at": 10,
+            "marker": "first",
+        },
+    ]
+    pairs = _reference_pairs(records)
+    assert [record["marker"] for record in pairs[0]] == ["first", "second"]
+    with pytest.raises(ValueError, match="none end with -mol1 or -mol2"):
+        _reference_pairs(records[:1])
+
+
 def test_reference_pairs_reject_a_missing_conformer_or_setting_mismatch():
     identity = {
         "basis_set": "def2-SVP",

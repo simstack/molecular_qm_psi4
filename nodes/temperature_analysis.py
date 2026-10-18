@@ -108,34 +108,60 @@ def _reference_pairs(records):
         elif stripped.endswith("-mol2"):
             conformer = 2
         else:
-            raise ValueError(
-                f"custom_name {custom_name!r} for basis {key[0]} functional {key[1]} "
-                "does not end with -mol1 or -mol2"
-            )
+            conformer = None
         if key not in groups:
-            groups[key] = {}
+            groups[key] = {"labeled": {}, "unlabeled": []}
             order.append(key)
-        if conformer in groups[key]:
+        if conformer is None:
+            groups[key]["unlabeled"].append(record)
+            continue
+        if conformer in groups[key]["labeled"]:
             raise ValueError(
                 f"duplicate mol{conformer} for basis {key[0]} functional {key[1]} "
                 f"dispersion {key[2]}"
             )
-        groups[key][conformer] = record
+        groups[key]["labeled"][conformer] = record
     if not order:
         raise ValueError(
             "thermo_benchmark_reference has no pyscf_reference_calculator children"
         )
     pairs = []
     for key in order:
-        slots = groups[key]
-        if set(slots) != {1, 2}:
-            found = ", ".join(f"mol{index}" for index in sorted(slots))
+        labeled = groups[key]["labeled"]
+        unlabeled = groups[key]["unlabeled"]
+        if unlabeled and labeled:
             raise ValueError(
-                f"basis {key[0]} functional {key[1]} dispersion {key[2]} "
-                f"has {found}; expected mol1 and mol2"
+                f"basis {key[0]} functional {key[1]} dispersion {key[2]} mixes "
+                "mol1/mol2 names with calculators whose custom_name does not "
+                "end with -mol1 or -mol2"
             )
-        first = slots[1]
-        second = slots[2]
+        if unlabeled:
+            if len(unlabeled) != 2:
+                names = ", ".join(
+                    repr(record.get("custom_name")) for record in unlabeled
+                )
+                raise ValueError(
+                    f"basis {key[0]} functional {key[1]} dispersion {key[2]} "
+                    f"has {len(unlabeled)} calculators ({names}) and none end "
+                    "with -mol1 or -mol2"
+                )
+            for record in unlabeled:
+                if record.get("created_at") is None:
+                    raise ValueError(
+                        f"custom_name {record.get('custom_name')!r} for basis {key[0]} "
+                        f"functional {key[1]} has no created_at"
+                    )
+            unlabeled.sort(key=lambda record: record["created_at"])
+            first, second = unlabeled
+        else:
+            if set(labeled) != {1, 2}:
+                found = ", ".join(f"mol{index}" for index in sorted(labeled))
+                raise ValueError(
+                    f"basis {key[0]} functional {key[1]} dispersion {key[2]} "
+                    f"has {found}; expected mol1 and mol2"
+                )
+            first = labeled[1]
+            second = labeled[2]
         for field in _SETTING_FIELDS:
             left = first["identity"][field]
             right = second["identity"][field]
@@ -171,9 +197,11 @@ async def temperature_analysis(
     The parent UUID is either a ``compare_conformers`` / ``compare_energy`` job
     or a ``thermo_benchmark_reference`` job. A compare job has exactly two
     calculator children. A reference job has one ``pyscf_reference_calculator``
-    pair for each basis set, functional, and dispersion correction; ``mol1``
-    and ``mol2`` come from the calculator custom name. Optimizer children are
-    left out. Each pair is evaluated at every temperature.
+    pair for each basis set, functional, and dispersion correction. ``mol1``
+    and ``mol2`` come from a custom name ending in ``-mol1`` or ``-mol2``.
+    When those suffixes were overwritten, the two calculators in a method are
+    ordered by creation time. Optimizer children are left out. Each pair is
+    evaluated at every temperature.
 
     :param compare_energy_parent_id: UUID of the parent NodeRegistry entry.
     :type compare_energy_parent_id: StringData
@@ -314,6 +342,7 @@ async def temperature_analysis(
                     "qm_input": qm_input,
                     "identity": identity,
                     "custom_name": getattr(child, "custom_name", None),
+                    "created_at": getattr(child, "created_at", None),
                 }
             )
 
