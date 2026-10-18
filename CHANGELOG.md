@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.16.1 (2026-10-18)
+
+### Bug Fixes
+
+- Pair renamed reference calculators by creation time
+  ([`c990d6b`](https://github.com/simstack/molecular_qm_psi4/commit/c990d6bf577e4bcd077dd61bd67af07f1efe9bd1))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.16.0 (2026-10-18)
 
 ### Features
