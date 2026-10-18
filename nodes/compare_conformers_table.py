@@ -142,48 +142,70 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
         node_runner.info(
             f"Building {_DDG_REFERENCE} from completed {_THERMO_BENCHMARK_REFERENCE} jobs ({date_string.value})"
         )
-        jobs = await context.db.find(
-            NodeRegistry,
-            (NodeRegistry.name == _THERMO_BENCHMARK_REFERENCE)
-            & (NodeRegistry.status == TaskStatus.COMPLETED),
+        stored_projects = await context.db.find(Project)
+        if stored_projects is None:
+            raise ValueError("project query returned no list")
+        stored_projects = list(stored_projects)
+        if not stored_projects:
+            raise ValueError("no projects are stored")
+        project_names = {}
+        for project in stored_projects:
+            project_name = getattr(project, "field_name", None)
+            if project.id is None:
+                raise ValueError("a stored project has no id")
+            if not isinstance(project_name, str) or not project_name.strip():
+                raise ValueError(f"project {project.id} has no name")
+            project_names[str(project.id)] = project_name.strip()
+        node_runner.info(
+            "Scanning completed "
+            f"{_THERMO_BENCHMARK_REFERENCE} jobs in projects: "
+            + ", ".join(project_names[key] for key in project_names)
         )
-        if jobs is None:
+
+        collection = context.db.collection(NodeRegistry)
+        raw_jobs = await collection.find(
+            {
+                "name": _THERMO_BENCHMARK_REFERENCE,
+                "status": TaskStatus.COMPLETED.value,
+            }
+        ).to_list(length=None)
+        if raw_jobs is None:
             raise ValueError(
                 f"query for completed {_THERMO_BENCHMARK_REFERENCE} jobs returned no list"
             )
-        jobs = list(jobs)
+        jobs = []
+        for raw_job in raw_jobs:
+            project_value = raw_job.get("project")
+            if isinstance(project_value, str):
+                if not ObjectId.is_valid(project_value):
+                    raise ValueError(
+                        f"{_THERMO_BENCHMARK_REFERENCE} {raw_job.get('_id')} "
+                        f"project {project_value} is not an id"
+                    )
+                raw_job["project"] = ObjectId(project_value)
+            elif isinstance(project_value, ObjectId):
+                raw_job["project"] = ObjectId(str(project_value))
+            jobs.append(NodeRegistry.model_validate_doc(raw_job))
         node_runner.info(
-            f"Found {len(jobs)} completed {_THERMO_BENCHMARK_REFERENCE} jobs"
+            f"Found {len(jobs)} completed {_THERMO_BENCHMARK_REFERENCE} jobs "
+            f"across {len(project_names)} projects"
         )
 
-        project_names = {}
         model_classes = {}
         rows = []
         columns = ["custom_name", "project"]
+        jobs_per_project = {name: 0 for name in project_names.values()}
         for job in jobs:
             if job.project is None:
                 raise ValueError(
                     f"{_THERMO_BENCHMARK_REFERENCE} {job.id} has no project"
                 )
-            project_id = job.project
-            if isinstance(project_id, str):
-                if not ObjectId.is_valid(project_id):
-                    raise ValueError(
-                        f"{_THERMO_BENCHMARK_REFERENCE} {job.id} project {project_id} is not an id"
-                    )
-                project_id = ObjectId(project_id)
-            elif not isinstance(project_id, ObjectId):
+            project_key = str(job.project)
+            if project_key not in project_names:
                 raise ValueError(
-                    f"{_THERMO_BENCHMARK_REFERENCE} {job.id} project {project_id} is not an id"
+                    f"{_THERMO_BENCHMARK_REFERENCE} {job.id} project {project_key} is not a stored project"
                 )
-            if project_id not in project_names:
-                project = await context.db.find_one(Project, Project.id == project_id)
-                project_name = getattr(project, "field_name", None)
-                if not isinstance(project_name, str) or not project_name.strip():
-                    raise ValueError(
-                        f"{_THERMO_BENCHMARK_REFERENCE} {job.id} project {project_id} has no name"
-                    )
-                project_names[project_id] = project_name.strip()
+            jobs_per_project[project_names[project_key]] += 1
 
             custom_name = job.custom_name
             if not isinstance(custom_name, str) or not custom_name.strip():
@@ -288,7 +310,7 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
                             )
                         record = {
                             "custom_name": custom_name,
-                            "project": project_names[project_id],
+                            "project": project_names[project_key],
                         }
                         keys = heading or list(table_row.keys())
                         for column in keys:
@@ -313,7 +335,7 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
             else:
                 record = {
                     "custom_name": custom_name,
-                    "project": project_names[project_id],
+                    "project": project_names[project_key],
                 }
                 for key, value in scalars.items():
                     if key in record:
@@ -328,6 +350,10 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
                         columns.append(key)
                 rows.append(record)
 
+        node_runner.info(
+            "Completed jobs by project: "
+            + ", ".join(f"{name}={count}" for name, count in jobs_per_project.items())
+        )
         df = pd.DataFrame(rows, columns=columns)
         found = list(
             await context.db.find(
