@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.20.0 (2026-10-19)
+
+### Features
+
+- Preoptimize both reference conformers at the same time
+  ([`3e52859`](https://github.com/simstack/molecular_qm_psi4/commit/3e52859a738f76b411624e222f9c72eb687875f9))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.19.0 (2026-10-19)
 
 ### Features
