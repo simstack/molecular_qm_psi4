@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.18.0 (2026-10-19)
+
+### Features
+
+- Preoptimize thermo reference benchmarks with the PySCF multistep optimizer
+  ([`586d434`](https://github.com/simstack/molecular_qm_psi4/commit/586d434ae2598aee35e8222bb733bc82048bf38a))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.17.0 (2026-10-19)
 
 ### Bug Fixes
