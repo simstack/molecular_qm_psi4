@@ -2,6 +2,26 @@
 
 <!-- version list -->
 
+## v0.17.0 (2026-10-19)
+
+### Bug Fixes
+
+- Scan every project for completed thermo benchmark jobs
+  ([`f8a58b7`](https://github.com/simstack/molecular_qm_psi4/commit/f8a58b71e34843b5f19f52f28994ee215f93b935))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+### Features
+
+- Run reference thermochemistry for both conformers in parallel
+  ([`ad1bebe`](https://github.com/simstack/molecular_qm_psi4/commit/ad1bebed0371ecda9c8bc4865dd8505054575c9c))
+
+Group each basis set and functional into compare_conformers_reference so both optimizations and both
+  thermochemistry calculations run together and the step fails if either molecule fails.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.16.1 (2026-10-18)
 
 ### Bug Fixes
