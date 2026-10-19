@@ -60,6 +60,10 @@ from molecular_qm_psi4.nodes.thermo_benchmark2 import (
     ThermoBenchmark2Step,
     thermo_benchmark2,
 )
+from molecular_qm_psi4.nodes.thermo_reference_benchmark2 import (
+    compare_conformers_reference,
+    thermo_reference_benchmark2,
+)
 from molecular_qm_psi4.nodes.thermo_benchmark_dataset import thermo_benchmark_dataset
 from molecular_qm_psi4.nodes.temperature_analysis import temperature_analysis
 from molecular_qm_psi4.nodes.compare_conformers_table import (
@@ -134,6 +138,8 @@ __all__ = [
     "compare_conformers",
     "compare_conformers_preopt",
     "thermo_benchmark",
+    "compare_conformers_reference",
+    "thermo_reference_benchmark2",
     "ThermoBenchmark2MethodList",
     "ThermoBenchmark2Step",
     "thermo_benchmark2",
