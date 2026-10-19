@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.19.0 (2026-10-19)
+
+### Features
+
+- Run reference benchmark methods in parallel and keep finished rows
+  ([`7ec891d`](https://github.com/simstack/molecular_qm_psi4/commit/7ec891dc3fdbf4953c0aabc205e1b2761ede96d7))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.18.0 (2026-10-19)
 
 ### Features
