@@ -7,16 +7,26 @@ from types import SimpleNamespace
 
 import pytest
 
-from molecular_qm_models import Molecule, QMInput, QMResult
+from molecular_qm_models import (
+    GridType,
+    Molecule,
+    OptimizationAccuracy,
+    QMInput,
+    QMResult,
+    SCFAccuracy,
+)
 from molecular_qm_models.basis_set import BasisSet, BasisSetEnum
 from molecular_qm_models.density_functional import Functional
 from molecular_qm_psi4.nodes.compare_conformers import (
     CompareConformersModel,
     CompareConformersResult,
-    ThermoBenchmarkMethodList,
-    ThermoBenchmarkStep,
     _kcal_per_mol_from_hartree,
     compare_conformers,
+)
+from molecular_qm_psi4.nodes.multistep_optimizer import PreOptimizerInput
+from molecular_qm_psi4.nodes.thermo_benchmark2 import (
+    ThermoBenchmark2MethodList,
+    ThermoBenchmark2Step,
 )
 
 
@@ -36,7 +46,7 @@ reference_node = _load_workspace_module(
 compare_conformers_reference = reference_node.compare_conformers_reference
 thermo_reference_benchmark2 = reference_node.thermo_reference_benchmark2
 from molecular_qm_psi4.util.frequency_table import vibrational_frequency_table
-from molecular_qm_psi4.util.qm_engine import QMEngine, QMEngineInput
+from molecular_qm_psi4.util.qm_engine import QMEngine
 from simstack.core.definitions import TaskStatus
 from simstack.util.docstring_parser import DocstringParser
 
@@ -111,7 +121,6 @@ def _install_persist(monkeypatch):
 
     monkeypatch.setattr(reference_node, "_persist_qm_input", persist_input)
     monkeypatch.setattr(reference_node, "_persist_step_molecule", persist_molecule)
-    monkeypatch.setattr(reference_node, "_persist_dftb_input", persist_input)
 
 
 def _reference_argument():
@@ -139,25 +148,22 @@ def test_compare_conformers_reference_documents_parallel_children():
     assert results["table"]["type"] == "SimpleTable"
     assert parsed.called_nodes() == [
         "pyscf_reference_calculator",
-        "psi4_calculator",
         "pyscf_thermochemistry",
-        "psi4_thermochemistry",
     ]
 
 
-def test_thermo_reference_benchmark2_matches_thermo_benchmark_signature():
+def test_thermo_reference_benchmark2_takes_preopt_and_method_list():
     params = inspect.signature(inspect.unwrap(thermo_reference_benchmark2)).parameters
-    assert list(params)[:4] == ["qm_input", "molecule", "methods", "engine"]
+    assert list(params)[:4] == ["qm_input", "preopt", "molecule", "methods"]
     assert params["qm_input"].annotation is QMInput
+    assert params["preopt"].annotation is PreOptimizerInput
     assert params["molecule"].annotation is Molecule
-    assert params["methods"].annotation is ThermoBenchmarkMethodList
-    assert params["engine"].annotation is QMEngineInput
+    assert params["methods"].annotation is ThermoBenchmark2MethodList
+    assert "engine" not in params
     parsed = DocstringParser(inspect.unwrap(thermo_reference_benchmark2).__doc__)
     assert parsed.simstack_results()["table"]["type"] == "SimpleTable"
     assert parsed.called_nodes() == [
-        "dftb_calculator",
-        "psi4_calculator",
-        "pyscf_calculator",
+        "multistep_optimizer",
         "compare_conformers_reference",
     ]
 
@@ -221,7 +227,7 @@ async def test_reference_optimizations_and_thermochemistry_run_in_parallel(monke
         return SimpleNamespace(status=TaskStatus.COMPLETED, **values)
 
     monkeypatch.setattr(reference_node, "pyscf_reference_calculator", calculator)
-    monkeypatch.setattr(reference_node, "thermochemistry_node_for", lambda engine: thermo)
+    monkeypatch.setattr(reference_node, "pyscf_thermochemistry", thermo)
     runner = _Runner()
     result = await inspect.unwrap(compare_conformers_reference)(
         _reference_argument(),
@@ -266,7 +272,7 @@ async def test_reference_fails_when_one_optimization_fails(monkeypatch):
         raise AssertionError("thermochemistry started after an optimization failure")
 
     monkeypatch.setattr(reference_node, "pyscf_reference_calculator", calculator)
-    monkeypatch.setattr(reference_node, "thermochemistry_node_for", lambda engine: thermo)
+    monkeypatch.setattr(reference_node, "pyscf_thermochemistry", thermo)
     runner = _Runner()
     result = await inspect.unwrap(compare_conformers_reference)(
         _reference_argument(),
@@ -307,7 +313,7 @@ async def test_reference_fails_when_one_thermochemistry_fails(monkeypatch):
         )
 
     monkeypatch.setattr(reference_node, "pyscf_reference_calculator", calculator)
-    monkeypatch.setattr(reference_node, "thermochemistry_node_for", lambda engine: thermo)
+    monkeypatch.setattr(reference_node, "pyscf_thermochemistry", thermo)
     runner = _Runner()
     result = await inspect.unwrap(compare_conformers_reference)(
         _reference_argument(),
@@ -320,29 +326,40 @@ async def test_reference_fails_when_one_thermochemistry_fails(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_psi4_reference_uses_psi4_calculator(monkeypatch):
+async def test_reference_rejects_non_pyscf_engine(monkeypatch):
     _install_context(monkeypatch)
-    _install_persist(monkeypatch)
-    called = []
 
-    async def pyscf_calculator(qm_input, **kwargs):
-        called.append("pyscf")
-        raise AssertionError("pyscf_reference_calculator ran for psi4")
+    async def calculator(qm_input, **kwargs):
+        raise AssertionError("pyscf_reference_calculator ran")
 
-    async def psi4_calculator(qm_input, engine=None, **kwargs):
-        called.append(kwargs["custom_name"])
-        return SimpleNamespace(status=TaskStatus.FAILED, error_message="stop")
-
-    monkeypatch.setattr(reference_node, "pyscf_reference_calculator", pyscf_calculator)
-    monkeypatch.setattr(reference_node, "run_qm_calculator", psi4_calculator)
-    runner = _Runner()
+    monkeypatch.setattr(reference_node, "pyscf_reference_calculator", calculator)
     arg = _reference_argument()
     arg.engine = QMEngine.PSI4
-    result = await inspect.unwrap(compare_conformers_reference)(arg, node_runner=runner)
+    with pytest.raises(ValueError, match="PySCF"):
+        await inspect.unwrap(compare_conformers_reference)(
+            arg, node_runner=_Runner()
+        )
 
-    assert result.status == TaskStatus.FAILED
-    assert called == ["ref-mol1", "ref-mol2"]
-    assert "stop" in result.error_message
+
+def _method_list():
+    return ThermoBenchmark2MethodList(
+        elements=[
+            ThermoBenchmark2Step(
+                basis_set=BasisSet(basis_set=BasisSetEnum.Def2_SVP),
+                functional=Functional(functional="PBE"),
+                scf_accuracy=SCFAccuracy.Tight,
+                dft_grid=GridType.Grid4,
+                optimization_accuracy=OptimizationAccuracy.Tight,
+            ),
+            ThermoBenchmark2Step(
+                basis_set=BasisSet(basis_set=BasisSetEnum.Def2_TZVP),
+                functional=Functional(functional="PBE0"),
+                scf_accuracy=SCFAccuracy.Medium,
+                dft_grid=GridType.Grid2,
+                optimization_accuracy=OptimizationAccuracy.Medium,
+            ),
+        ]
+    )
 
 
 @pytest.mark.asyncio
@@ -350,29 +367,17 @@ async def test_thermo_reference_benchmark2_groups_each_method(monkeypatch):
     _install_context(monkeypatch)
     _install_persist(monkeypatch)
     calls = []
+    optimizer_calls = []
 
-    async def dftb(molecule, opts, **kwargs):
-        return QMResult(
-            final_energy=-1.0,
-            final_structure=Molecule.from_molecule(molecule),
-        )
-
-    async def preopt(qm_input, engine=None, **kwargs):
+    async def optimizer(qm_input, preopt, **kwargs):
+        optimizer_calls.append(preopt)
         return QMResult(
             final_energy=-2.0,
             final_structure=Molecule.from_molecule(qm_input.molecule),
         )
 
     async def compare(arg, **kwargs):
-        calls.append(
-            (
-                kwargs.get("custom_name"),
-                arg.qm_input.molecule.field_name,
-                arg.molecule.field_name,
-                arg.qm_input.basis_set.basis_set,
-                arg.engine,
-            )
-        )
+        calls.append(arg)
         return CompareConformersResult(
             molecule2=arg.molecule,
             qm_input=arg.qm_input,
@@ -389,41 +394,34 @@ async def test_thermo_reference_benchmark2_groups_each_method(monkeypatch):
             final_molecule2=arg.molecule,
         )
 
-    monkeypatch.setattr(reference_node, "dftb_calculator", dftb)
-    monkeypatch.setattr(reference_node, "run_qm_calculator", preopt)
+    monkeypatch.setattr(reference_node, "multistep_optimizer", optimizer)
     monkeypatch.setattr(reference_node, "compare_conformers_reference", compare)
-    first = _molecule("boat")
-    second = _molecule("chair")
-    methods = ThermoBenchmarkMethodList(
-        elements=[
-            ThermoBenchmarkStep(
-                basis_set=BasisSet(basis_set=BasisSetEnum.Def2_SVP),
-                functional=Functional(functional="PBE"),
-                engine=QMEngine.PYSCF,
-            ),
-            ThermoBenchmarkStep(
-                basis_set=BasisSet(basis_set=BasisSetEnum.Def2_TZVP),
-                functional=Functional(functional="PBE0"),
-                engine=QMEngine.PSI4,
-            ),
-        ]
-    )
+    protocol = PreOptimizerInput(engine=QMEngine.PYSCF)
     runner = _Runner()
     result = await inspect.unwrap(thermo_reference_benchmark2)(
-        _qm_input(first),
-        second,
-        methods,
-        QMEngineInput(engine=QMEngine.PYSCF),
+        _qm_input(_molecule("boat")),
+        protocol,
+        _molecule("boat"),
+        _method_list(),
         node_runner=runner,
     )
 
     assert result.status == TaskStatus.COMPLETED
+    assert optimizer_calls == [protocol, protocol]
     assert len(calls) == 2
-    assert calls[0][1:] == ("boat", "chair", BasisSetEnum.Def2_SVP, QMEngine.PYSCF)
-    assert calls[1][1:] == ("boat", "chair", BasisSetEnum.Def2_TZVP, QMEngine.PSI4)
+    assert calls[0].engine is QMEngine.PYSCF
+    assert calls[1].engine is QMEngine.PYSCF
+    assert calls[0].qm_input.basis_set.basis_set == BasisSetEnum.Def2_SVP
+    assert calls[1].qm_input.basis_set.basis_set == BasisSetEnum.Def2_TZVP
+    assert calls[0].qm_input.scf_accuracy is SCFAccuracy.Tight
+    assert calls[0].qm_input.grid_type is GridType.Grid4
+    assert calls[0].qm_input.optimization_accuracy is OptimizationAccuracy.Tight
+    assert calls[0].qm_input.molecule is not calls[0].molecule
     assert len(runner.table.row) == 2
     assert runner.table.row[0]["DDG"] == 1.5
-    assert runner.table.row[1]["engine"] == "psi4"
+    assert runner.table.row[0]["engine"] == "pyscf"
+    assert runner.table.row[1]["engine"] == "pyscf"
+    assert runner.table.row[0]["dispersion_correction"] == "NONE"
 
 
 @pytest.mark.asyncio
@@ -431,13 +429,7 @@ async def test_thermo_reference_benchmark2_fails_when_reference_compare_fails(mo
     _install_context(monkeypatch)
     _install_persist(monkeypatch)
 
-    async def dftb(molecule, opts, **kwargs):
-        return QMResult(
-            final_energy=-1.0,
-            final_structure=Molecule.from_molecule(molecule),
-        )
-
-    async def preopt(qm_input, engine=None, **kwargs):
+    async def optimizer(qm_input, preopt, **kwargs):
         return QMResult(
             final_energy=-2.0,
             final_structure=Molecule.from_molecule(qm_input.molecule),
@@ -446,24 +438,15 @@ async def test_thermo_reference_benchmark2_fails_when_reference_compare_fails(mo
     async def compare(arg, **kwargs):
         raise RuntimeError("reference pair failed")
 
-    monkeypatch.setattr(reference_node, "dftb_calculator", dftb)
-    monkeypatch.setattr(reference_node, "run_qm_calculator", preopt)
+    monkeypatch.setattr(reference_node, "multistep_optimizer", optimizer)
     monkeypatch.setattr(reference_node, "compare_conformers_reference", compare)
-    methods = ThermoBenchmarkMethodList(
-        elements=[
-            ThermoBenchmarkStep(
-                basis_set=BasisSet(basis_set=BasisSetEnum.Def2_SVP),
-                functional=Functional(functional="PBE"),
-                engine=QMEngine.PYSCF,
-            )
-        ]
-    )
+    methods = ThermoBenchmark2MethodList(elements=[_method_list().elements[0]])
     runner = _Runner()
     result = await inspect.unwrap(thermo_reference_benchmark2)(
         _qm_input(_molecule("boat")),
+        PreOptimizerInput(engine=QMEngine.PYSCF),
         _molecule("boat"),
         methods,
-        QMEngineInput(engine=QMEngine.PYSCF),
         node_runner=runner,
     )
 
