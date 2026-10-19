@@ -370,9 +370,15 @@ async def test_thermo_reference_benchmark2_groups_each_method(monkeypatch):
     optimizer_calls = []
     structures = []
     started = {"count": 0, "release": asyncio.Event()}
+    opt_started = {"count": 0, "release": asyncio.Event()}
 
     async def optimizer(qm_input, preopt, **kwargs):
-        optimizer_calls.append(preopt)
+        optimizer_calls.append((preopt, kwargs["custom_name"], qm_input.molecule))
+        opt_started["count"] += 1
+        if opt_started["count"] < 2:
+            await asyncio.wait_for(opt_started["release"].wait(), timeout=2)
+        else:
+            opt_started["release"].set()
         structure = Molecule.from_molecule(qm_input.molecule)
         structures.append(structure)
         return QMResult(final_energy=-2.0, final_structure=structure)
@@ -413,7 +419,9 @@ async def test_thermo_reference_benchmark2_groups_each_method(monkeypatch):
     )
 
     assert result.status == TaskStatus.COMPLETED
-    assert optimizer_calls == [protocol, protocol]
+    assert [call[0] for call in optimizer_calls] == [protocol, protocol]
+    assert {call[1] for call in optimizer_calls} == {"opt-mol1", "opt-mol2"}
+    assert optimizer_calls[0][2] is not optimizer_calls[1][2]
     assert len(calls) == 2
     assert calls[0].engine is QMEngine.PYSCF
     assert calls[1].engine is QMEngine.PYSCF
