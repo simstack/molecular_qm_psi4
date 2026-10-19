@@ -284,9 +284,10 @@ async def thermo_reference_benchmark2(
     ``qm_input`` is the shared template. ``preopt`` is passed to
     ``multistep_optimizer`` and its engine must be PySCF. Each method in
     ``methods`` is one ``compare_conformers_reference`` call for that basis
-    set and functional. That call optimizes both molecules together and then
-    evaluates thermochemistry together, and fails if either molecule fails.
-    Every method starts from the pre-optimized geometries.
+    set and functional. Those calls run at the same time, and each one starts
+    from the pre-optimized geometries. A call optimizes both molecules together
+    and then evaluates thermochemistry together. The node fails if any molecule
+    or any method fails, and the table still contains the methods that finished.
 
     Parameters:
         qm_input (QMInput): Conformer 1 and shared QM settings passed to
@@ -429,6 +430,7 @@ async def thermo_reference_benchmark2(
     table.add_column("DE_thermo", "number")
     table.add_column("DS", "number")
 
+    prepared = []
     for index, step in enumerate(methods, start=1):
         if step is None:
             raise ValueError(f"methods entry {index} is not set")
@@ -450,13 +452,6 @@ async def thermo_reference_benchmark2(
         basis_name = step.basis_set.basis_set.value
         functional_name = step.functional.functional.value
         dispersion_name = dispersion.value.value
-        node_runner.info(
-            f"compare_conformers_reference basis={basis_name} "
-            f"functional={functional_name} dispersion_correction={dispersion_name} "
-            f"scf_accuracy={step.scf_accuracy.value} dft_grid={step.dft_grid.value} "
-            f"optimization_accuracy={step.optimization_accuracy.value} "
-            f"max_optimization_iterations={_MAX_OPTIMIZATION_ITERATIONS} engine=pyscf"
-        )
         current_input = QMInput.from_model(qm_input)
         current_input.molecule = mol1
         current_input.basis_set = step.basis_set
@@ -469,75 +464,95 @@ async def thermo_reference_benchmark2(
         current_input.frequencies = True
         current_input.field_name = "QMInput"
         current_input = await _persist_qm_input(current_input, node_runner)
-        arg = CompareConformersModel(
-            qm_input=current_input,
-            molecule=mol2,
-            engine=QMEngine.PYSCF,
+        prepared.append(
+            (
+                basis_name,
+                functional_name,
+                dispersion_name,
+                CompareConformersModel(
+                    qm_input=current_input,
+                    molecule=mol2,
+                    engine=QMEngine.PYSCF,
+                ),
+            )
         )
-        kwargs["custom_name"] = (
+
+    async def run_method(basis_name, functional_name, dispersion_name, arg):
+        label = (
+            f"basis {basis_name}, functional {functional_name}, "
+            f"dispersion {dispersion_name}"
+        )
+        child_kwargs = dict(kwargs)
+        child_kwargs["custom_name"] = (
             f"pyscf-{basis_name}-{functional_name}-{dispersion_name}"
         )
+        node_runner.info(
+            f"compare_conformers_reference {label} "
+            f"scf_accuracy={arg.qm_input.scf_accuracy.value} "
+            f"dft_grid={arg.qm_input.grid_type.value} "
+            f"optimization_accuracy={arg.qm_input.optimization_accuracy.value} "
+            f"max_optimization_iterations={_MAX_OPTIMIZATION_ITERATIONS} engine=pyscf"
+        )
         try:
-            calc_result = await compare_conformers_reference(arg, **kwargs)
+            calc_result = await compare_conformers_reference(arg, **child_kwargs)
         except Exception as exc:
-            return node_runner.fail(
-                f"compare_conformers_reference failed for basis {basis_name}, "
-                f"functional {functional_name}, dispersion {dispersion_name}: {exc}"
-            )
+            return f"compare_conformers_reference failed for {label}: {exc}"
         failure = _reference_child_error(
-            calc_result,
-            (
-                f"compare_conformers_reference failed for basis {basis_name}, "
-                f"functional {functional_name}, dispersion {dispersion_name}"
-            ),
+            calc_result, f"compare_conformers_reference failed for {label}"
         )
         if failure:
-            return node_runner.fail(failure)
+            return failure
         if isinstance(calc_result, CompareConformersResult):
             compare_result = calc_result
         else:
             compare_result = getattr(calc_result, "result", None)
         if compare_result is None:
-            return node_runner.fail(
-                f"compare_conformers_reference returned no result for basis {basis_name}, "
-                f"functional {functional_name}, dispersion {dispersion_name}"
-            )
+            return f"compare_conformers_reference returned no result for {label}"
         if compare_result.final_molecule1 is None:
-            return node_runner.fail(
+            return (
                 "compare_conformers_reference returned no final_molecule1 for "
-                f"basis {basis_name}, functional {functional_name}, "
-                f"dispersion {dispersion_name}"
+                f"{label}"
             )
         if compare_result.final_molecule2 is None:
-            return node_runner.fail(
+            return (
                 "compare_conformers_reference returned no final_molecule2 for "
-                f"basis {basis_name}, functional {functional_name}, "
-                f"dispersion {dispersion_name}"
+                f"{label}"
             )
         row_molecule = compare_result.molecule_for_table() or mol1
-        table.add_row(
-            {
-                "name": pair_name,
-                "smiles": row_molecule.smiles if row_molecule is not None else None,
-                "formula": row_molecule.formula if row_molecule is not None else None,
-                "engine": QMEngine.PYSCF.value,
-                "basis_set": basis_name,
-                "functional": functional_name,
-                "dispersion_correction": dispersion_name,
-                "DDG": compare_result.delta_delta_g,
-                "DDZ": compare_result.delta_delta_zpe_tot,
-                "DDH": compare_result.delta_h,
-                "G_minus_elec_1": compare_result.g_minus_elec_1,
-                "G_minus_elec_2": compare_result.g_minus_elec_2,
-                "DDG_minus_elec": compare_result.delta_g_minus_elec,
-                "DE_scf": compare_result.delta_e_scf,
-                "DE_thermo": compare_result.delta_e_thermo,
-                "DS": compare_result.delta_s,
-            }
-        )
+        return {
+            "name": pair_name,
+            "smiles": row_molecule.smiles if row_molecule is not None else None,
+            "formula": row_molecule.formula if row_molecule is not None else None,
+            "engine": QMEngine.PYSCF.value,
+            "basis_set": basis_name,
+            "functional": functional_name,
+            "dispersion_correction": dispersion_name,
+            "DDG": compare_result.delta_delta_g,
+            "DDZ": compare_result.delta_delta_zpe_tot,
+            "DDH": compare_result.delta_h,
+            "G_minus_elec_1": compare_result.g_minus_elec_1,
+            "G_minus_elec_2": compare_result.g_minus_elec_2,
+            "DDG_minus_elec": compare_result.delta_g_minus_elec,
+            "DE_scf": compare_result.delta_e_scf,
+            "DE_thermo": compare_result.delta_e_thermo,
+            "DS": compare_result.delta_s,
+        }
 
+    method_outcomes = await asyncio.gather(
+        *(run_method(*item) for item in prepared),
+        return_exceptions=True,
+    )
+    method_errors = []
+    for index, outcome in enumerate(method_outcomes, start=1):
+        error = _gathered_reference_error(outcome, index, "compare_conformers_reference")
+        if error:
+            method_errors.append(error)
+            continue
+        table.add_row(outcome)
     node_runner.table = table
     node_runner.info(
         f"Built thermo-reference-benchmark2 table with {len(table.row)} row(s)"
     )
+    if method_errors:
+        return node_runner.fail("; ".join(method_errors))
     return node_runner.succeed()

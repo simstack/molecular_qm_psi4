@@ -368,16 +368,22 @@ async def test_thermo_reference_benchmark2_groups_each_method(monkeypatch):
     _install_persist(monkeypatch)
     calls = []
     optimizer_calls = []
+    structures = []
+    started = {"count": 0, "release": asyncio.Event()}
 
     async def optimizer(qm_input, preopt, **kwargs):
         optimizer_calls.append(preopt)
-        return QMResult(
-            final_energy=-2.0,
-            final_structure=Molecule.from_molecule(qm_input.molecule),
-        )
+        structure = Molecule.from_molecule(qm_input.molecule)
+        structures.append(structure)
+        return QMResult(final_energy=-2.0, final_structure=structure)
 
     async def compare(arg, **kwargs):
         calls.append(arg)
+        started["count"] += 1
+        if started["count"] < 2:
+            await asyncio.wait_for(started["release"].wait(), timeout=2)
+        else:
+            started["release"].set()
         return CompareConformersResult(
             molecule2=arg.molecule,
             qm_input=arg.qm_input,
@@ -416,7 +422,12 @@ async def test_thermo_reference_benchmark2_groups_each_method(monkeypatch):
     assert calls[0].qm_input.scf_accuracy is SCFAccuracy.Tight
     assert calls[0].qm_input.grid_type is GridType.Grid4
     assert calls[0].qm_input.optimization_accuracy is OptimizationAccuracy.Tight
+    assert calls[0].qm_input.molecule is calls[1].qm_input.molecule
+    assert calls[0].molecule is calls[1].molecule
+    assert calls[0].qm_input.molecule.field_name == "boat"
+    assert calls[0].molecule.field_name == "boat"
     assert calls[0].qm_input.molecule is not calls[0].molecule
+    assert len(structures) == 2
     assert len(runner.table.row) == 2
     assert runner.table.row[0]["DDG"] == 1.5
     assert runner.table.row[0]["engine"] == "pyscf"
@@ -436,19 +447,37 @@ async def test_thermo_reference_benchmark2_fails_when_reference_compare_fails(mo
         )
 
     async def compare(arg, **kwargs):
-        raise RuntimeError("reference pair failed")
+        if arg.qm_input.basis_set.basis_set == BasisSetEnum.Def2_TZVP:
+            raise RuntimeError("reference pair failed")
+        return CompareConformersResult(
+            molecule2=arg.molecule,
+            qm_input=arg.qm_input,
+            delta_delta_g=1.5,
+            delta_delta_zpe_tot=0.2,
+            delta_h=0.3,
+            g_minus_elec_1=0.4,
+            g_minus_elec_2=0.5,
+            delta_g_minus_elec=0.1,
+            delta_e_scf=0.6,
+            delta_e_thermo=0.7,
+            delta_s=0.8,
+            final_molecule1=arg.qm_input.molecule,
+            final_molecule2=arg.molecule,
+        )
 
     monkeypatch.setattr(reference_node, "multistep_optimizer", optimizer)
     monkeypatch.setattr(reference_node, "compare_conformers_reference", compare)
-    methods = ThermoBenchmark2MethodList(elements=[_method_list().elements[0]])
     runner = _Runner()
     result = await inspect.unwrap(thermo_reference_benchmark2)(
         _qm_input(_molecule("boat")),
         PreOptimizerInput(engine=QMEngine.PYSCF),
         _molecule("boat"),
-        methods,
+        _method_list(),
         node_runner=runner,
     )
 
     assert result.status == TaskStatus.FAILED
     assert "reference pair failed" in result.error_message
+    assert len(result.table.row) == 1
+    assert result.table.row[0]["DDG"] == 1.5
+    assert result.table.row[0]["basis_set"] == BasisSetEnum.Def2_SVP.value
