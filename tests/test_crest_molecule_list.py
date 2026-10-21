@@ -24,6 +24,21 @@ def initialized_context():
     """These unit tests use no database or runner context."""
 
 
+
+def test_crest_import_does_not_require_xtb_worker(monkeypatch):
+    import builtins
+
+    original_import = builtins.__import__
+
+    def without_worker(name, *args, **kwargs):
+        if name == "molecular_qm_psi4.util.xtb_worker":
+            raise ModuleNotFoundError(name)
+        return original_import(name, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "__import__", without_worker)
+        importlib.reload(crest)
+
 def _input(count=6, **options):
     molecules = MoleculeList()
     for index in range(count):
@@ -110,7 +125,7 @@ async def test_batch_reuses_pool_and_preserves_outputs(monkeypatch, entry, optim
             with lock:
                 active -= 1
 
-    monkeypatch.setattr(crest, "calculate_xtb_molecule", worker)
+    monkeypatch.setattr("molecular_qm_psi4.util.xtb_worker.calculate_xtb_molecule", worker)
     opts = _input(optimize=optimize, compute_gradients=True, max_iters=17)
     ids = [mol.id for mol in opts.molecules]
     runner = _runner()
@@ -171,7 +186,7 @@ async def test_worker_failure_cancels_batch_and_closes_pool(monkeypatch):
     def worker(payload):
         raise RuntimeError("native calculation failed")
 
-    monkeypatch.setattr(crest, "calculate_xtb_molecule", worker)
+    monkeypatch.setattr("molecular_qm_psi4.util.xtb_worker.calculate_xtb_molecule", worker)
     runner = _runner()
     assert await crest.xtb_molecule_list.__wrapped__(
         _input(), node_runner=runner,

@@ -16,10 +16,6 @@ from simstack.models import FileStack, DataSetMetadata, DataSet, DataSetSection,
 from simstack.models.array_storage import ArrayStorage
 from simstack.models.simple_table import SimpleTable, SimpleTableColumnType
 
-from molecular_qm_psi4.util.xtb_worker import (
-    calculate_xtb_molecule,
-    initialize_xtb_worker,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +233,11 @@ async def _process_xtb_batch(payloads, workers, threads, on_result, worker=None)
     if not payloads:
         return []
     if worker is None:
+        from molecular_qm_psi4.util.xtb_worker import calculate_xtb_molecule
+
         worker = calculate_xtb_molecule
+    from molecular_qm_psi4.util.xtb_worker import initialize_xtb_worker
+
     pool = ProcessPoolExecutor(
         max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
         initializer=initialize_xtb_worker, initargs=(threads,),
