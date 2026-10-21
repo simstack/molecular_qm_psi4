@@ -1,3 +1,6 @@
+import asyncio
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 import logging
 import os
 import re
@@ -13,13 +16,10 @@ from simstack.models import FileStack, DataSetMetadata, DataSet, DataSetSection,
 from simstack.models.array_storage import ArrayStorage
 from simstack.models.simple_table import SimpleTable, SimpleTableColumnType
 
-try:
-    from xtb.interface import Calculator, Param
-    from xtb.libxtb import VERBOSITY_MUTED
-except ImportError:
-    Calculator = None
-    Param = None
-    VERBOSITY_MUTED = None
+from molecular_qm_psi4.util.xtb_worker import (
+    calculate_xtb_molecule,
+    initialize_xtb_worker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -213,230 +213,168 @@ async def crest(crest_input: CrestInput, **kwargs) -> SimstackResult:
         return node_runner.fail(f"CREST node execution failed: {str(e)}")
 
 
-@node
-async def xtb_optimize_molecule_list(xtb_input: XTBInput, **kwargs) -> SimstackResult:
-    """
-    Asynchronously performs geometry optimizations for a list of molecular structures using the xTB Python library.
+def _xtb_allocation(kwargs, molecule_count):
+    parameters = kwargs.get("parent_parameters")
+    if parameters is None:
+        parameters = kwargs.get("parameters")
+    slurm = getattr(parameters, "slurm_parameters", None)
+    fields_set = getattr(slurm, "model_fields_set", None)
+    tasks = getattr(slurm, "tasks", None)
+    if fields_set is not None and "tasks" not in fields_set:
+        tasks = None
+    if tasks is None:
+        nodes = getattr(slurm, "nodes", None) or 1
+        per_node = getattr(slurm, "tasks_per_node", None) or 1
+        tasks = nodes * per_node
+    threads = getattr(slurm, "cpus_per_task", None) or 1
+    if tasks < 1 or threads < 1:
+        raise ValueError("xTB Slurm tasks and cpus_per_task must be positive")
+    return min(tasks, molecule_count), threads
 
-    Parameters:
-        xtb_input (XTBInput): The input parameters for the xTB optimization.
-        **kwargs: Additional arguments that can be passed to the node.
 
-    Returns:
-        SimstackResult: The result of the xTB optimization.
-            result (DataSet): The result of the xTB optimization.
-            molecule_list (MoleculeList): The list of molecules that were optimized.
-    """
-    node_runner = kwargs.get("node_runner")
-    if Calculator is None:
-        return node_runner.fail("xtb-python is not installed. Please install it to use this node.")
-
-    molecules = xtb_input.molecules
-    charge = xtb_input.level_of_theory.charge
-    uhf = xtb_input.level_of_theory.multiplicity - 1
-
-    method = Param.GFN2xTB
-    if xtb_input.level_of_theory.method == CrestLevelOfTheoryEnum.GFN1_XTB:
-        method = Param.GFN1xTB
-    elif xtb_input.level_of_theory.method == CrestLevelOfTheoryEnum.GFN0_XTB:
-        method = Param.GFN0xTB
-
-    node_runner.info(f"Running xtb-python optimization for {len(molecules)} molecules using {xtb_input.level_of_theory.method.value}")
-    node_runner.log(
-        f"xtb optimize: {len(molecules)} molecule(s), method={xtb_input.level_of_theory.method.value}, "
-        f"charge={charge}, uhf={uhf}, gradients={xtb_input.compute_gradients}"
+async def _process_xtb_batch(payloads, workers, threads, on_result, worker=None):
+    """Reuse one spawn pool, keeping at most one submitted job per worker."""
+    if not payloads:
+        return []
+    if worker is None:
+        worker = calculate_xtb_molecule
+    pool = ProcessPoolExecutor(
+        max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
+        initializer=initialize_xtb_worker, initargs=(threads,),
     )
+    loop = asyncio.get_running_loop()
+    pending = {}
+    results = [None] * len(payloads)
+    next_index = 0
 
-    meta_data = DataSetMetadata(field_name="xtb_opt", data={
-        "level_of_theory": xtb_input.level_of_theory.method.value,
-        "created_at": datetime.now().isoformat(),
-    })
-    dataset = DataSet(field_name="xtb_opt", metadata=meta_data)
-    results_section = DataSetSection()
-    dataset["results_section"] = results_section
+    def submit_one():
+        nonlocal next_index
+        future = loop.run_in_executor(pool, worker, payloads[next_index])
+        pending[future] = next_index
+        next_index += 1
 
     try:
-        from scipy.optimize import minimize
-        for mol_index, mol in enumerate(molecules):
-            mol_label = mol.formula or mol.smiles or str(mol.id)
-            node_runner.log(f"[{mol_index + 1}/{len(molecules)}] optimizing {mol_label} ({len(mol.atoms)} atoms)")
-            numbers = np.array([ELEMENT_TO_Z.get(atom.element, 1) for atom in mol.atoms])
-            positions = np.array([[atom.x, atom.y, atom.z] for atom in mol.atoms]) * ANGSTROM_TO_BOHR
+        for _ in range(min(workers, len(payloads))):
+            submit_one()
+        while pending:
+            completed, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for future in completed:
+                index = pending.pop(future)
+                try:
+                    results[index] = future.result()
+                except Exception as exc:
+                    raise RuntimeError(f"xTB molecule {index + 1} failed: {exc}") from exc
+                on_result(index, results[index])
+            while len(pending) < workers and next_index < len(payloads):
+                submit_one()
+        return results
+    finally:
+        for future in pending:
+            future.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        # Native work already running must finish before its process can exit.
+        # Keep the event loop responsive while joining workers on every exit path.
+        await asyncio.shield(asyncio.to_thread(pool.shutdown, wait=True, cancel_futures=True))
 
-            calc = Calculator(method, numbers, positions, charge, uhf)
-            calc.set_verbosity(VERBOSITY_MUTED)
 
-            if xtb_input.level_of_theory.use_solvent != CrestSolventEnum.NONE:
-                solvent = xtb_input.level_of_theory.solvent.value
-                if xtb_input.level_of_theory.use_solvent == CrestSolventEnum.GBSA:
-                    calc.set_solvent(solvent, Param.GBSA)
-                elif xtb_input.level_of_theory.use_solvent == CrestSolventEnum.ALPB:
-                    calc.set_solvent(solvent, Param.ALPB)
-                node_runner.log(f"[{mol_index + 1}/{len(molecules)}] solvent={solvent} ({xtb_input.level_of_theory.use_solvent.value})")
-
-            def func(x):
-                calc.update(x.reshape(-1, 3))
-                r = calc.singlepoint()
-                return r.get_energy(), r.get_gradient().flatten()
-
-            e0, _ = func(positions.flatten())
-            res_opt = minimize(
-                func, positions.flatten(), jac=True, method='L-BFGS-B',
-                options={'maxiter': xtb_input.max_iters},
-            )
-            opt_positions = res_opt.x.reshape(-1, 3)
-            calc.update(opt_positions)
-            res = calc.singlepoint()
-
-            mol.properties["energy"] = res.get_energy()
-            mol.properties["optimization_converged"] = bool(res_opt.success)
-            new_positions = opt_positions / ANGSTROM_TO_BOHR
-            for i, atom in enumerate(mol.atoms):
-                atom.x = float(new_positions[i, 0])
-                atom.y = float(new_positions[i, 1])
-                atom.z = float(new_positions[i, 2])
-
-            node_runner.log(
-                f"[{mol_index + 1}/{len(molecules)}] done: E0={e0:.8f} Eh -> E={mol.properties['energy']:.8f} Eh, "
-                f"success={res_opt.success}, nit={res_opt.nit}, message={res_opt.message}"
-            )
-            node_runner.info(
-                f"Molecule {mol_index + 1}/{len(molecules)} optimized: E={mol.properties['energy']:.8f} Eh "
-                f"(nit={res_opt.nit}, success={res_opt.success})"
-            )
-
-            if xtb_input.compute_gradients:
-                gradient_array = ArrayStorage(name="xtb_gradient", field_name="xtb_gradient")
-                gradient_array.set_array(res.get_gradient())
-                results_section.add_row({
-                    "molecule": mol,
-                    "energy": FloatData(value=mol.properties["energy"]),
-                    "gradients": gradient_array
-                })
-            else:
-                results_section.add_row({
-                    "molecule": mol,
-                    "energy": FloatData(value=mol.properties["energy"]),
-                })
-
-            mol.properties["energy_method"] = {
-                "method": xtb_input.level_of_theory.method.value,
-                "program": "xtb-python",
-                "solvent": xtb_input.level_of_theory.solvent.value if xtb_input.level_of_theory.use_solvent != CrestSolventEnum.NONE else None
+async def _run_xtb_list(xtb_input, optimize, **kwargs):
+    node_runner = kwargs["node_runner"]
+    molecules = xtb_input.molecules
+    level = xtb_input.level_of_theory
+    try:
+        workers, threads = _xtb_allocation(kwargs, len(molecules))
+        node_runner.info(
+            f"Running xTB {'optimization' if optimize else 'compute'} on {len(molecules)} "
+            f"molecules with max_concurrency={workers}, threads_per_worker={threads}"
+        )
+        methods = {
+            CrestLevelOfTheoryEnum.GFN1_XTB: "GFN1xTB",
+            CrestLevelOfTheoryEnum.GFN0_XTB: "GFN0xTB",
+        }
+        solvent = level.solvent.value if level.use_solvent != CrestSolventEnum.NONE else None
+        payloads = [
+            {
+                "numbers": [ELEMENT_TO_Z.get(atom.element, 1) for atom in mol.atoms],
+                "positions": [
+                    [atom.x * ANGSTROM_TO_BOHR, atom.y * ANGSTROM_TO_BOHR, atom.z * ANGSTROM_TO_BOHR]
+                    for atom in mol.atoms
+                ],
+                "method": methods.get(level.method, "GFN2xTB"),
+                "charge": level.charge, "uhf": level.multiplicity - 1,
+                "solvent_model": level.use_solvent.value, "solvent": solvent,
+                "optimize": optimize, "max_iters": xtb_input.max_iters,
+                "compute_gradients": xtb_input.compute_gradients,
             }
-        node_runner.log(f"xtb optimize finished: {len(molecules)} molecule(s)")
+            for mol in molecules
+        ]
+
+        def report(index, result):
+            node_runner.info(
+                f"Molecule {index + 1}/{len(molecules)} finished: E={result['energy']:.8f} Eh"
+            )
+
+        computed = await _process_xtb_batch(payloads, workers, threads, report)
+        name = "xtb_opt" if optimize else "xtb"
+        dataset = DataSet(field_name=name, metadata=DataSetMetadata(
+            field_name=name, data={
+                "level_of_theory": level.method.value,
+                "created_at": datetime.now().isoformat(),
+            },
+        ))
+        results_section = DataSetSection()
+        dataset["results_section"] = results_section
+        for index, (mol, result) in enumerate(zip(molecules, computed)):
+            mol.properties["energy"] = result["energy"]
+            if optimize:
+                optimization = result["optimization"]
+                mol.properties["optimization_converged"] = optimization["converged"]
+                for atom, xyz in zip(mol.atoms, result["positions"]):
+                    atom.x, atom.y, atom.z = [float(value / ANGSTROM_TO_BOHR) for value in xyz]
+                node_runner.log(
+                    f"[{index + 1}/{len(molecules)}] done: "
+                    f"E0={optimization['initial_energy']:.8f} Eh -> E={result['energy']:.8f} Eh, "
+                    f"success={optimization['converged']}, nit={optimization['iterations']}, "
+                    f"message={optimization['message']}"
+                )
+            mol.properties["energy_method"] = {
+                "method": level.method.value, "program": "xtb-python", "solvent": solvent,
+            }
+            row = {"molecule": mol, "energy": FloatData(value=result["energy"])}
+            if xtb_input.compute_gradients:
+                gradient = ArrayStorage(name="xtb_gradient", field_name="xtb_gradient")
+                gradient.set_array(np.asarray(result["gradients"]))
+                row["gradients"] = gradient
+            results_section.add_row(row)
         node_runner.result = dataset
         node_runner.molecule_list = molecules
-        return node_runner.succeed(f"Optimized {len(molecules)} molecule(s)")
-    except Exception as e:
-        logger.error(f"xtb-python optimization failed: {str(e)}")
-        node_runner.log(f"xtb optimize failed: {e}")
-        return node_runner.fail(f"xtb-python optimization failed: {str(e)}")
+        if optimize:
+            return node_runner.succeed(f"Optimized {len(molecules)} molecule(s)")
+        return node_runner.succeed()
+    except Exception as exc:
+        logger.exception("xtb-python batch failed")
+        return node_runner.fail(f"xtb-python {'optimization' if optimize else 'compute'} failed: {exc}")
+
+
+@node
+async def xtb_optimize_molecule_list(xtb_input: XTBInput, **kwargs) -> SimstackResult:
+    """Optimize molecules in a reusable process pool bounded by parent Slurm tasks.
+
+    SimstackResult:
+        result (DataSet): Energies and optional gradients in input order.
+        molecule_list (MoleculeList): Optimized molecules with convergence metadata.
+    """
+    return await _run_xtb_list(xtb_input, True, **kwargs)
 
 
 @node
 async def xtb_molecule_list(xtb_input: XTBInput, **kwargs) -> SimstackResult:
-    """
-    Asynchronously performs calculations for a list of molecular structures using the xTB Python library.
+    """Compute molecules in a reusable process pool bounded by parent Slurm tasks.
 
-    This function is designed to handle multiple molecules and compute energy and optional gradient
-    data based on the specified level of theory. It automatically configures xTB to use the correct
-    method, charge, and spin multiplicity as well as solvent effects if requested. Computed properties
-    are stored within the molecule objects and also tied to resulting dataset entries.
-
-    Errors during computation are handled gracefully, and metadata is included to track computational
-    details. If xTB Python is not installed, the computation will fail with an appropriate message.
-
-    Attributes:
-        xtb_input (XTBInput): Input data structure containing level of theory, molecular structures,
-        and calculation options.
-        **kwargs: Additional arguments, typically including a node_runner instance.
-
-    Parameters:
-        xtb_input (XTBInput): Input object specifying details about the molecules to compute, the
-        level of theory, and additional calculation needs.
-        **kwargs: Optional arguments, including a `node_runner` instance used to manage the execution.
+    Honor the optimize flag using the same batch orchestration and one pool.
 
     SimstackResult:
-        result (DataSet): One row per molecule with its energy, and gradients when they were requested.
-        molecule_list (MoleculeList): Input molecules with the computed energy stored on each molecule.
-
-    Raises:
-        Exception: Any exceptions raised during xTB Python computations are logged and captured for
-        downstream failure handling.
+        result (DataSet): Energies and optional gradients in input order.
+        molecule_list (MoleculeList): Molecules with energies and optional optimization.
     """
-    node_runner = kwargs.get("node_runner")
-    if Calculator is None:
-        return node_runner.fail("xtb-python is not installed. Please install it to use this node.")
-
-    molecules = xtb_input.molecules
-    
-    charge = xtb_input.level_of_theory.charge
-    uhf = xtb_input.level_of_theory.multiplicity - 1
-
-    method = Param.GFN2xTB
-    if xtb_input.level_of_theory.method == CrestLevelOfTheoryEnum.GFN1_XTB:
-        method = Param.GFN1xTB
-    elif xtb_input.level_of_theory.method == CrestLevelOfTheoryEnum.GFN0_XTB:
-        method = Param.GFN0xTB
-
-    node_runner.info(f"Running xtb-python compute for {len(molecules)} molecules using {xtb_input.level_of_theory.method.value}")
-
-    meta_data = DataSetMetadata(field_name="xtb", data = {
-        "level_of_theory": xtb_input.level_of_theory.method.value,
-        "created_at": datetime.now().isoformat(),
-    })
-    dataset = DataSet(field_name="xtb", metadata=meta_data)
-    results_section = DataSetSection()
-    dataset["results_section"] = results_section
-
-    try:
-        if xtb_input.optimize:
-            return await xtb_optimize_molecule_list(xtb_input, **kwargs)
-
-        for mol in molecules:
-            numbers = np.array([ELEMENT_TO_Z.get(atom.element, 1) for atom in mol.atoms])
-            positions = np.array([[atom.x, atom.y, atom.z] for atom in mol.atoms]) * ANGSTROM_TO_BOHR
-            
-            calc = Calculator(method, numbers, positions, charge, uhf)
-            calc.set_verbosity(VERBOSITY_MUTED)
-            
-            if xtb_input.level_of_theory.use_solvent != CrestSolventEnum.NONE:
-                solvent = xtb_input.level_of_theory.solvent.value
-                if xtb_input.level_of_theory.use_solvent == CrestSolventEnum.GBSA:
-                    calc.set_solvent(solvent, Param.GBSA)
-                elif xtb_input.level_of_theory.use_solvent == CrestSolventEnum.ALPB:
-                    calc.set_solvent(solvent, Param.ALPB)
-
-            res = calc.singlepoint()
-            mol.properties["energy"] = res.get_energy()
-
-            if xtb_input.compute_gradients:
-                # res is already from singlepoint or optimize
-                # res.get_gradient() should be available
-                gradient_array = ArrayStorage(name="xtb_gradient",field_name="xtb_gradient")
-                gradient_array.set_array(res.get_gradient())
-
-                results_section.add_row({
-                    "molecule": mol,
-                    "energy": FloatData(value=mol.properties["energy"]),
-                    "gradients": gradient_array
-                })
-            else:
-                results_section.add_row({
-                    "molecule": mol,
-                    "energy": FloatData(value=mol.properties["energy"]),
-                })
-
-            mol.properties["energy_method"] = {
-                "method": xtb_input.level_of_theory.method.value,
-                "program": "xtb-python",
-                "solvent": xtb_input.level_of_theory.solvent.value if xtb_input.level_of_theory.use_solvent != CrestSolventEnum.NONE else None
-            }
-        node_runner.result = dataset
-        node_runner.molecule_list = molecules
-        return node_runner.succeed()
-
-    except Exception as e:
-        logger.error(f"xtb-python compute failed: {str(e)}")
-        return node_runner.fail(f"xtb-python compute failed: {str(e)}")
+    return await _run_xtb_list(xtb_input, xtb_input.optimize, **kwargs)
