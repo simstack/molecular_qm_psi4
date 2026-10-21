@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.22.0 (2026-10-21)
+
+### Features
+
+- Add picklable xTB worker for molecule energy/gradient calculation and optimization
+  ([`328f88c`](https://github.com/simstack/molecular_qm_psi4/commit/328f88c7c15d8f9b23f39fdd95ee84735449defb))
+
+Introduce `xtb_worker` module enabling energy and gradient computation with optional geometry
+  optimization using isolated processes. Configurable thread limits ensure compatibility with native
+  libraries.
+
+
 ## v0.21.0 (2026-10-21)
 
 ### Features
