@@ -94,11 +94,7 @@ RUN echo "uv git sources ${UV_GIT_SHAS}" \
  && cp pyproject.docker pyproject.toml \
  && uv pip install --system "setuptools>=80.9.0" . \
  && micromamba install -y -n base -c conda-forge --force-reinstall \
-    simple-dftd3 dftd3-python dftd4 dftd4-python gcp-correction \
- && python -c "from openbabel import openbabel, pybel; print('openbabel', openbabel.__file__)" \
- && python -c "import simstack, molecular_qm_models, molecular_qm_util, molecular_qm_psi4; print(simstack.__file__); print(molecular_qm_models.__file__); print(molecular_qm_util.__file__); print(molecular_qm_psi4.__file__)" \
- && python -c "from molecular_qm_psi4.nodes.pyscf_calculator import pyscf_calculator; import pyscf; print('pyscf node ok', pyscf.__version__)" \
- && python -c "from dftd3.library import get_api_version as d3v; from dftd4.library import get_api_version as d4v; import qcengine as qcng; print('dftd3 C-API', d3v()); print('dftd4 C-API', d4v()); print('s-dftd3', qcng.get_program('s-dftd3')); print('dftd4', qcng.get_program('dftd4'))"
+    simple-dftd3 dftd3-python dftd4 dftd4-python gcp-correction
 
 # pybel builds its format dict at import and unpacks every description on " -- ".
 # A plugin line without that separator raises ValueError and blocks import.
@@ -113,6 +109,12 @@ d = pybel._formatstodict(['xyz -- XYZ', 'brokenformat', 'mol -- MDL [Read-only]'
 assert d == {'xyz': 'XYZ', 'mol': 'MDL'}, d; \
 assert 'xyz' in pybel.informats; \
 print('pybel format filter', len(pybel.informats), 'inputs')"
+
+# Check imports only after applying the pybel compatibility patch.
+RUN python -c "from openbabel import openbabel, pybel; print('openbabel', openbabel.__file__)"
+RUN python -c "import simstack, molecular_qm_models, molecular_qm_util, molecular_qm_psi4; print(simstack.__file__); print(molecular_qm_models.__file__); print(molecular_qm_util.__file__); print(molecular_qm_psi4.__file__)"
+RUN python -c "from molecular_qm_psi4.nodes.pyscf_calculator import pyscf_calculator; import pyscf; print('pyscf node ok', pyscf.__version__)"
+RUN python -c "from dftd3.library import get_api_version as d3v; from dftd4.library import get_api_version as d4v; import qcengine as qcng; print('dftd3 C-API', d3v()); print('dftd4 C-API', d4v()); print('s-dftd3', qcng.get_program('s-dftd3')); print('dftd4', qcng.get_program('dftd4'))"
 
 WORKDIR /app
 # Host simstack bind-mounts the task workdir at /tmp/simstack (CONTAINER_WORKDIR).
