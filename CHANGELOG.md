@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.21.0 (2026-10-21)
+
+### Features
+
+- Add parallelized xTB batch execution and optimization
+  ([`6b2a136`](https://github.com/simstack/molecular_qm_psi4/commit/6b2a136b39bf76e3adf6e24bfd33feb34e7531d7))
+
+Introduce parallelized xTB batch processing methods using reusable process pools with Slurm task
+  allocation support. Includes energy and gradient computation, as well as optional geometry
+  optimization, to improve scalability and robustness for molecule collections.
+
+
 ## v0.20.0 (2026-10-19)
 
 ### Features
