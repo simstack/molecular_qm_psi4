@@ -23,7 +23,11 @@ from simstack.util.importer import import_class
 
 _THERMO_RESULTS = "thermo_results"
 _DDG_REFERENCE = "ddg_reference"
-_THERMO_BENCHMARK_REFERENCE = "thermo_benchmark_reference"
+_THERMO_REFERENCE_JOBS = (
+    "thermo_benchmark_reference",
+    "thermo_reference_benchmark2",
+)
+_THERMO_REFERENCE_LABEL = " and ".join(_THERMO_REFERENCE_JOBS)
 _SKIPPED_OUTPUTS = {"FileStack", "FileList", "FileListModel"}
 
 
@@ -120,7 +124,7 @@ async def delta_g_table(date_string: StringData, **kwargs) -> SimstackResult:
 async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
     """
     Replace the ddg_reference pandas table from completed
-    thermo_benchmark_reference jobs in every project.
+    thermo_benchmark_reference and thermo_reference_benchmark2 jobs in every project.
 
     Each row of that node's output table becomes one row. The first two
     columns are the root job's custom name and project name. An empty
@@ -129,7 +133,7 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
     table row plus any scalar outputs of the root.
 
     SimstackResult:
-        table (SimpleTable): Rows from completed thermo_benchmark_reference jobs.
+        table (SimpleTable): Rows from completed reference benchmark jobs.
         pandas_table (PandasModel): Pandas table ddg_reference. An existing
             table with that name is replaced.
     """
@@ -140,7 +144,7 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
         raise ValueError("date_string is required")
     try:
         node_runner.info(
-            f"Building {_DDG_REFERENCE} from completed {_THERMO_BENCHMARK_REFERENCE} jobs ({date_string.value})"
+            f"Building {_DDG_REFERENCE} from completed {_THERMO_REFERENCE_LABEL} jobs ({date_string.value})"
         )
         stored_projects = await context.db.find(Project)
         if stored_projects is None:
@@ -158,20 +162,20 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
             project_names[str(project.id)] = project_name.strip()
         node_runner.info(
             "Scanning completed "
-            f"{_THERMO_BENCHMARK_REFERENCE} jobs in projects: "
+            f"{_THERMO_REFERENCE_LABEL} jobs in projects: "
             + ", ".join(project_names[key] for key in project_names)
         )
 
         collection = context.db.collection(NodeRegistry)
         raw_jobs = await collection.find(
             {
-                "name": _THERMO_BENCHMARK_REFERENCE,
+                "name": {"$in": list(_THERMO_REFERENCE_JOBS)},
                 "status": TaskStatus.COMPLETED.value,
             }
         ).to_list(length=None)
         if raw_jobs is None:
             raise ValueError(
-                f"query for completed {_THERMO_BENCHMARK_REFERENCE} jobs returned no list"
+                f"query for completed {_THERMO_REFERENCE_LABEL} jobs returned no list"
             )
         jobs = []
         for raw_job in raw_jobs:
@@ -179,7 +183,7 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
             if isinstance(project_value, str):
                 if not ObjectId.is_valid(project_value):
                     raise ValueError(
-                        f"{_THERMO_BENCHMARK_REFERENCE} {raw_job.get('_id')} "
+                        f"{raw_job.get('name')} {raw_job.get('_id')} "
                         f"project {project_value} is not an id"
                     )
                 raw_job["project"] = ObjectId(project_value)
@@ -187,7 +191,7 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
                 raw_job["project"] = ObjectId(str(project_value))
             jobs.append(NodeRegistry.model_validate_doc(raw_job))
         node_runner.info(
-            f"Found {len(jobs)} completed {_THERMO_BENCHMARK_REFERENCE} jobs "
+            f"Found {len(jobs)} completed {_THERMO_REFERENCE_LABEL} jobs "
             f"across {len(project_names)} projects"
         )
 
@@ -198,12 +202,12 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
         for job in jobs:
             if job.project is None:
                 raise ValueError(
-                    f"{_THERMO_BENCHMARK_REFERENCE} {job.id} has no project"
+                    f"{job.name} {job.id} has no project"
                 )
             project_key = str(job.project)
             if project_key not in project_names:
                 raise ValueError(
-                    f"{_THERMO_BENCHMARK_REFERENCE} {job.id} project {project_key} is not a stored project"
+                    f"{job.name} {job.id} project {project_key} is not a stored project"
                 )
             jobs_per_project[project_names[project_key]] += 1
 
@@ -217,14 +221,14 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
                     model_cls = model_classes[mapping]
                     if model_cls is None:
                         raise ValueError(
-                            f"{_THERMO_BENCHMARK_REFERENCE} {job.id} input {mapping} could not be imported"
+                            f"{job.name} {job.id} input {mapping} could not be imported"
                         )
                     loaded = await context.db.find_one(
                         model_cls, model_cls.id == ref.reference
                     )
                     if loaded is None:
                         raise ValueError(
-                            f"{_THERMO_BENCHMARK_REFERENCE} {job.id} input {ref.reference} is missing"
+                            f"{job.name} {job.id} input {ref.reference} is missing"
                         )
                     molecule = getattr(loaded, "molecule", None)
                     if isinstance(molecule, ObjectId):
@@ -241,7 +245,7 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
                         break
                 if smiles is None:
                     raise ValueError(
-                        f"{_THERMO_BENCHMARK_REFERENCE} {job.id} has no custom name and no SMILES"
+                        f"{job.name} {job.id} has no custom name and no SMILES"
                     )
                 custom_name = smiles
             else:
@@ -256,7 +260,7 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
                 model_cls = model_classes[mapping]
                 if model_cls is None:
                     raise ValueError(
-                        f"{_THERMO_BENCHMARK_REFERENCE} {job.id} output {mapping} could not be imported"
+                        f"{job.name} {job.id} output {mapping} could not be imported"
                     )
                 if model_cls.__name__ in _SKIPPED_OUTPUTS:
                     continue
@@ -265,7 +269,7 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
                 )
                 if loaded is None:
                     raise ValueError(
-                        f"{_THERMO_BENCHMARK_REFERENCE} {job.id} output {ref.variable_name} {ref.reference} is missing"
+                        f"{job.name} {job.id} output {ref.variable_name} {ref.reference} is missing"
                     )
                 if isinstance(loaded, SimpleTable):
                     output_tables.append((ref.variable_name, loaded))
@@ -274,7 +278,7 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
                 ):
                     if ref.variable_name in scalars:
                         raise ValueError(
-                            f"{_THERMO_BENCHMARK_REFERENCE} {job.id} repeats output {ref.variable_name}"
+                            f"{job.name} {job.id} repeats output {ref.variable_name}"
                         )
                     scalars[ref.variable_name] = loaded.value
                 elif isinstance(loaded, Model):
@@ -288,16 +292,16 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
                             key = f"{ref.variable_name}.{field_name}"
                             if key in scalars:
                                 raise ValueError(
-                                    f"{_THERMO_BENCHMARK_REFERENCE} {job.id} repeats column {key}"
+                                    f"{job.name} {job.id} repeats column {key}"
                                 )
                             scalars[key] = value
                 else:
                     raise ValueError(
-                        f"{_THERMO_BENCHMARK_REFERENCE} {job.id} output {ref.variable_name} is {type(loaded)}"
+                        f"{job.name} {job.id} output {ref.variable_name} is {type(loaded)}"
                     )
             if not output_tables and not scalars:
                 raise ValueError(
-                    f"{_THERMO_BENCHMARK_REFERENCE} {job.id} has no output data"
+                    f"{job.name} {job.id} has no output data"
                 )
             job_rows = []
             if output_tables:
@@ -306,7 +310,7 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
                     for table_row in loaded.row:
                         if not isinstance(table_row, dict):
                             raise ValueError(
-                                f"{_THERMO_BENCHMARK_REFERENCE} {job.id} table {variable_name} has a non-dict row"
+                                f"{job.name} {job.id} table {variable_name} has a non-dict row"
                             )
                         record = {
                             "custom_name": custom_name,
@@ -319,7 +323,7 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
                                 key = f"{variable_name}.{column}"
                             if key in record or key in scalars:
                                 raise ValueError(
-                                    f"{_THERMO_BENCHMARK_REFERENCE} {job.id} repeats column {key}"
+                                    f"{job.name} {job.id} repeats column {key}"
                                 )
                             if column == "name":
                                 record[key] = custom_name
@@ -328,7 +332,7 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
                         for key, value in scalars.items():
                             if key in record:
                                 raise ValueError(
-                                    f"{_THERMO_BENCHMARK_REFERENCE} {job.id} repeats column {key}"
+                                    f"{job.name} {job.id} repeats column {key}"
                                 )
                             record[key] = value
                         job_rows.append(record)
@@ -340,7 +344,7 @@ async def ddg_reference(date_string: StringData, **kwargs) -> SimstackResult:
                 for key, value in scalars.items():
                     if key in record:
                         raise ValueError(
-                            f"{_THERMO_BENCHMARK_REFERENCE} {job.id} repeats column {key}"
+                            f"{job.name} {job.id} repeats column {key}"
                         )
                     record[key] = value
                 job_rows.append(record)
