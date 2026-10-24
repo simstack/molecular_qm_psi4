@@ -26,7 +26,7 @@ from simstack.core.node_runner import NodeRunner
 logger = logging.getLogger(__name__)
 
 _COMPARE_PARENTS = ("compare_conformers", "compare_energy")
-_REFERENCE_PARENT = "thermo_benchmark_reference"
+_REFERENCE_PARENTS = ("thermo_benchmark_reference", "compare_conformers_reference")
 _COMPARE_CALCULATORS = (".psi4_calculator", ".pyscf_calculator")
 _REFERENCE_CALCULATORS = (".pyscf_reference_calculator",)
 _RESULT_NAMES = ("pyscf_result", "psi4_result", "qm_result")
@@ -45,7 +45,7 @@ def _temperature_parent_kind(name, call_path):
     for label in labels:
         if label in _COMPARE_PARENTS:
             kind = "compare"
-        elif label == _REFERENCE_PARENT:
+        elif label in _REFERENCE_PARENTS:
             kind = "reference"
         else:
             continue
@@ -54,7 +54,8 @@ def _temperature_parent_kind(name, call_path):
     if len(kinds) != 1:
         raise ValueError(
             f"parent name {name!r} call_path {call_path!r} must be "
-            "compare_conformers, compare_energy, or thermo_benchmark_reference"
+            "compare_conformers, compare_energy, thermo_benchmark_reference, "
+            "or compare_conformers_reference"
         )
     return kinds[0]
 
@@ -194,10 +195,12 @@ async def temperature_analysis(
     """
     Recompute thermochemistry at each requested temperature from saved wavefunctions.
 
-    The parent UUID is either a ``compare_conformers`` / ``compare_energy`` job
-    or a ``thermo_benchmark_reference`` job. A compare job has exactly two
-    calculator children. A reference job has one ``pyscf_reference_calculator``
-    pair for each basis set, functional, and dispersion correction. ``mol1``
+    The parent UUID is either a ``compare_conformers`` / ``compare_energy`` job,
+    a ``thermo_benchmark_reference`` job, or a ``compare_conformers_reference``
+    job. A compare job has exactly two calculator children. A reference job has
+    one ``pyscf_reference_calculator`` pair for each basis set, functional, and
+    dispersion correction. ``compare_conformers_reference`` is that same pair
+    for one method, with custom names ``ref-mol1`` and ``ref-mol2``. ``mol1``
     and ``mol2`` come from a custom name ending in ``-mol1`` or ``-mol2``.
     When those suffixes were overwritten, the two calculators in a method are
     ordered by creation time. Optimizer children are left out. Each pair is

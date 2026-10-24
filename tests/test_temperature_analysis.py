@@ -20,6 +20,13 @@ def test_parent_kind_accepts_compare_and_reference_jobs():
         _temperature_parent_kind(None, ".workflow.thermo_benchmark_reference")
         == "reference"
     )
+    assert (
+        _temperature_parent_kind(
+            "compare_conformers_reference",
+            ".thermo_reference_benchmark2.compare_conformers_reference",
+        )
+        == "reference"
+    )
 
 
 def test_parent_kind_rejects_unknown_or_mixed_jobs():
@@ -366,6 +373,58 @@ async def test_compare_job_still_uses_its_two_calculator_children(monkeypatch):
     assert [custom_name for _energy, _temp, custom_name in calls] == [
         "298.15mol0",
         "298.15mol1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compare_conformers_reference_uses_its_reference_calculators(monkeypatch):
+    parent = SimpleNamespace(
+        id="656e6f6e656e6f6e656e6f6e",
+        name="compare_conformers_reference",
+        call_path=".thermo_reference_benchmark2.compare_conformers_reference",
+    )
+    specs = [
+        (
+            ".thermo_reference_benchmark2.compare_conformers_reference.pyscf_thermochemistry",
+            "thermo-mol1",
+            9.0,
+            _qm_input("def2-TZVP", "wB97X-V", "D4"),
+            False,
+        ),
+        (
+            ".thermo_reference_benchmark2.compare_conformers_reference.pyscf_reference_calculator",
+            "ref-mol2",
+            3.02,
+            _qm_input("def2-TZVP", "wB97X-V", "D4"),
+            True,
+        ),
+        (
+            ".thermo_reference_benchmark2.compare_conformers_reference.pyscf_reference_calculator",
+            "ref-mol1",
+            3.0,
+            _qm_input("def2-TZVP", "wB97X-V", "D4"),
+            True,
+        ),
+        (
+            ".thermo_reference_benchmark2.compare_conformers_reference.pyscf_thermochemistry",
+            "thermo-mol2",
+            9.5,
+            _qm_input("def2-TZVP", "wB97X-V", "D4"),
+            False,
+        ),
+    ]
+    result, calls = await _run(monkeypatch, parent, specs, [298.15])
+    assert result.status == "COMPLETED"
+    assert result.table.name == "Thermo Benchmark Reference by Temperature"
+    assert len(result.table.row) == 1
+    assert result.table.row[0]["basis_set"] == "def2-TZVP"
+    assert result.table.row[0]["functional"] == "wB97X-V"
+    assert result.table.row[0]["dispersion_correction"] == "D4"
+    assert result.table.row[0]["name"] == "boat-chair"
+    assert result.table.row[0]["DDG"] == _kcal_per_mol_from_hartree(3.02 - 3.0)
+    assert [custom_name for _energy, _temp, custom_name in calls] == [
+        "def2-TZVP-wB97X-V-D4-298.15-mol1",
+        "def2-TZVP-wB97X-V-D4-298.15-mol2",
     ]
 
 
