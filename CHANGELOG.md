@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v0.23.0 (2026-10-24)
+
+### Features
+
+- Accept compare_conformers_reference in temperature analysis
+  ([`bd45408`](https://github.com/simstack/molecular_qm_psi4/commit/bd45408f88d67b6a5ca0dfde32af16a83456c904))
+
+Temperature analysis can recompute thermochemistry from a compare_conformers_reference parent the
+  same way it does for thermo_benchmark_reference.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+### Refactoring
+
+- Generalize reference job processing for multiple benchmarks
+  ([`a2b9f28`](https://github.com/simstack/molecular_qm_psi4/commit/a2b9f283bd26c5e04f9927f6dfab673a33ec67d1))
+
+Standardized handling of `thermo_benchmark_reference` and `thermo_reference_benchmark2` jobs by
+  introducing `_THERMO_REFERENCE_JOBS` and `_THERMO_REFERENCE_LABEL`. Updated logs, queries, and
+  error messages for clarity and extensibility.
+
+
 ## v0.22.0 (2026-10-21)
 
 ### Features
