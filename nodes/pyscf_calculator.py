@@ -1608,6 +1608,9 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
 
     SimstackResult:
         qm_result (QMResult): Parsed result from the PySCF calculation.
+        hessian (FileStack): Numeric NPZ archive of the Cartesian Hessian in
+            Hartree/Bohr^2, its geometry in Angstrom and isotope-average masses
+            in amu, returned when frequencies are requested. No pickle required.
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
             were computed. Frequency jobs run as a child ``pyscf_hessian_orchestrator`` node.
             Optimization runs as a child ``pyscf_optimization`` node and is reused
@@ -1880,6 +1883,15 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                     node_runner.info(
                         f"Lowest imaginary-mode optimization energy is {best_energy:.12f} Ha"
                     )
+
+            if qm_input.frequencies:
+                from molecular_qm_psi4.util.hessian_artifact import write_hessian_archive
+                archive = write_hessian_archive(payload, Path('hessian.npz'))
+                node_runner.hessian = FileStack.from_local_file(
+                    archive, in_memory=False, is_hashable=True, secure_source=True,
+                    task_id=str(kwargs.get('task_id') or node_runner.task_id),
+                )
+                qm_result.files.append(node_runner.hessian)
 
             node_runner.info("PySCF calculation finished successfully")
             node_runner.qm_result = qm_result

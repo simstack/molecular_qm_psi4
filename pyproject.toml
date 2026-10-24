@@ -9,6 +9,8 @@ authors = [
   { name = "Wolfgang Wenzel", email = "wolfgang.wenzel@kit.edu" }
 ]
 dependencies = [
+    "numpy>=1.26,<3",
+    "h5py>=3.11,<4",
     "molecular_qm_models",
     "molecular_qm_util",
     "molecular_qm_dftb",
@@ -59,6 +61,8 @@ simstack = { git = "https://github.com/simstack/simstack.git", rev = "ww/new-fea
 
 [tool.uv]
 override-dependencies = [
+    "numpy>=1.26,<3",
+    "h5py>=3.11,<4",
     "molecular_qm_models @ git+https://github.com/simstack/molecular_qm_models.git",
     "molecular_qm_util @ git+https://github.com/simstack/molecular_qm_util.git",
     "molecular_qm_dftb @ git+https://github.com/simstack/molecular_qm_dftb.git",
