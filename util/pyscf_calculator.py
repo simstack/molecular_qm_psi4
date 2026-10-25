@@ -583,12 +583,14 @@ class PySCFCalculator:
                 logger.warning("Could not apply PySCF solvent %s/%s: %s", model, solvent, exc)
         return mf
 
-    def build_mean_field(self, mol=None):
+    def build_mean_field(self, mol=None, *, density_fit=True):
         from pyscf import dft, scf
 
         mol = mol if mol is not None else self.mol
         if mol is None:
             mol = self.build_molecule()
+        if density_fit is None:
+            raise ValueError("density_fit is required")
         method = method_name_from_qm_input(self.qm_input)
         if method in _UNSUPPORTED_METHODS:
             raise ValueError(f"PySCF does not implement QM method {method} in this node")
@@ -603,7 +605,8 @@ class PySCFCalculator:
             disp = pyscf_dispersion(self.qm_input)
             if disp:
                 mf.disp = disp
-        mf = self._apply_density_fit(mf)
+        if density_fit:
+            mf = self._apply_density_fit(mf)
         mf.conv_tol = scf_convergence_threshold(getattr(self.qm_input, "scf_accuracy", None))
         mf.max_cycle = int(self.qm_input.max_scf_iterations)
         mf.chkfile = "result.chk"
@@ -623,7 +626,8 @@ class PySCFCalculator:
                 f"-> conv_tol={mf.conv_tol}, "
                 f"grid_level={getattr(getattr(mf, 'grids', None), 'level', None)}, "
                 f"disp={getattr(mf, 'disp', None)}, "
-                f"open_shell={open_shell}"
+                f"open_shell={open_shell}, "
+                f"density_fit={bool(density_fit)}"
             )
         return mf
 
