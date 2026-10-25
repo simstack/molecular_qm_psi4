@@ -2,6 +2,23 @@
 
 <!-- version list -->
 
+## v0.28.0 (2026-10-25)
+
+### Bug Fixes
+
+- Skip the PySCF memory budget when optimization runs in child nodes
+  ([`5b51fde`](https://github.com/simstack/molecular_qm_psi4/commit/5b51fde8c005ab9f52390de09da500f8495bc5a2))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+### Features
+
+- Pre-optimize both thermo_benchmark2 conformers at the same time
+  ([`3de94d5`](https://github.com/simstack/molecular_qm_psi4/commit/3de94d5070921f461fb784888c19cbfea2e0c782))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.27.0 (2026-10-25)
 
 ### Features
