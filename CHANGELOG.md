@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.29.0 (2026-10-25)
+
+### Features
+
+- Add container-only density nodes and descriptors
+  ([`48f5435`](https://github.com/simstack/molecular_qm_psi4/commit/48f543517a30cb199bb9101d1d4d60b0956d7b14))
+
+Introduce PySCF-based utilities for container-exclusive density artifact generation and analytic
+  nuclear response descriptors. Includes file-backed artifact handling, density fitting, CPKS-based
+  response calculations, and Hessian archive generation. Comprehensive testing added for density
+  fitting.
+
+
 ## v0.28.0 (2026-10-25)
 
 ### Bug Fixes
