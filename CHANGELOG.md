@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.26.0 (2026-10-25)
+
+### Features
+
+- Compute NMR chemical shifts with PySCF GIAO
+  ([`6a4c541`](https://github.com/simstack/molecular_qm_psi4/commit/6a4c5411694876097342f8b7003fe86b4f903b9e))
+
+Chemical shifts are the reference shielding minus the sample shielding, at a shared HF or DFT level.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.25.0 (2026-10-25)
 
 
