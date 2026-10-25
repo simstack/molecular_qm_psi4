@@ -1614,7 +1614,12 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when frequencies
             were computed. Frequency jobs run as a child ``pyscf_hessian_orchestrator`` node.
             Optimization runs as a child ``pyscf_optimization`` node and is reused
-            when that Hessian fails. Frequencies below -50 cm^-1 are left by
+            when that Hessian fails. With optimization requested, this node does
+            not run PySCF and does not take a ``max_memory`` budget; the children
+            size that budget from their own containers. Single-point energies,
+            post-SCF methods, and the SCF before a frequency job without
+            optimization still run here and require a container larger than the
+            OS and Docker reserve. Frequencies below -50 cm^-1 are left by
             displacing 0.15 Angstrom along each imaginary mode, reoptimizing both
             signs, and recomputing the Hessian at the lowest result. That escape
             is repeated once. Remaining imaginary modes fail the node.
@@ -1635,15 +1640,29 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         pyscf_hessian_orchestrator
     """
     node_runner = kwargs.get("node_runner")
-    try:
-        budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
-    except ValueError as exc:
-        if node_runner is None:
-            raise
-        return node_runner.fail(str(exc))
-    if node_runner is not None:
-        node_runner.info(resource_log)
-    print(resource_log, file=sys.stderr, flush=True)
+    # Optimization and its Hessian run in child nodes. Those children read
+    # their own container limits. Requiring a positive max_memory here rejects
+    # a small parent (--memory 2g) before any child is submitted.
+    runs_local_pyscf = not bool(qm_input.optimization)
+    if runs_local_pyscf:
+        try:
+            budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
+        except ValueError as exc:
+            if node_runner is None:
+                raise
+            return node_runner.fail(str(exc))
+        if node_runner is not None:
+            node_runner.info(resource_log)
+        print(resource_log, file=sys.stderr, flush=True)
+    else:
+        resource_log = (
+            "pyscf_calculator is not running PySCF because optimization is requested. "
+            "pyscf_optimization and pyscf_hessian_orchestrator set max_memory from "
+            "their own containers."
+        )
+        if node_runner is not None:
+            node_runner.info(resource_log)
+        print(resource_log, file=sys.stderr, flush=True)
 
     try:
         import pyscf  # noqa: F401
@@ -1678,36 +1697,40 @@ async def pyscf_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             node_runner=node_runner,
             cycle_reporter=cycle_reporter,
         ):
-            calculator = PySCFCalculator(qm_input, node_runner=node_runner)
-            calculator.set_resources(budget_mb, num_threads)
-            mol = calculator.build_molecule(pyscf_result.output_path)
-            stdout_tee = None
-            if mol.stdout is not None and mol.stdout not in (sys.stdout, sys.stderr):
-                stdout_tee = _TeeStdout(mol.stdout, cycle_reporter)
-                mol.stdout = stdout_tee
-            mf = calculator.build_mean_field(mol)
-            if stdout_tee is not None:
-                mf.stdout = stdout_tee
-
             restart_path = None
             restart_payload = None
-            if getattr(qm_input, "restart_files", None):
-                for fs in qm_input.restart_files:
-                    if not _is_wavefunction_artifact(getattr(fs, "name", "")):
-                        continue
-                    try:
-                        downloaded = Path(fs.get(local_dir=Path(".")))
-                        if str(downloaded).endswith(".npy") or downloaded.name.endswith(".wfn.npy"):
-                            restart_payload = _load_payload(downloaded)
-                            node_runner.info(f"Loaded PySCF restart payload from {fs.name}")
-                        else:
-                            restart_path = downloaded
-                            calculator.apply_restart(mf, restart_path)
-                    except Exception as exc:
-                        node_runner.warning(f"Failed to load restart file {fs.name}: {exc}")
+            if runs_local_pyscf:
+                calculator = PySCFCalculator(qm_input, node_runner=node_runner)
+                calculator.set_resources(budget_mb, num_threads)
+                mol = calculator.build_molecule(pyscf_result.output_path)
+                stdout_tee = None
+                if mol.stdout is not None and mol.stdout not in (sys.stdout, sys.stderr):
+                    stdout_tee = _TeeStdout(mol.stdout, cycle_reporter)
+                    mol.stdout = stdout_tee
+                mf = calculator.build_mean_field(mol)
+                if stdout_tee is not None:
+                    mf.stdout = stdout_tee
+
+                if getattr(qm_input, "restart_files", None):
+                    for fs in qm_input.restart_files:
+                        if not _is_wavefunction_artifact(getattr(fs, "name", "")):
+                            continue
+                        try:
+                            downloaded = Path(fs.get(local_dir=Path(".")))
+                            if str(downloaded).endswith(".npy") or downloaded.name.endswith(".wfn.npy"):
+                                restart_payload = _load_payload(downloaded)
+                                node_runner.info(f"Loaded PySCF restart payload from {fs.name}")
+                            else:
+                                restart_path = downloaded
+                                calculator.apply_restart(mf, restart_path)
+                        except Exception as exc:
+                            node_runner.warning(f"Failed to load restart file {fs.name}: {exc}")
 
             method = method_name_from_qm_input(qm_input)
-            node_runner.info(f"Starting PySCF calculation with method {method}")
+            if runs_local_pyscf:
+                node_runner.info(f"Starting PySCF calculation with method {method}")
+            else:
+                node_runner.info(f"Dispatching PySCF optimization with method {method}")
             freq_info = None
             hessian = None
             need_external_hessian = False
