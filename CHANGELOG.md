@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.27.0 (2026-10-25)
+
+### Features
+
+- Add PySCF density and density response nodes
+  ([`accd2fa`](https://github.com/simstack/molecular_qm_psi4/commit/accd2fa13f033846a69d87cf2369bff2ec0c343b))
+
+Introduce container-only nodes for computing fixed-geometry density artifacts and relaxed analytic
+  density responses using PySCF. Includes file-backed artifact storage for wavefunction data,
+  gradients, and response coefficients.
+
+
 ## v0.26.0 (2026-10-25)
 
 ### Features
