@@ -50,6 +50,9 @@ async def pyscf_reference_calculator(qm_input: QMInput, **kwargs) -> SimstackRes
 
     SimstackResult:
         qm_result (QMResult): Parsed result from the PySCF calculation.
+        hessian (FileStack): Numeric NPZ archive of the Cartesian Hessian in
+            Hartree/Bohr^2, masses in amu, and geometry in Angstrom when frequencies
+            were computed.
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1) when
             frequencies were computed.
         vibration_molden (FileStack): Normal modes in Molden format
@@ -62,6 +65,8 @@ async def pyscf_reference_calculator(qm_input: QMInput, **kwargs) -> SimstackRes
         ZPE_tot (FloatData): Total zero-point energy (Hartree) when thermochemistry was computed.
         E_tot (FloatData): Total thermal internal energy (Hartree) when thermochemistry was computed.
         S_tot (FloatData): Total entropy (kcal/mol/K) when thermochemistry was computed.
+
+    Called Nodes:
     """
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
@@ -204,6 +209,15 @@ async def pyscf_reference_calculator(qm_input: QMInput, **kwargs) -> SimstackRes
                 thermodynamics_table = run_pyscf_thermo(
                     mf, freq_info, 298.15, 101325.0, node_runner
                 )
+
+            if qm_input.frequencies:
+                from molecular_qm_psi4.util.hessian_artifact import write_hessian_archive
+                archive = write_hessian_archive(payload, Path('hessian.npz'))
+                node_runner.hessian = FileStack.from_local_file(
+                    archive, in_memory=False, is_hashable=True, secure_source=True,
+                    task_id=str(kwargs.get('task_id') or node_runner.task_id),
+                )
+                qm_result.files.append(node_runner.hessian)
 
             saved = _write_payload(payload, Path(_WFN_NPY_NAME))
             wfn_fs = FileStack.from_local_file(
