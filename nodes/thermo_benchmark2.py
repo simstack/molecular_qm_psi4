@@ -1,3 +1,4 @@
+import asyncio
 from typing import List
 
 from odmantic import EmbeddedModel, Field, Model
@@ -100,7 +101,9 @@ async def thermo_benchmark2(
 
     ``qm_input`` is only the shared template (conformer 1, charge, solvent).
     The optimization protocol is ``preopt``, passed to ``multistep_optimizer``.
-    ``preopt.engine`` must be PySCF. Each ``compare_conformers`` call also uses
+    ``preopt.engine`` must be PySCF. The two conformers are pre-optimized at
+    the same time. If either pre-optimization fails, the node fails and the
+    method comparisons are not started. Each ``compare_conformers`` call also uses
     PySCF and starts from the optimizer geometries, so method rows are
     independent. ``methods`` is one list of basis-set and functional pairs.
     Each pair also carries SCF accuracy, DFT grid, and optimization accuracy.
@@ -202,40 +205,59 @@ async def thermo_benchmark2(
             raise ValueError("formula is empty for QMInput.molecule")
         pair_name = pair_name.strip()
 
-    optimized = []
+    prepared_opts = []
     for index, current in enumerate((qm_input.molecule, molecule), start=1):
         current_input = QMInput.from_model(qm_input)
         current_input.molecule = current
         current_input.optimization = True
         current_input.frequencies = False
         current_input.field_name = "QMInput"
-        current_input = await _persist_qm_input(current_input, node_runner)
-        kwargs["custom_name"] = f"opt-mol{index}"
-        opt_result = await multistep_optimizer(current_input, preopt, **kwargs)
+        prepared_opts.append(
+            (index, await _persist_qm_input(current_input, node_runner))
+        )
+
+    async def run_preopt(index, current_input):
+        child_kwargs = dict(kwargs)
+        child_kwargs["custom_name"] = f"opt-mol{index}"
+        try:
+            opt_result = await multistep_optimizer(current_input, preopt, **child_kwargs)
+        except Exception as exc:
+            return f"multistep_optimizer failed for molecule {index}: {exc}"
         qm_result, error = _child_qm_result(opt_result)
         if error:
-            return node_runner.fail(
-                f"multistep_optimizer failed for molecule {index}: {error}"
-            )
+            return f"multistep_optimizer failed for molecule {index}: {error}"
         if not isinstance(qm_result, QMResult):
-            return node_runner.fail(
-                f"multistep_optimizer returned no QMResult for molecule {index}"
-            )
+            return f"multistep_optimizer returned no QMResult for molecule {index}"
         structure = getattr(qm_result, "final_structure", None)
         atoms = getattr(structure, "atoms", None) if structure is not None else None
         if not atoms:
-            return node_runner.fail(
+            return (
                 f"multistep_optimizer returned no final_structure for molecule {index}"
             )
         optimized_molecule = Molecule.from_molecule(structure)
         optimized_molecule.field_name = pair_name
-        optimized.append(
-            await _persist_step_molecule(
-                optimized_molecule,
-                node_runner,
-                f"opt-mol{index}",
-            )
+        return await _persist_step_molecule(
+            optimized_molecule, node_runner, f"opt-mol{index}"
         )
+
+    opt_outcomes = await asyncio.gather(
+        *(run_preopt(index, current_input) for index, current_input in prepared_opts),
+        return_exceptions=True,
+    )
+    opt_errors = []
+    optimized = [None, None]
+    for index, outcome in enumerate(opt_outcomes, start=1):
+        if isinstance(outcome, Exception):
+            opt_errors.append(
+                f"multistep_optimizer failed for molecule {index}: {outcome}"
+            )
+            continue
+        if isinstance(outcome, str):
+            opt_errors.append(outcome)
+            continue
+        optimized[index - 1] = outcome
+    if opt_errors:
+        return node_runner.fail("; ".join(opt_errors))
     mol1, mol2 = optimized
 
     table = SimpleTable(name="Thermo Benchmark 2")

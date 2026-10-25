@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import inspect
 import sys
@@ -179,6 +180,72 @@ async def test_thermo_benchmark2_accepts_default_conformer_field_names(monkeypat
             node_runner=SimpleNamespace(info=lambda *args, **kwargs: None),
         )
     assert names == ["C", "C"]
+
+
+@pytest.mark.asyncio
+async def test_thermo_benchmark2_preoptimizes_both_molecules_together(monkeypatch):
+    atoms = [Atom(element="C", x=0.0, y=0.0, z=0.0)]
+    first = Molecule(field_name="pair", smiles="C", formula="C", atoms=atoms)
+    second = Molecule(field_name="pair", smiles="C", formula="C", atoms=list(atoms))
+    calls = []
+    started = {"count": 0, "release": asyncio.Event()}
+
+    async def initialize():
+        return None
+
+    async def persist_input(opts, node_runner, db=None):
+        return opts
+
+    async def persist_molecule(molecule, node_runner, step_name, db=None):
+        return molecule
+
+    async def optimizer(qm_input, preopt, **kwargs):
+        calls.append(kwargs["custom_name"])
+        started["count"] += 1
+        if started["count"] < 2:
+            await asyncio.wait_for(started["release"].wait(), timeout=2)
+        else:
+            started["release"].set()
+        if kwargs["custom_name"] == "opt-mol1":
+            raise RuntimeError("mol1 preopt failed")
+        return QMResult(final_structure=Molecule.from_molecule(qm_input.molecule))
+
+    async def compare(arg, **kwargs):
+        raise AssertionError("compare_conformers should not run")
+
+    class Runner:
+        def __init__(self):
+            self.error_message = None
+
+        def info(self, *args, **kwargs):
+            return None
+
+        def fail(self, message):
+            self.error_message = message
+            return self
+
+    monkeypatch.setattr(
+        thermo_benchmark2_node,
+        "context",
+        SimpleNamespace(initialize=initialize, db=SimpleNamespace(save=initialize)),
+    )
+    monkeypatch.setattr(thermo_benchmark2_node, "_persist_qm_input", persist_input)
+    monkeypatch.setattr(thermo_benchmark2_node, "_persist_step_molecule", persist_molecule)
+    monkeypatch.setattr(thermo_benchmark2_node, "multistep_optimizer", optimizer)
+    monkeypatch.setattr(thermo_benchmark2_node, "compare_conformers", compare)
+    step = _method_step()
+    runner = Runner()
+    result = await inspect.unwrap(thermo_benchmark2)(
+        QMInput(molecule=first, basis_set=step.basis_set, functional=step.functional),
+        PreOptimizerInput(engine=QMEngine.PYSCF),
+        second,
+        ThermoBenchmark2MethodList(elements=[step]),
+        node_runner=runner,
+    )
+    assert set(calls) == {"opt-mol1", "opt-mol2"}
+    assert result is runner
+    assert "mol1 preopt failed" in runner.error_message
+    assert "molecule 2" not in runner.error_message
 
 
 @pytest.mark.asyncio
