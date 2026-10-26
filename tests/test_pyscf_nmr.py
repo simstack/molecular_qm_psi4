@@ -5,13 +5,14 @@ import sys
 import numpy as np
 import pytest
 
+from molecular_qm_models import Molecule
 from molecular_qm_psi4.util.pyscf_calculator import PySCFCalculator
 from molecular_qm_psi4.util.pyscf_nmr import (
     assert_nmr_single_point,
-    assert_same_nmr_level,
     chemical_shift_tables,
     element_symbol,
     giao_shielding,
+    methyl_reference_bond,
 )
 
 
@@ -92,10 +93,18 @@ def test_chemical_shift_is_reference_minus_shielding():
     assert reference_table.row[1]["Atom"] == 2
 
 
-def test_chemical_shift_requires_a_reference_nucleus_for_every_element():
+def test_chemical_shift_is_absent_without_a_methyl_reference():
     tensor = np.zeros((1, 3, 3))
-    with pytest.raises(ValueError, match="no reference nucleus for element O"):
-        chemical_shift_tables(["O"], tensor, ["H"], tensor, {"H": 1})
+    hydrogen = np.diag([31.0, 31.0, 34.0])
+    shifts, _ = chemical_shift_tables(
+        ["O"],
+        tensor,
+        ["H"],
+        hydrogen.reshape(1, 3, 3),
+        {"H": 1},
+    )
+    assert shifts.row[0]["Chemical shift (ppm)"] is None
+    assert shifts.row[0]["Reference shielding (ppm)"] is None
 
 
 def test_reference_atom_must_match_the_element_and_be_one_based():
@@ -107,19 +116,62 @@ def test_reference_atom_must_match_the_element_and_be_one_based():
         chemical_shift_tables(["H"], one, ["O", "H"], two, {"H": 1})
 
 
-def test_nmr_level_must_match_and_job_must_be_a_conventional_single_point():
-    sample = _level()
-    reference = _level(basis="def2-TZVP")
-    with pytest.raises(ValueError, match="same level of theory"):
-        assert_same_nmr_level(sample, reference)
-    assert_same_nmr_level(sample, _level())
+def methyl_fluoride(bond):
+    molecule = Molecule.from_sites(
+        ["C", "F", "H", "H", "H"],
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.33],
+            [1.02, 0.0, -0.36],
+            [-0.51, 0.883, -0.36],
+            [-0.51, -0.883, -0.36],
+        ],
+    )
+    molecule.properties = {"selections": [{"type": "bond", "atoms": bond}]}
+    return molecule
+
+
+def test_methyl_reference_bond_accepts_one_methyl_ch_selection():
+    assert methyl_reference_bond(methyl_fluoride([1, 3])) == {"H": 3, "C": 1}
+    molecule = methyl_fluoride([3, 1])
+    molecule.properties["selections"].insert(0, {"type": "angle", "atoms": [3, 1, 2]})
+    assert methyl_reference_bond(molecule) == {"H": 3, "C": 1}
+
+
+def test_methyl_reference_bond_rejects_a_selection_that_is_not_methyl_ch():
+    with pytest.raises(ValueError, match="not a methyl hydrogen"):
+        methyl_reference_bond(methyl_fluoride([1, 2]))
+    methane = Molecule.from_sites(
+        ["C", "H", "H", "H", "H"],
+        [
+            [0.0, 0.0, 0.0],
+            [1.09, 0.0, 0.0],
+            [-0.36, 1.03, 0.0],
+            [-0.36, -0.51, 0.89],
+            [-0.36, -0.51, -0.89],
+        ],
+    )
+    methane.properties = {"selections": [{"type": "bond", "atoms": [1, 2]}]}
+    with pytest.raises(ValueError, match="not a methyl hydrogen"):
+        methyl_reference_bond(methane)
+    two_bonds = methyl_fluoride([1, 3])
+    two_bonds.properties["selections"].append({"type": "bond", "atoms": [1, 4]})
+    with pytest.raises(ValueError, match="exactly one bond selection"):
+        methyl_reference_bond(two_bonds)
+    empty = methyl_fluoride([1, 3])
+    empty.properties = {"selections": []}
+    with pytest.raises(ValueError, match="exactly one bond selection"):
+        methyl_reference_bond(empty)
+
+
+def test_nmr_job_must_be_a_conventional_single_point():
     with pytest.raises(ValueError, match="solvent"):
         assert_nmr_single_point(_level(solvent=True), "sample")
     with pytest.raises(ValueError, match="aux basis"):
         assert_nmr_single_point(_level(aux="def2-universal-jkfit"), "sample")
     with pytest.raises(ValueError, match="HF and DFT"):
         assert_nmr_single_point(_level(method="MP2"), "sample")
-    assert_nmr_single_point(sample, "sample")
+    assert_nmr_single_point(_level(), "sample")
 
 
 def test_build_mean_field_can_skip_density_fitting():

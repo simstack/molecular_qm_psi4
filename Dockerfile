@@ -70,7 +70,10 @@ ENV PATH="/opt/conda/bin:/root/.local/bin:$PATH"
 
 # PySCF on pip so it does not fight Psi4's conda libxc. geometric is already
 # installed from conda-forge for geometry optimization.
-RUN uv pip install --system pyscf pyscf-dispersion pyscf-properties \
+# PyPI pyscf-properties 0.1.0 crashes GIAO NMR in the CPHF solver
+# (reshape of the response vector). The repository copy accepts that vector.
+RUN uv pip install --system pyscf pyscf-dispersion \
+    "pyscf-properties @ git+https://github.com/pyscf/properties.git" \
  && python -c "import pyscf; from pyscf.geomopt.geometric_solver import optimize; from pyscf.prop import nmr; print('pyscf', pyscf.__version__)"
 
 # Capability package only. Build context must be this repo (or the

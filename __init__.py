@@ -13,7 +13,6 @@ from molecular_qm_psi4.nodes.pyscf_calculator import (
     pyscf_thermochemistry,
 )
 from molecular_qm_psi4.nodes.pyscf_reference_calculator import pyscf_reference_calculator
-from molecular_qm_psi4.models.pyscf_nmr import NMRReferenceNuclei
 from molecular_qm_psi4.nodes.pyscf_nmr import pyscf_nmr
 from molecular_qm_psi4.nodes.pyscf_hessian import (
     pyscf_hessian,
@@ -106,7 +105,6 @@ except ImportError:  # pragma: no cover
 __all__ = [
     "pyscf_calculator",
     "pyscf_nmr",
-    "NMRReferenceNuclei",
     "pyscf_reference_calculator",
     "pyscf_optimization",
     "pyscf_thermochemistry",

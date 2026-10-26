@@ -1,15 +1,14 @@
 import sys
 from pathlib import Path
 
-from molecular_qm_models import QMInput
-from molecular_qm_psi4.models.pyscf_nmr import NMRReferenceNuclei
+from molecular_qm_models import Molecule, QMInput
 from molecular_qm_psi4.nodes.pyscf_calculator import _report_pyscf_failure, redirect_pyscf_logs
 from molecular_qm_psi4.util.pyscf_calculator import PySCFCalculator
 from molecular_qm_psi4.util.pyscf_nmr import (
     assert_nmr_single_point,
-    assert_same_nmr_level,
     chemical_shift_tables,
     giao_shielding,
+    methyl_reference_bond,
 )
 from molecular_qm_psi4.util.pyscf_result import PySCFResult
 from molecular_qm_psi4.util.qm_engine import pyscf_resources_from_slurm
@@ -32,20 +31,15 @@ def _scf_and_shielding(qm_input, output_path, chk_path, budget_mb, threads, node
 
 
 @node
-async def pyscf_nmr(
-    sample: QMInput,
-    reference: QMInput,
-    reference_nuclei: NMRReferenceNuclei,
-    **kwargs,
-) -> SimstackResult:
+async def pyscf_nmr(qm_input: QMInput, reference: Molecule, **kwargs) -> SimstackResult:
     """
     GIAO NMR chemical shifts from PySCF.
 
-    The sample and the reference molecule are single-point HF or DFT calculations
-    at the same basis, functional, grid, dispersion, and SCF threshold. Density
-    fitting and solvent are not applied: the shielding tensors use conventional
-    GIAO integrals. For each element, ``reference_nuclei.atom_index`` selects the
-    1-based reference atom. The chemical shift is σ_ref − σ, in ppm.
+    One QMInput supplies the sample geometry and the level of theory. The
+    reference molecule is evaluated with those same settings. Its properties
+    must contain exactly one bond selection, and that bond must join a methyl
+    hydrogen to its methyl carbon. The chemical shift of H and C is σ_ref − σ,
+    in ppm. Other elements keep their isotropic shielding.
 
     SimstackResult:
         qm_result (QMResult): Sample energy and structure.
@@ -56,8 +50,8 @@ async def pyscf_nmr(
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
         raise ValueError("node_runner is required")
-    if reference_nuclei is None:
-        raise ValueError("reference nuclei are required")
+    if reference is None:
+        raise ValueError("reference molecule is required")
     try:
         budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
     except ValueError as exc:
@@ -73,13 +67,17 @@ async def pyscf_nmr(
     sample_out = Path("sample_pyscf.out")
     reference_out = Path("reference_pyscf.out")
     try:
-        assert_nmr_single_point(sample, "sample")
-        assert_nmr_single_point(reference, "reference")
-        assert_same_nmr_level(sample, reference)
-        with redirect_pyscf_logs(getattr(sample, "print_level", 1), node_runner=node_runner):
+        assert_nmr_single_point(qm_input, "sample")
+        reference_atoms = methyl_reference_bond(reference)
+        reference_input = qm_input.model_copy(update={"molecule": reference})
+        node_runner.info(
+            "NMR reference bond is methyl H "
+            f"{reference_atoms['H']} and methyl C {reference_atoms['C']}"
+        )
+        with redirect_pyscf_logs(getattr(qm_input, "print_level", 1), node_runner=node_runner):
             node_runner.info("Starting PySCF GIAO NMR for the sample")
             _, sample_mf, sample_energy, sample_elements, sample_tensor = _scf_and_shielding(
-                sample,
+                qm_input,
                 sample_out,
                 Path("sample.chk"),
                 budget_mb,
@@ -88,7 +86,7 @@ async def pyscf_nmr(
             )
             node_runner.info("Starting PySCF GIAO NMR for the reference")
             reference_mol, _, _, reference_elements, reference_tensor = _scf_and_shielding(
-                reference,
+                reference_input,
                 reference_out,
                 Path("reference.chk"),
                 budget_mb,
@@ -100,21 +98,23 @@ async def pyscf_nmr(
             sample_tensor,
             reference_elements,
             reference_tensor,
-            reference_nuclei.atom_index,
+            reference_atoms,
         )
         for row in shifts.row:
+            shift = row["Chemical shift (ppm)"]
+            shift_text = "none" if shift is None else f"{shift:.4f} ppm"
             node_runner.info(
                 f"NMR {row['Element']}{row['Atom']}: "
                 f"shielding={row['Isotropic shielding (ppm)']:.4f} ppm, "
-                f"shift={row['Chemical shift (ppm)']:.4f} ppm"
+                f"shift={shift_text}"
             )
-        pyscf_result = PySCFResult(sample)
+        pyscf_result = PySCFResult(qm_input)
         node_runner.qm_result = pyscf_result.parse_mf(
             sample_energy, sample_mf.mol, sample_mf, node_runner, optimized=False
         )
         node_runner.nmr_shifts = shifts
         node_runner.nmr_reference = reference_table
-        formula = getattr(getattr(sample, "molecule", None), "formula", None)
+        formula = getattr(getattr(qm_input, "molecule", None), "formula", None)
         current_name = kwargs.get("custom_name", None)
         if (current_name is None or current_name == "") and formula:
             node_runner.custom_name = formula

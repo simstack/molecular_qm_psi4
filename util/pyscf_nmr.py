@@ -1,16 +1,24 @@
 import numpy as np
 from simstack.models.simple_table import SimpleTable, SimpleTableColumnType
 
-from molecular_qm_psi4.util.psi4_calculator import _named_value, scf_convergence_threshold
-from molecular_qm_psi4.util.pyscf_calculator import (
-    method_name_from_qm_input,
-    pyscf_basis_name,
-    pyscf_dispersion,
-    pyscf_functional_name,
-    pyscf_grid_level,
-)
+from molecular_qm_psi4.util.psi4_calculator import _named_value
+from molecular_qm_psi4.util.pyscf_calculator import method_name_from_qm_input
 
 _NMR_METHODS = {"HF", "DFT"}
+_BOND_SCALE = 1.25
+_COVALENT_RADII_ANGSTROM = {
+    "H": 0.31,
+    "C": 0.76,
+    "N": 0.71,
+    "O": 0.66,
+    "F": 0.57,
+    "SI": 1.11,
+    "P": 1.07,
+    "S": 1.05,
+    "CL": 1.02,
+    "BR": 1.20,
+    "I": 1.39,
+}
 _TENSOR_COMPONENTS = (
     ("xx", 0, 0),
     ("xy", 0, 1),
@@ -31,36 +39,6 @@ def element_symbol(symbol) -> str:
     if not text or any(character.isdigit() for character in text):
         raise ValueError(f"element symbol must be the bare element, got {symbol!r}")
     return text.upper()
-
-
-def nmr_level(qm_input) -> dict:
-    """Settings that change the GIAO shielding Hamiltonian."""
-    if qm_input is None:
-        raise ValueError("qm_input is required")
-    method = method_name_from_qm_input(qm_input)
-    level = {
-        "method": method,
-        "basis": pyscf_basis_name(qm_input),
-        "scf_threshold": scf_convergence_threshold(getattr(qm_input, "scf_accuracy", None)),
-    }
-    if method == "DFT":
-        level["functional"] = pyscf_functional_name(qm_input)
-        level["grid"] = pyscf_grid_level(getattr(qm_input, "grid_type", None))
-        level["dispersion"] = pyscf_dispersion(qm_input)
-    return level
-
-
-def assert_same_nmr_level(sample, reference):
-    left = nmr_level(sample)
-    right = nmr_level(reference)
-    mismatched = [key for key in left if left[key] != right[key]]
-    if mismatched:
-        details = ", ".join(
-            f"{key} sample={left[key]!r} reference={right[key]!r}" for key in mismatched
-        )
-        raise ValueError(
-            "NMR sample and reference must use the same level of theory: " + details
-        )
 
 
 def assert_nmr_single_point(qm_input, label):
@@ -157,6 +135,101 @@ def _as_shielding(shielding, n_atoms, label):
     return tensor
 
 
+def _covalent_radius(symbol) -> float:
+    element = element_symbol(symbol)
+    radius = _COVALENT_RADII_ANGSTROM.get(element)
+    if radius is None:
+        raise ValueError(f"no covalent radius for element {element}")
+    return radius
+
+
+def _bond_neighbors(atoms):
+    if not atoms:
+        raise ValueError("reference molecule has no atoms")
+    neighbors = [set() for _ in atoms]
+    for i, left in enumerate(atoms):
+        for j in range(i + 1, len(atoms)):
+            right = atoms[j]
+            cutoff = _BOND_SCALE * (_covalent_radius(left.element) + _covalent_radius(right.element))
+            if left.distance_to(right) <= cutoff:
+                neighbors[i].add(j)
+                neighbors[j].add(i)
+    return neighbors
+
+
+def methyl_reference_bond(molecule) -> dict:
+    """1-based methyl hydrogen and methyl carbon from the one bond selection.
+
+    The molecule viewer stores selection atom numbers starting at 1. The bond
+    must join a hydrogen to the carbon that carries exactly three hydrogens.
+    """
+    if molecule is None:
+        raise ValueError("reference molecule is required")
+    atoms = getattr(molecule, "atoms", None)
+    if not atoms:
+        raise ValueError("reference molecule has no atoms")
+    properties = getattr(molecule, "properties", None)
+    if not isinstance(properties, dict):
+        raise ValueError("reference molecule selections are required")
+    selections = properties.get("selections")
+    if not isinstance(selections, list):
+        raise ValueError("reference molecule selections of type bond are required")
+    bonds = []
+    for selection in selections:
+        if not isinstance(selection, dict) or selection.get("type") != "bond":
+            continue
+        bonds.append(selection)
+    if len(bonds) != 1:
+        raise ValueError(
+            "reference molecule needs exactly one bond selection of a methyl hydrogen "
+            f"and its methyl carbon, found {len(bonds)}"
+        )
+    pair = bonds[0].get("atoms")
+    if (
+        not isinstance(pair, (list, tuple))
+        or len(pair) != 2
+        or pair[0] == pair[1]
+        or any(isinstance(index, bool) or not isinstance(index, int) for index in pair)
+    ):
+        raise ValueError(
+            "bond selection must list two distinct 1-based atom numbers, "
+            f"got {pair!r}"
+        )
+    if any(index < 1 or index > len(atoms) for index in pair):
+        raise ValueError(
+            f"bond selection atoms {pair[0]} and {pair[1]} are outside "
+            f"1..{len(atoms)}"
+        )
+    neighbors = _bond_neighbors(atoms)
+    elements = [element_symbol(atom.element) for atom in atoms]
+    methyl_carbons = []
+    for index, element in enumerate(elements):
+        if element != "C":
+            continue
+        hydrogen_neighbors = [other for other in neighbors[index] if elements[other] == "H"]
+        other_neighbors = [other for other in neighbors[index] if elements[other] != "H"]
+        if len(hydrogen_neighbors) == 3 and len(other_neighbors) == 1:
+            methyl_carbons.append(index)
+    methyl_hydrogens = {}
+    for index, element in enumerate(elements):
+        if element != "H" or len(neighbors[index]) != 1:
+            continue
+        carbon = next(iter(neighbors[index]))
+        if carbon in methyl_carbons:
+            methyl_hydrogens[index] = carbon
+    left, right = pair[0] - 1, pair[1] - 1
+    if left in methyl_hydrogens and methyl_hydrogens[left] == right:
+        hydrogen, carbon = left, right
+    elif right in methyl_hydrogens and methyl_hydrogens[right] == left:
+        hydrogen, carbon = right, left
+    else:
+        raise ValueError(
+            f"bond selection atoms {pair[0]} ({elements[left]}) and "
+            f"{pair[1]} ({elements[right]}) are not a methyl hydrogen and its methyl carbon"
+        )
+    return {"H": hydrogen + 1, "C": carbon + 1}
+
+
 def reference_nuclei(reference_atoms) -> dict:
     if reference_atoms is None:
         raise ValueError("reference nuclei are required")
@@ -225,12 +298,6 @@ def chemical_shift_tables(elements, shielding, reference_elements, reference_shi
         reference_rows.append(
             {"Element": symbol, "Atom": index, "Isotropic shielding (ppm)": sigma}
         )
-    uncovered = sorted({element for element in sample_elements if element not in sigma_ref})
-    if uncovered:
-        raise ValueError(
-            "no reference nucleus for element " + ", ".join(uncovered)
-        )
-
     shifts = SimpleTable(name="NMR chemical shifts")
     for column, kind in (
         ("Atom", SimpleTableColumnType.NUMBER),
@@ -244,12 +311,13 @@ def chemical_shift_tables(elements, shielding, reference_elements, reference_shi
         shifts.add_column(component, SimpleTableColumnType.NUMBER)
     for atom_number, (element, tensor) in enumerate(zip(sample_elements, sample), start=1):
         sigma = _isotropic_ppm(tensor)
+        reference_sigma = sigma_ref.get(element)
         row = {
             "Atom": atom_number,
             "Element": element,
             "Isotropic shielding (ppm)": sigma,
-            "Reference shielding (ppm)": sigma_ref[element],
-            "Chemical shift (ppm)": sigma_ref[element] - sigma,
+            "Reference shielding (ppm)": reference_sigma,
+            "Chemical shift (ppm)": None if reference_sigma is None else reference_sigma - sigma,
         }
         for component, row_index, column_index in _TENSOR_COMPONENTS:
             row[component] = float(tensor[row_index, column_index])
