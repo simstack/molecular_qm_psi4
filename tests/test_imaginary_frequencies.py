@@ -133,11 +133,16 @@ def test_stationary_check_uses_geometric_per_atom_norms():
     payload = {"atom": [("H", 0.0, 0.0, 0.0)]}
     qm_input = _qm_input(molecule.atoms)
     qm_input.molecule = molecule
-    # Component RMS is 1.85e-4, under Medium convergence_grms 3e-4.
-    # The per-atom norm is 3.2e-4, which is the statistic geomeTRIC compares.
+    # Medium convergence_grms is 3e-4. The check allows twice that, 6e-4.
+    # 3.2e-4 is past the optimizer limit and inside the Hessian window.
+    assert_hessian_geometry_stationary(
+        _MeanField([[3.2e-4, 0.0, 0.0]]), _Mol(), qm_input, payload, node_runner
+    )
+    # Component RMS of this gradient is 4.04e-4, under the 6e-4 check.
+    # The per-atom norm is 7e-4, which is the statistic geomeTRIC compares.
     with pytest.raises(ValueError, match="not stationary"):
         assert_hessian_geometry_stationary(
-            _MeanField([[3.2e-4, 0.0, 0.0]]), _Mol(), qm_input, payload, node_runner
+            _MeanField([[7.0e-4, 0.0, 0.0]]), _Mol(), qm_input, payload, node_runner
         )
 
 

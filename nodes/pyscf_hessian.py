@@ -70,6 +70,9 @@ from simstack.models import FileStack
 # At most three cloud VMs. The orchestrator does not run an atom batch itself.
 _MAX_HESSIAN_VMS = 3
 _HEARTBEAT_INTERVAL_S = 60.0
+# Recomputed gradient after a tighter SCF can sit just past the optimizer
+# limits. Accept up to twice convergence_grms and convergence_gmax.
+_STATIONARITY_GRADIENT_FACTOR = 2.0
 
 def hessian_failure_text(exc):
     """Text for ``node_runner.fail`` that keeps the exception which actually failed.
@@ -517,7 +520,7 @@ def max_cartesian_displacement_angstrom(molecule, payload):
 
 
 def assert_hessian_geometry_stationary(mf, mol, qm_input, payload, node_runner):
-    """Require the Hessian geometry to meet the optimizer gradient threshold.
+    """Require the Hessian geometry to stay near the optimizer gradient threshold.
 
     geomeTRIC converges on the RMS and the maximum of the per-atom gradient
     norms, in Hartree/Bohr. The compared gradient includes dispersion and
@@ -528,7 +531,11 @@ def assert_hessian_geometry_stationary(mf, mol, qm_input, payload, node_runner):
     looser than the optimization energy threshold, the leftover density error
     shows up as a gradient above ``convergence_grms`` on a geometry geomeTRIC
     already accepted. The density is tightened to ``convergence_energy`` before
-    that gradient is judged.
+    that gradient is judged. The recomputed gradient may then sit just outside
+    the optimizer limits, so this check allows twice ``convergence_grms`` and
+    twice ``convergence_gmax``.
+
+    ``pyscf_hessian_init`` calls this before any atom or partial child starts.
     """
     if np is None:
         raise ValueError("numpy is required")
@@ -551,9 +558,11 @@ def assert_hessian_geometry_stationary(mf, mol, qm_input, payload, node_runner):
         raise ValueError(
             "convergence_grms, convergence_gmax, and convergence_energy are required"
         )
-    limit = float(limit)
-    gmax_limit = float(gmax_limit)
+    optimizer_grms = float(limit)
+    optimizer_gmax = float(gmax_limit)
     energy_limit = float(energy_limit)
+    check_grms = optimizer_grms * _STATIONARITY_GRADIENT_FACTOR
+    check_gmax = optimizer_gmax * _STATIONARITY_GRADIENT_FACTOR
     conv_tol = getattr(mf, "conv_tol", None)
     if conv_tol is None:
         raise ValueError("mean field conv_tol is required")
@@ -588,15 +597,23 @@ def assert_hessian_geometry_stationary(mf, mol, qm_input, payload, node_runner):
     gmax = float(np.max(per_atom))
     node_runner.info(
         f"Hessian geometry gradient RMS {grms:.6e} Ha/Bohr "
-        f"(convergence_grms {limit:.6e}) max {gmax:.6e} Ha/Bohr "
-        f"(convergence_gmax {gmax_limit:.6e})"
+        f"(convergence_grms {optimizer_grms:.6e}, check {check_grms:.6e}) "
+        f"max {gmax:.6e} Ha/Bohr "
+        f"(convergence_gmax {optimizer_gmax:.6e}, check {check_gmax:.6e})"
     )
-    if not grms < limit or not gmax < gmax_limit:
-        raise ValueError(
-            f"Hessian geometry is not stationary: gradient RMS {grms:.6e} Ha/Bohr "
-            f"is outside convergence_grms {limit:.6e} Ha/Bohr or max {gmax:.6e} Ha/Bohr "
-            f"is outside convergence_gmax {gmax_limit:.6e} Ha/Bohr"
+    failures = []
+    if not grms < check_grms:
+        failures.append(
+            f"gradient RMS {grms:.6e} Ha/Bohr is outside "
+            f"{_STATIONARITY_GRADIENT_FACTOR:g} x convergence_grms {optimizer_grms:.6e} Ha/Bohr"
         )
+    if not gmax < check_gmax:
+        failures.append(
+            f"max {gmax:.6e} Ha/Bohr is outside "
+            f"{_STATIONARITY_GRADIENT_FACTOR:g} x convergence_gmax {optimizer_gmax:.6e} Ha/Bohr"
+        )
+    if failures:
+        raise ValueError("Hessian geometry is not stationary: " + "; ".join(failures))
 
 
 def equilibrium_mean_field(qm_input, mol, payload, node_runner, budget_mb, num_threads):
@@ -1209,12 +1226,15 @@ async def pyscf_hessian_init(opts: PySCFHessianStageInput, **kwargs) -> Simstack
     """
     Build the equilibrium mean field and return the Hessian launch plan.
 
-    The mean field lives only in this task. It records the density-fitted
-    memory peak, chooses how many atoms fit in ``SlurmParameters.time``, and
-    lists the aux-shell groups. It does not run CPHF or partial contractions.
-    That time value is the atom-batch budget: one atom that exceeds it raises
-    ValueError before any batch VM starts. This process returns as soon as the
-    plan is stored.
+    The mean field lives only in this task. It checks that the geometry
+    gradient is within twice the optimizer ``convergence_grms`` and
+    ``convergence_gmax`` limits, records the density-fitted memory peak,
+    chooses how many atoms fit in ``SlurmParameters.time``, and lists the
+    aux-shell groups. A geometry outside that gradient window fails here,
+    before any atom or partial child is submitted. It does not run CPHF or
+    partial contractions. That time value is the atom-batch budget: one atom
+    that exceeds it raises ValueError before any batch VM starts. This process
+    returns as soon as the plan is stored.
 
     SimstackResult:
         plan (PySCFHessianPlan): Atom batch size, aux shell groups, and whether
@@ -1254,6 +1274,9 @@ async def pyscf_hessian_init(opts: PySCFHessianStageInput, **kwargs) -> Simstack
         ):
             mf = equilibrium_mean_field(
                 opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
+            )
+            assert_hessian_geometry_stationary(
+                mf, mol, opts.qm_input, payload, node_runner
             )
         await record_hessian_memory(
             node_runner,
@@ -1324,10 +1347,11 @@ async def pyscf_hessian_orchestrator(
     Wait on the cloud Hessian children without holding the mean field.
 
     Calls ``pyscf_hessian_init``, then up to three ``pyscf_hessian_for_atoms_ext``
-    workers, then up to three ``pyscf_hessian_partial_ext`` workers. Stored atoms
-    and partial groups are skipped. Assembly is a separate ``pyscf_hessian``
-    task. This process does not build a mean field and does not load the
-    contribution arrays.
+    workers, then up to three ``pyscf_hessian_partial_ext`` workers. Init
+    rejects a nonstationary geometry before those workers are submitted.
+    Stored atoms and partial groups are skipped. Assembly is a separate
+    ``pyscf_hessian`` task. This process does not build a mean field and does
+    not load the contribution arrays.
 
     Contributions are stored under this task's id.
 
@@ -1772,7 +1796,6 @@ async def pyscf_hessian(opts: PySCFHessianStageInput, **kwargs) -> SimstackResul
         de2 = de2 + hess_nuc(mol)
         if hessian_obj.base.do_disp():
             de2 = de2 + hessian_obj.get_dispersion()
-        assert_hessian_geometry_stationary(mf, mol, opts.qm_input, payload, node_runner)
         from pyscf.hessian import thermo as pyscf_thermo
 
         freq_info = pyscf_thermo.harmonic_analysis(mol, de2)
