@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.29.1 (2026-10-26)
+
+### Bug Fixes
+
+- Check Hessian stationarity before launching children
+  ([`cf3d0f9`](https://github.com/simstack/molecular_qm_psi4/commit/cf3d0f9e7dc3c50f129ae779d54eb5e8c3a08963))
+
+Reject a nonstationary geometry in pyscf_hessian_init, and allow twice the optimizer gradient limits
+  so a tighter SCF does not fail a converged optimization.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.29.0 (2026-10-25)
 
 ### Features
