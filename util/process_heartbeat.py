@@ -51,6 +51,124 @@ def _mongo_collection():
         return None
 
 
+# Still executing. A terminal status is left alone so this write cannot
+# replace completed, failed, or timeout after the node has already finished.
+_INFLIGHT_STATUSES = (
+    "submitted",
+    "retrieved",
+    "running",
+    "slurm_queued",
+    "slurm_running",
+)
+_PARENT_DEATH = False
+
+
+def _note_parent_death(signum, frame):
+    global _PARENT_DEATH
+    _PARENT_DEATH = True
+
+
+def _arm_parent_death_notice(parent_pid):
+    """Wake this process as soon as its parent dies.
+
+    Docker tears the container down shortly after PID 1 exits. The poll in
+    ``run_heartbeat`` can sleep for seconds, which loses the race. On Linux the
+    parent-death signal interrupts that wait. ``stop`` sends SIGTERM, which is
+    not this signal, so a normal finish does not mark the task failed.
+    """
+    global _PARENT_DEATH
+    _PARENT_DEATH = False
+    if sys.platform != "linux":
+        return None
+    import ctypes
+    import selectors
+    import signal
+
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    if libc.prctl(1, signal.SIGUSR1) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err), "PR_SET_PDEATHSIG")
+    signal.signal(signal.SIGUSR1, _note_parent_death)
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    os.set_blocking(write_fd, False)
+    signal.set_wakeup_fd(write_fd)
+    selector = selectors.DefaultSelector()
+    selector.register(read_fd, selectors.EVENT_READ)
+    if not _parent_alive(parent_pid):
+        _PARENT_DEATH = True
+    return selector, read_fd, write_fd
+
+
+def _fail_orphaned_task(task_id, parent_pid):
+    task = "" if task_id is None else str(task_id).strip()
+    if not task:
+        return
+    from bson.errors import InvalidId
+    from bson import ObjectId
+
+    try:
+        oid = ObjectId(task)
+    except InvalidId as exc:
+        raise ValueError(f"task_id must be an ObjectId, got {task_id!r}") from exc
+    uri = os.environ.get("SIMSTACK_DB_CONNECTION_STRING")
+    db_name = os.environ.get("SIMSTACK_DB_DATABASE")
+    if not uri or not db_name:
+        raise ValueError(
+            "SIMSTACK_DB_CONNECTION_STRING and SIMSTACK_DB_DATABASE are required "
+            f"to mark task {task} failed"
+        )
+    from pymongo import MongoClient
+
+    message = (
+        f"Calculation process {parent_pid} exited while the heartbeat was still running. "
+        "The process was killed without a Python traceback, typically by the out-of-memory killer."
+    )
+    client = MongoClient(
+        uri,
+        serverSelectionTimeoutMS=2000,
+        connectTimeoutMS=2000,
+        socketTimeoutMS=2000,
+    )
+    try:
+        database = client[db_name]
+        result = database["node_registry"].update_one(
+            {"_id": oid, "status": {"$in": list(_INFLIGHT_STATUSES)}},
+            {
+                "$set": {
+                    "status": "failed",
+                    "error": message,
+                    "message": message,
+                    "completed_at": datetime.now(),
+                }
+            },
+        )
+        if result.matched_count != 1:
+            print(
+                f"heartbeat left task {task} unchanged (matched {result.matched_count})",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        database["logs"].insert_one(
+            {
+                "timestamp": datetime.now(),
+                "level": "ERROR",
+                "logger_name": "pyscf_heartbeat",
+                "message": f"{message} task_id: {task}",
+                "module": "process_heartbeat",
+                "function": "run_heartbeat",
+                "line": 0,
+                "task_id": task,
+                "resource": None,
+                "thread_name": "heartbeat",
+                "process_name": "heartbeat",
+            }
+        )
+    finally:
+        client.close()
+
+
 def _insert_mongo(collection, message: str, task_id: str):
     if collection is None:
         return
@@ -205,27 +323,56 @@ def run_heartbeat(path, prefix, interval_s, parent_pid, task_id="", extra_paths=
     extras = [Path(p) for p in (extra_paths or []) if p]
     if progress_path is not None and not str(progress_path).strip():
         raise ValueError("progress_path is required")
-    collection = _mongo_collection()
-    start = time.time()
-    while _parent_alive(parent):
-        elapsed = time.time() - start
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        message = f"{prefix} elapsed={elapsed:.0f}s parent_pid={parent}"
-        if progress_path is not None:
-            message += " " + block_progress_clause(_read_block_progress(progress_path), time.time())
-        message += " still running"
-        line = f"{stamp} {message}\n"
-        _append_line(path, line)
-        for extra in extras:
-            try:
-                _append_line(extra, line)
-            except OSError:
-                pass
-        print(line, end="", file=sys.stderr, flush=True)
-        _insert_mongo(collection, f"{stamp} {message}", task_id or "")
-        deadline = time.time() + interval
-        while time.time() < deadline and _parent_alive(parent):
-            time.sleep(min(5.0, max(deadline - time.time(), 0.05)))
+    notice = _arm_parent_death_notice(parent)
+    try:
+        collection = _mongo_collection()
+        start = time.time()
+        try:
+            while not _PARENT_DEATH and _parent_alive(parent):
+                elapsed = time.time() - start
+                stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                message = f"{prefix} elapsed={elapsed:.0f}s parent_pid={parent}"
+                if progress_path is not None:
+                    message += " " + block_progress_clause(
+                        _read_block_progress(progress_path), time.time()
+                    )
+                message += " still running"
+                line = f"{stamp} {message}\n"
+                _append_line(path, line)
+                for extra in extras:
+                    try:
+                        _append_line(extra, line)
+                    except OSError:
+                        pass
+                print(line, end="", file=sys.stderr, flush=True)
+                _insert_mongo(collection, f"{stamp} {message}", task_id or "")
+                deadline = time.time() + interval
+                while time.time() < deadline and not _PARENT_DEATH and _parent_alive(parent):
+                    remaining = deadline - time.time()
+                    if notice is None:
+                        time.sleep(min(5.0, max(remaining, 0.05)))
+                        continue
+                    selector, read_fd, _write_fd = notice
+                    if selector.select(timeout=min(5.0, max(remaining, 0.0))):
+                        try:
+                            os.read(read_fd, 65536)
+                        except BlockingIOError:
+                            pass
+            else:
+                # The loop ends only when the parent is gone. stop() kills this
+                # process with SIGTERM before the parent exits, so it never gets here.
+                _fail_orphaned_task(task_id, parent)
+        except Exception:
+            raise
+    finally:
+        if notice is not None:
+            import signal
+
+            signal.set_wakeup_fd(-1)
+            selector, read_fd, write_fd = notice
+            selector.close()
+            os.close(read_fd)
+            os.close(write_fd)
 
 
 class ProcessHeartbeat:
