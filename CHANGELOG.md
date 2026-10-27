@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.30.0 (2026-10-27)
+
+### Features
+
+- Enhance process heartbeat for parent death detection and task orphaning
+  ([`7f132a7`](https://github.com/simstack/molecular_qm_psi4/commit/7f132a7a6a9b711e1c1f531046195cbada9ebd9a))
+
+Add parent death notice support to improve task handling in Dockerized environments. Introduce
+  `_arm_parent_death_notice` for Linux-based parent monitoring, `_fail_orphaned_task` for marking
+  orphaned tasks as failed, and update logging and MongoDB functionality for improved error
+  reporting.
+
+- Recover timed-out PySCF jobs from the last snapshot
+  ([`470b517`](https://github.com/simstack/molecular_qm_psi4/commit/470b517924db6ad263cc42af49d0a6b9882126c6))
+
+Restart matching timeout nodes with pyscf_reference_calculator and copy the child result back onto
+  the original registry entry.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.29.1 (2026-10-26)
 
 ### Bug Fixes
