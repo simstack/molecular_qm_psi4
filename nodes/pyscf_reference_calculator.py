@@ -6,7 +6,9 @@ from molecular_qm_psi4.nodes.pyscf_calculator import (
     OptimizationSnapshotter,
     PySCFOptCycleReporter,
     _TeeStdout,
+    _is_wavefunction_artifact,
     _kernel_hessian,
+    _load_payload,
     _optimize,
     _payload_from_mf,
     _report_pyscf_failure,
@@ -73,8 +75,6 @@ async def pyscf_reference_calculator(qm_input: QMInput, **kwargs) -> SimstackRes
         raise ValueError("node_runner is required")
     if qm_input is None or qm_input.molecule is None:
         raise ValueError("qm_input with a molecule is required")
-    if getattr(qm_input, "restart_files", None):
-        raise ValueError("pyscf_reference_calculator does not load restart files")
 
     try:
         budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
@@ -128,6 +128,29 @@ async def pyscf_reference_calculator(qm_input: QMInput, **kwargs) -> SimstackRes
             mf = calculator.build_mean_field(mol)
             if stdout_tee is not None:
                 mf.stdout = stdout_tee
+
+            restart_payload = None
+            if qm_input.restart_files:
+                for restart_file in qm_input.restart_files:
+                    restart_name = getattr(restart_file, "name", "")
+                    if not _is_wavefunction_artifact(restart_name):
+                        continue
+                    downloaded = Path(restart_file.get(local_dir=Path(".")))
+                    if str(downloaded).endswith(".npy") or downloaded.name.endswith(".wfn.npy"):
+                        restart_payload = _load_payload(downloaded)
+                        node_runner.info(f"Loaded PySCF restart payload from {restart_name}")
+                    else:
+                        calculator.apply_restart(mf, downloaded)
+            if restart_payload is not None:
+                if not isinstance(restart_payload, dict):
+                    raise ValueError("wavefunction payload must be a dict")
+                for key in ("mo_coeff", "mo_occ", "mo_energy"):
+                    if restart_payload.get(key) is None:
+                        raise ValueError(f"wavefunction payload is missing {key}")
+                mf.mo_coeff = restart_payload["mo_coeff"]
+                mf.mo_occ = restart_payload["mo_occ"]
+                mf.mo_energy = restart_payload["mo_energy"]
+                node_runner.info("Applied restart orbitals as the SCF guess")
 
             if qm_input.frequencies:
                 hess_info = df_hessian_memory(mf, mol, calculator.max_memory)

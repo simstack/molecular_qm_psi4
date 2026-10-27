@@ -615,6 +615,7 @@ class OptimizationSnapshotter:
         self.seen = set()
         self.geom_iter = 0
         self.last_payload = None
+        self.last_orbitals = None
         self.last_mol = None
         self.energy_history = []
         self.grad_history = []
@@ -781,6 +782,11 @@ class OptimizationSnapshotter:
         g_scanner = envs.get("g_scanner")
         mf = getattr(g_scanner, "base", None) if g_scanner is not None else None
         payload = _payload_from_mf(mf, mol, energy)
+        orbitals = self.last_orbitals
+        if payload is not None and isinstance(orbitals, dict):
+            for key in ("mo_coeff", "mo_occ", "mo_energy"):
+                if payload.get(key) is None and orbitals.get(key) is not None:
+                    payload[key] = orbitals[key]
         self.last_payload = payload
         if _should_snapshot(self.geom_iter, self.interval, self.seen):
             self.seen.add(self.geom_iter)
@@ -1296,6 +1302,17 @@ def _optimize(mf, qm_input, snapshotter):
                 energy, grad = _apply_harmonic_to_gradient(energy, grad, mol, constraints)
             return energy, grad
         finally:
+            base = getattr(scanner, "base", None)
+            orbitals = {}
+            for key in ("mo_coeff", "mo_occ", "mo_energy"):
+                value = None if base is None else getattr(base, key, None)
+                if value is None:
+                    orbitals[key] = None
+                    continue
+                if np is None:
+                    raise ValueError("numpy is required to store optimization orbitals")
+                orbitals[key] = np.array(value, copy=True)
+            snapshotter.last_orbitals = orbitals
             wall_s = time.monotonic() - wall_start
             cpu_s = time.process_time() - cpu_start
             snapshotter._cancel_iter_timer()

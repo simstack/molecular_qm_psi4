@@ -13,6 +13,9 @@ from molecular_qm_psi4.nodes.pyscf_calculator import (
     pyscf_thermochemistry,
 )
 from molecular_qm_psi4.nodes.pyscf_reference_calculator import pyscf_reference_calculator
+from molecular_qm_psi4.nodes.recover_pyscf_reference_coordinator import (
+    recover_pyscf_reference_coordinator,
+)
 from molecular_qm_psi4.nodes.pyscf_nmr import pyscf_nmr
 from molecular_qm_psi4.nodes.pyscf_hessian import (
     pyscf_hessian,
@@ -106,6 +109,7 @@ __all__ = [
     "pyscf_calculator",
     "pyscf_nmr",
     "pyscf_reference_calculator",
+    "recover_pyscf_reference_coordinator",
     "pyscf_optimization",
     "pyscf_thermochemistry",
     "pyscf_hessian",
