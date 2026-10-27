@@ -1,3 +1,5 @@
+import asyncio
+
 from molecular_qm_models import MoleculeSnapshot, QMInput
 from molecular_qm_psi4.nodes.pyscf_reference_calculator import pyscf_reference_calculator
 from simstack.core.context import context
@@ -22,8 +24,10 @@ async def recover_pyscf_reference_coordinator(call_path: StringData, /, **kwargs
     with status timeout whose call path matches is recovered. The latest
     MoleculeSnapshot on that node, or on a direct child, supplies the geometry
     and wavefunction. ``pyscf_reference_calculator`` is started as a child of
-    the timed-out node. When that child completes, its results and status
-    replace the timed-out node's registry results and status.
+    the timed-out node. Matching jobs are recovered at the same time. When a
+    child completes, its results and status replace that timed-out node's
+    registry results and status. A failed child leaves its original node at
+    timeout. If any recovery fails, this node fails after the successes are written.
 
     Parameters:
         call_path (StringData): Call-path pattern. An empty value is rejected.
@@ -51,11 +55,11 @@ async def recover_pyscf_reference_coordinator(call_path: StringData, /, **kwargs
     if not matches:
         node_runner.info(f"No timeout nodes match call_path {pattern!r}")
         return node_runner.succeed()
-    node_runner.info(f"Found {len(matches)} timeout nodes matching {pattern!r}")
+    node_runner.info(
+        f"Recovering {len(matches)} timeout nodes matching {pattern!r} in parallel"
+    )
 
-    failures = []
-    recovered = []
-    for entry in matches:
+    async def recover_one(entry):
         try:
             if entry.call_path is None or not str(entry.call_path).strip():
                 raise ValueError(f"timed-out node {entry.id} has no call_path")
@@ -132,14 +136,23 @@ async def recover_pyscf_reference_coordinator(call_path: StringData, /, **kwargs
             original.populate_results_from_duplicate(recovery_entry)
             original.custom_name = custom_name
             await context.db.save(original)
-            recovered.append(str(entry.id))
             node_runner.info(
                 f"Substituted results of {recovery_entry.id} into {entry.id} "
                 f"with status {original.status}"
             )
+            return str(entry.id)
         except Exception as exc:
-            failures.append(f"{entry.id}: {exc}")
             node_runner.error(f"Recovery failed for {entry.id}: {exc}")
+            return exc
+
+    outcomes = await asyncio.gather(*(recover_one(entry) for entry in matches))
+    failures = []
+    recovered = []
+    for entry, outcome in zip(matches, outcomes):
+        if isinstance(outcome, Exception):
+            failures.append(f"{entry.id}: {outcome}")
+            continue
+        recovered.append(outcome)
 
     if failures:
         return node_runner.fail("; ".join(failures))
