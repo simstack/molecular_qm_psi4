@@ -144,13 +144,20 @@ async def pyscf_reference_calculator(qm_input: QMInput, **kwargs) -> SimstackRes
             if restart_payload is not None:
                 if not isinstance(restart_payload, dict):
                     raise ValueError("wavefunction payload must be a dict")
-                for key in ("mo_coeff", "mo_occ", "mo_energy"):
-                    if restart_payload.get(key) is None:
-                        raise ValueError(f"wavefunction payload is missing {key}")
-                mf.mo_coeff = restart_payload["mo_coeff"]
-                mf.mo_occ = restart_payload["mo_occ"]
-                mf.mo_energy = restart_payload["mo_energy"]
-                node_runner.info("Applied restart orbitals as the SCF guess")
+                orbital_keys = ("mo_coeff", "mo_occ", "mo_energy")
+                missing = [key for key in orbital_keys if restart_payload.get(key) is None]
+                if missing and len(missing) != len(orbital_keys):
+                    raise ValueError(f"wavefunction payload is missing {missing[0]}")
+                if missing:
+                    node_runner.info(
+                        "Wavefunction payload has no orbitals; "
+                        "continuing from the snapshot geometry"
+                    )
+                else:
+                    mf.mo_coeff = restart_payload["mo_coeff"]
+                    mf.mo_occ = restart_payload["mo_occ"]
+                    mf.mo_energy = restart_payload["mo_energy"]
+                    node_runner.info("Applied restart orbitals as the SCF guess")
 
             if qm_input.frequencies:
                 hess_info = df_hessian_memory(mf, mol, calculator.max_memory)
