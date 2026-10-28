@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.31.0 (2026-10-28)
+
+### Bug Fixes
+
+- Continue PySCF recovery when a snapshot has no orbitals
+  ([`9b9e992`](https://github.com/simstack/molecular_qm_psi4/commit/9b9e9926b6140a50959c55a2860bb4db87739ac2))
+
+Use the saved geometry for a fresh SCF when mo_coeff, mo_occ, and mo_energy were never stored.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+### Features
+
+- Recover timed-out PySCF jobs in parallel
+  ([`1f1574e`](https://github.com/simstack/molecular_qm_psi4/commit/1f1574ebe923c46a8e399a7a5df2e5a189420e18))
+
+Start every matching reference calculation at once and copy each result back as that child finishes.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.30.0 (2026-10-27)
 
 ### Features
