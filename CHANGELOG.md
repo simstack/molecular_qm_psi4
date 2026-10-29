@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.31.1 (2026-10-29)
+
+### Bug Fixes
+
+- Start PySCF recovery on a new cloud VM
+  ([`467e50a`](https://github.com/simstack/molecular_qm_psi4/commit/467e50a0c535975d11f3c09d98badebd72ccef8a))
+
+The recovery child stayed on the VM already running, so its slurm time was not the deadline that
+  fired.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.31.0 (2026-10-28)
 
 ### Bug Fixes
