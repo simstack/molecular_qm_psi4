@@ -24,7 +24,9 @@ async def recover_pyscf_reference_coordinator(call_path: StringData, /, **kwargs
     with status timeout whose call path matches is recovered. The latest
     MoleculeSnapshot on that node, or on a direct child, supplies the geometry
     and wavefunction. ``pyscf_reference_calculator`` is started as a child of
-    the timed-out node. Matching jobs are recovered at the same time. When a
+    the timed-out node, on its own cloud VM. The VM deadline is that child's
+    slurm time, measured from when the new VM starts. Matching jobs are
+    recovered at the same time. When a
     child completes, its results and status replace that timed-out node's
     registry results and status. A failed child leaves its original node at
     timeout. If any recovery fails, this node fails after the successes are written.
@@ -103,9 +105,15 @@ async def recover_pyscf_reference_coordinator(call_path: StringData, /, **kwargs
             child_parameters = entry.parameters.model_copy(deep=True)
             if child_parameters.slurm_parameters is None:
                 raise ValueError(f"timed-out node {entry.id} has no slurm_parameters")
+            recovery_time = child_parameters.slurm_parameters.time
+            if recovery_time is None or not str(recovery_time).strip():
+                raise ValueError(f"timed-out node {entry.id} has no slurm time")
             child_parameters.in_docker = True
             child_parameters.force_rerun = True
-            child_parameters.slurm_parameters.time = "4:00:00"
+            child_parameters.separate_cloud_vm = True
+            node_runner.info(
+                f"Recovering {entry.id} on a new cloud VM with slurm time {recovery_time}"
+            )
             await pyscf_reference_calculator(
                 recovery_input,
                 parent_id=entry.id,
