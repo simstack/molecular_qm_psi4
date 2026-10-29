@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.32.0 (2026-10-29)
+
+### Features
+
+- Evaluate NMR on a solvent-polarized density
+  ([`7815fcd`](https://github.com/simstack/molecular_qm_psi4/commit/7815fcd306b20aa12f3d20a001867d8e4690bb55))
+
+Optimize the sample and the TMS reference when optimization is set, then drop the solvent model
+  before the GIAO response.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.31.1 (2026-10-29)
 
 ### Bug Fixes
