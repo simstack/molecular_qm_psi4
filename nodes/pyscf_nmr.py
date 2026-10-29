@@ -2,7 +2,12 @@ import sys
 from pathlib import Path
 
 from molecular_qm_models import Molecule, QMInput
-from molecular_qm_psi4.nodes.pyscf_calculator import _report_pyscf_failure, redirect_pyscf_logs
+from molecular_qm_psi4.nodes.pyscf_calculator import (
+    _optimize,
+    _report_pyscf_failure,
+    redirect_pyscf_logs,
+)
+from molecular_qm_psi4.util.psi4_calculator import _named_value
 from molecular_qm_psi4.util.pyscf_calculator import PySCFCalculator
 from molecular_qm_psi4.util.pyscf_nmr import (
     assert_nmr_single_point,
@@ -17,15 +22,38 @@ from simstack.core.simstack_result import SimstackResult
 from simstack.models import FileStack
 
 
-def _scf_and_shielding(qm_input, output_path, chk_path, budget_mb, threads, node_runner):
+def _scf_and_shielding(qm_input, output_path, chk_path, budget_mb, threads, node_runner, label):
     calculator = PySCFCalculator(qm_input, node_runner=node_runner)
     calculator.set_resources(budget_mb, threads)
     mol = calculator.build_molecule(output_path)
     mf = calculator.build_mean_field(mol, density_fit=False)
     mf.chkfile = str(chk_path)
+    use_solvent = qm_input.use_solvent
+    if use_solvent and getattr(mf, "with_solvent", None) is None:
+        raise ValueError(f"{label} solvent model was not attached to the mean field")
+    if qm_input.optimization:
+        node_runner.info(f"Optimizing the {label} geometry before NMR")
+        mol = _optimize(mf, qm_input, None)
+        calculator.apply_max_memory(mol)
+        mf.reset(mol)
+        calculator.apply_max_memory(mol, mf)
+        if use_solvent and getattr(mf, "with_solvent", None) is None:
+            raise ValueError(f"{label} solvent model was dropped by the geometry optimization")
     energy = mf.kernel()
     if energy is None or not bool(getattr(mf, "converged", False)):
         raise ValueError(f"SCF did not converge for {output_path}")
+    if use_solvent:
+        if getattr(mf, "with_solvent", None) is None:
+            raise ValueError(f"{label} solvent model was not attached to the mean field")
+        solvent = qm_input.solvent.strip()
+        model = _named_value(qm_input.solvent_model, None)
+        if not model:
+            raise ValueError(f"{label} solvent model is required")
+        node_runner.info(
+            f"{label} GIAO shielding uses the {model} {solvent} density "
+            "without the solvent response"
+        )
+        mf.with_solvent = None
     elements = [mol.atom_pure_symbol(index) for index in range(mol.natm)]
     return mol, mf, float(energy), elements, giao_shielding(mf)
 
@@ -35,11 +63,14 @@ async def pyscf_nmr(qm_input: QMInput, reference: Molecule, **kwargs) -> Simstac
     """
     GIAO NMR chemical shifts from PySCF.
 
-    One QMInput supplies the sample geometry and the level of theory. The
-    reference molecule is evaluated with those same settings. Its properties
-    must contain exactly one bond selection, and that bond must join a methyl
-    hydrogen to its methyl carbon. The chemical shift of H and C is σ_ref − σ,
-    in ppm. Other elements keep their isotropic shielding.
+    One QMInput supplies the sample geometry and the level of theory. When
+    optimization is set, the sample and the reference molecule are optimized
+    before the shielding calculation. A solvent model polarizes that SCF
+    density; the GIAO response is then evaluated without the solvent model.
+    The reference molecule is evaluated with those same settings. Its
+    properties must contain exactly one bond selection, and that bond must
+    join a methyl hydrogen to its methyl carbon. The chemical shift of H and
+    C is σ_ref − σ, in ppm. Other elements keep their isotropic shielding.
 
     SimstackResult:
         qm_result (QMResult): Sample energy and structure.
@@ -83,6 +114,7 @@ async def pyscf_nmr(qm_input: QMInput, reference: Molecule, **kwargs) -> Simstac
                 budget_mb,
                 num_threads,
                 node_runner,
+                "sample",
             )
             node_runner.info("Starting PySCF GIAO NMR for the reference")
             reference_mol, _, _, reference_elements, reference_tensor = _scf_and_shielding(
@@ -92,6 +124,7 @@ async def pyscf_nmr(qm_input: QMInput, reference: Molecule, **kwargs) -> Simstac
                 budget_mb,
                 num_threads,
                 node_runner,
+                "reference",
             )
         shifts, reference_table = chemical_shift_tables(
             sample_elements,
@@ -110,7 +143,11 @@ async def pyscf_nmr(qm_input: QMInput, reference: Molecule, **kwargs) -> Simstac
             )
         pyscf_result = PySCFResult(qm_input)
         node_runner.qm_result = pyscf_result.parse_mf(
-            sample_energy, sample_mf.mol, sample_mf, node_runner, optimized=False
+            sample_energy,
+            sample_mf.mol,
+            sample_mf,
+            node_runner,
+            optimized=qm_input.optimization,
         )
         node_runner.nmr_shifts = shifts
         node_runner.nmr_reference = reference_table

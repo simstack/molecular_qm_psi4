@@ -49,12 +49,22 @@ def assert_nmr_single_point(qm_input, label):
     atoms = getattr(qm_input.molecule, "atoms", None)
     if not atoms:
         raise ValueError(f"{label} molecule has no atoms")
-    if getattr(qm_input, "optimization", False):
-        raise ValueError(f"{label} has optimization set; pyscf_nmr uses the given geometry")
+    optimization = getattr(qm_input, "optimization", None)
+    if not isinstance(optimization, bool):
+        raise ValueError(f"{label} optimization must be true or false, got {optimization!r}")
+    if optimization and getattr(qm_input, "max_optimization_iterations", None) is None:
+        raise ValueError(f"{label} max_optimization_iterations is required")
     if getattr(qm_input, "frequencies", False):
         raise ValueError(f"{label} has frequencies set; pyscf_nmr uses the given geometry")
-    if getattr(qm_input, "use_solvent", False):
-        raise ValueError(f"{label} has a solvent model; GIAO NMR does not include solvent")
+    use_solvent = getattr(qm_input, "use_solvent", None)
+    if not isinstance(use_solvent, bool):
+        raise ValueError(f"{label} use_solvent must be true or false, got {use_solvent!r}")
+    if use_solvent:
+        solvent = getattr(qm_input, "solvent", None)
+        if not isinstance(solvent, str) or not solvent.strip() or solvent.strip().lower() == "none":
+            raise ValueError(f"{label} solvent name is required")
+        if getattr(qm_input, "solvent_model", None) is None:
+            raise ValueError(f"{label} solvent model is required")
     method = method_name_from_qm_input(qm_input)
     if method not in _NMR_METHODS:
         raise ValueError(f"GIAO NMR is implemented for HF and DFT, got {method} on {label}")
@@ -81,7 +91,16 @@ def assert_nmr_single_point(qm_input, label):
 
 
 def giao_shielding(mf):
-    """GIAO shielding tensor in ppm, shape ``(n_atoms, 3, 3)``."""
+    """GIAO shielding tensor in ppm, shape ``(n_atoms, 3, 3)``.
+
+    The magnetic response has no solvent kernel. A mean field that still
+    carries ``with_solvent`` is rejected so the solvated density is not
+    silently treated as a full solvent shielding.
+    """
+    if mf is None:
+        raise ValueError("mean field is required")
+    if getattr(mf, "with_solvent", None) is not None:
+        raise ValueError("GIAO NMR cannot evaluate the shielding while a solvent model is attached")
     from pyscf.prop import nmr
 
     mol = getattr(mf, "mol", None)

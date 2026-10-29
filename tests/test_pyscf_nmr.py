@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from molecular_qm_models import Molecule
+from molecular_qm_psi4.nodes.pyscf_nmr import _scf_and_shielding
 from molecular_qm_psi4.util.pyscf_calculator import PySCFCalculator
 from molecular_qm_psi4.util.pyscf_nmr import (
     assert_nmr_single_point,
@@ -164,14 +165,32 @@ def test_methyl_reference_bond_rejects_a_selection_that_is_not_methyl_ch():
         methyl_reference_bond(empty)
 
 
-def test_nmr_job_must_be_a_conventional_single_point():
-    with pytest.raises(ValueError, match="solvent"):
-        assert_nmr_single_point(_level(solvent=True), "sample")
+def test_nmr_job_rejects_post_scf_methods_and_density_fitting():
     with pytest.raises(ValueError, match="aux basis"):
         assert_nmr_single_point(_level(aux="def2-universal-jkfit"), "sample")
     with pytest.raises(ValueError, match="HF and DFT"):
         assert_nmr_single_point(_level(method="MP2"), "sample")
+    with pytest.raises(ValueError, match="frequencies"):
+        assert_nmr_single_point(_level(frequencies=True), "sample")
     assert_nmr_single_point(_level(), "sample")
+
+
+def test_nmr_job_requires_a_named_solvent_and_can_optimize():
+    with pytest.raises(ValueError, match="solvent name"):
+        assert_nmr_single_point(_level(solvent=True), "sample")
+    solvated = _level(solvent=True, optimization=True)
+    solvated.solvent = "Chloroform"
+    solvated.solvent_model = SimpleNamespace(value="CPCM")
+    assert_nmr_single_point(solvated, "sample")
+    missing_steps = _level(optimization=True)
+    missing_steps.max_optimization_iterations = None
+    with pytest.raises(ValueError, match="max_optimization_iterations"):
+        assert_nmr_single_point(missing_steps, "sample")
+
+
+def test_giao_shielding_rejects_an_attached_solvent():
+    with pytest.raises(ValueError, match="solvent model is attached"):
+        giao_shielding(SimpleNamespace(with_solvent=object()))
 
 
 def test_build_mean_field_can_skip_density_fitting():
@@ -223,3 +242,118 @@ def test_giao_h2_chemical_shifts_vanish_for_the_equivalent_proton():
         shifts.row[0]["Isotropic shielding (ppm)"]
     )
     assert np.isfinite(shifts.row[0]["Isotropic shielding (ppm)"])
+
+
+class _RecordingCalculator:
+    def __init__(self, qm_input, node_runner=None):
+        self.qm_input = qm_input
+
+    def set_resources(self, budget_mb, threads):
+        return None
+
+    def build_molecule(self, output_path):
+        return self.qm_input.built_mol
+
+    def build_mean_field(self, mol, density_fit=True):
+        if density_fit:
+            raise AssertionError("NMR must build a conventional mean field")
+        return self.qm_input.built_mf
+
+    def apply_max_memory(self, mol=None, mf=None):
+        return None
+
+
+def _run_shielding(qm_input, optimize=None):
+    seen = {}
+
+    def fake_giao(mean_field):
+        seen["with_solvent"] = mean_field.with_solvent
+        seen["mol"] = mean_field.mol
+        return np.zeros((qm_input.built_mol.natm, 3, 3))
+
+    patches = [
+        patch("molecular_qm_psi4.nodes.pyscf_nmr.PySCFCalculator", _RecordingCalculator),
+        patch("molecular_qm_psi4.nodes.pyscf_nmr.giao_shielding", fake_giao),
+    ]
+    if optimize is not None:
+        patches.append(patch("molecular_qm_psi4.nodes.pyscf_nmr._optimize", optimize))
+    with patches[0], patches[1]:
+        if optimize is None:
+            _scf_and_shielding(
+                qm_input, "sample.out", "sample.chk", 1000, 1, MagicMock(), "sample"
+            )
+        else:
+            with patches[2]:
+                _scf_and_shielding(
+                    qm_input, "sample.out", "sample.chk", 1000, 1, MagicMock(), "sample"
+                )
+    return seen
+
+
+def test_nmr_refuses_a_solvent_that_did_not_attach():
+    mol = SimpleNamespace(natm=1, atom_pure_symbol=lambda index: "C")
+    qm_input = _level(solvent=True)
+    qm_input.solvent = "Chloroform"
+    qm_input.solvent_model = SimpleNamespace(value="CPCM")
+    qm_input.built_mol = mol
+    qm_input.built_mf = SimpleNamespace(with_solvent=None, converged=True, mol=mol)
+    with pytest.raises(ValueError, match="not attached"):
+        _run_shielding(qm_input)
+
+
+def test_nmr_shielding_drops_the_solvent_after_the_scf():
+    mol = SimpleNamespace(natm=1, atom_pure_symbol=lambda index: "C")
+    solvent = SimpleNamespace(solvent="Chloroform", method="C-PCM")
+    attached_during_scf = {}
+
+    def kernel():
+        attached_during_scf["yes"] = mf.with_solvent is solvent
+        return -76.0
+
+    mf = SimpleNamespace(with_solvent=solvent, converged=True, mol=mol, kernel=kernel)
+    qm_input = _level(solvent=True)
+    qm_input.solvent = "Chloroform"
+    qm_input.solvent_model = SimpleNamespace(value="CPCM")
+    qm_input.built_mol = mol
+    qm_input.built_mf = mf
+    seen = _run_shielding(qm_input)
+    assert attached_during_scf["yes"] is True
+    assert seen["with_solvent"] is None
+
+
+def test_nmr_optimizes_before_the_shielding_scf_and_keeps_the_solvent():
+    start = SimpleNamespace(natm=1, atom_pure_symbol=lambda index: "C")
+    optimized = SimpleNamespace(natm=1, atom_pure_symbol=lambda index: "C")
+    solvent = object()
+    order = []
+
+    def reset(new_mol):
+        order.append("reset")
+        mf.mol = new_mol
+
+    def kernel():
+        order.append("kernel")
+        assert mf.mol is optimized
+        assert mf.with_solvent is solvent
+        return -76.0
+
+    mf = SimpleNamespace(
+        with_solvent=solvent, converged=True, mol=start, reset=reset, kernel=kernel
+    )
+
+    def optimize(mean_field, qm_input, snapshotter):
+        order.append("optimize")
+        assert mean_field is mf
+        assert snapshotter is None
+        assert mean_field.with_solvent is solvent
+        return optimized
+
+    qm_input = _level(solvent=True, optimization=True)
+    qm_input.solvent = "Chloroform"
+    qm_input.solvent_model = SimpleNamespace(value="CPCM")
+    qm_input.built_mol = start
+    qm_input.built_mf = mf
+    seen = _run_shielding(qm_input, optimize)
+    assert order == ["optimize", "reset", "kernel"]
+    assert seen["mol"] is optimized
+    assert seen["with_solvent"] is None
