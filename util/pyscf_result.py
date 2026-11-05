@@ -1,6 +1,7 @@
 import logging
 
 from molecular_qm_models import QMInput, QMResult, Molecule, Atom, BOHR_TO_ANGSTROM
+from simstack.models.simple_table import SimpleTable
 from molecular_qm_psi4.util.frequency_table import (
     attach_vibrational_frequencies,
     infer_linear,
@@ -77,6 +78,39 @@ class PySCFResult:
         except Exception as exc:
             logger.warning("Failed to extract PySCF orbital energies: %s", exc)
         return self.qm_result
+
+    def attach_tddft_states(self, td) -> None:
+        energies = getattr(td, "e", None)
+        if energies is None:
+            raise ValueError("PySCF TDDFT result has no excitation energies")
+        oscillator = td.oscillator_strength(gauge="length")
+        energy_values = [float(value) for value in energies]
+        strength_values = [float(value) for value in oscillator]
+        if len(energy_values) != len(strength_values):
+            raise ValueError("PySCF oscillator strengths do not match the excitation energies")
+        if not energy_values:
+            raise ValueError("PySCF TDDFT result has no excited states")
+        table = SimpleTable(name="Excited States")
+        table.add_column("state", "int")
+        table.add_column("energy_au", "float")
+        table.add_column("energy_ev", "float")
+        table.add_column("wavelength_nm", "float")
+        table.add_column("oscillator_strength", "float")
+        hartree_to_ev = 27.2113834279
+        for index, energy_au in enumerate(energy_values):
+            if energy_au == 0.0:
+                raise ValueError(f"excited state {index + 1} energy is zero")
+            energy_ev = energy_au * hartree_to_ev
+            table.add_row(
+                {
+                    "state": index + 1,
+                    "energy_au": energy_au,
+                    "energy_ev": energy_ev,
+                    "wavelength_nm": 1239.8419843320028 / energy_ev,
+                    "oscillator_strength": strength_values[index],
+                }
+            )
+        self.qm_result.excited_states = table
 
     def _fill_orbitals(self, mf):
         mo_energy = getattr(mf, "mo_energy", None)

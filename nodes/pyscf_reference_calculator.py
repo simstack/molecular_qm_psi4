@@ -227,6 +227,10 @@ async def pyscf_reference_calculator(qm_input: QMInput, **kwargs) -> SimstackRes
             qm_result = pyscf_result.parse_mf(
                 energy, mol, mf, node_runner, optimized=bool(qm_input.optimization)
             )
+            if qm_input.excited_states:
+                if not hasattr(post, "oscillator_strength"):
+                    raise ValueError("PySCF excited-state calculation did not produce a TDDFT result")
+                pyscf_result.attach_tddft_states(post)
             thermodynamics_table = None
             if freq_info:
                 n_atoms = mol.natm if hasattr(mol, "natm") else None
