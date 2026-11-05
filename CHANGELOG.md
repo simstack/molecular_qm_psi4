@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.32.2 (2026-11-05)
+
+### Bug Fixes
+
+- Record TDDFT excited states on the PySCF result
+  ([`80d7c73`](https://github.com/simstack/molecular_qm_psi4/commit/80d7c73bcffc14c1e8edacd95157aa40ab2f59a3))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.32.1 (2026-11-05)
 
 ### Bug Fixes
