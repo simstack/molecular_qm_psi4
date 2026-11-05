@@ -160,8 +160,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             uidmap fuse2fs squashfs-tools
+          # The default 1.4.2 deb depends on libfuse3-3. Ubuntu 26.04 and
+          # Debian 13 replaced that package with libfuse3-4, so use the
+          # trixie+ build there.
+          if apt-cache show libfuse3-3 >/dev/null 2>&1; then
+            apptainer_deb="apptainer_1.4.2_amd64.deb"
+          else
+            apptainer_deb="apptainer_1.4.2-trixie+_amd64.deb"
+          fi
           curl -fsSL -o /tmp/apptainer.deb \
-            "https://github.com/apptainer/apptainer/releases/download/v1.4.2/apptainer_1.4.2_amd64.deb"
+            "https://github.com/apptainer/apptainer/releases/download/v1.4.2/${apptainer_deb}"
           sudo apt-get install -y /tmp/apptainer.deb
           apptainer version
 
