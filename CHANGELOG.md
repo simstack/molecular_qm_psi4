@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.32.3 (2026-11-05)
+
+### Bug Fixes
+
+- Install the Apptainer deb that matches the runner libfuse3
+  ([`fe27909`](https://github.com/simstack/molecular_qm_psi4/commit/fe279094faa7c774697b18e7c92678048304fc17))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.32.2 (2026-11-05)
 
 ### Bug Fixes
