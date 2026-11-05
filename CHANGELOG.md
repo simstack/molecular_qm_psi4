@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v0.32.1 (2026-11-05)
+
+### Bug Fixes
+
+- Calibrate analytical Hessian times from finished SaaS jobs
+  ([`4f67cc9`](https://github.com/simstack/molecular_qm_psi4/commit/4f67cc98cda0a1a3f690d7af20d678f51d4a86bc))
+
+Replace the unfinished wB97X-V reference scale with p90 atom-batch rates by basis, a 3x wB97X-V
+  factor, and QMInput-keyed hessian_task_id storage.
+
+
 ## v0.32.0 (2026-10-29)
 
 ### Features
