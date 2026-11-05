@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.32.4 (2026-11-05)
+
+### Bug Fixes
+
+- Do not connect to Mongo when importing the probe script
+  ([`dddb48c`](https://github.com/simstack/molecular_qm_psi4/commit/dddb48c7ceefc1cba1034db6f035cf1a7596d2a4))
+
+Table builds import every package module, and the probe opened a client at import time.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.32.3 (2026-11-05)
 
 ### Bug Fixes
