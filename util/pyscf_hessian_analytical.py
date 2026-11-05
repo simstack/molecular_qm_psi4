@@ -1,10 +1,10 @@
 """Analytical PySCF Hessian cost and the contractions that assemble stored atom slices.
 
-The prefactor is fixed from two unfinished cloud Hessians of C16H16 (32 atoms,
-nocc=56, default Weigend J-fit naux=960): wB97X-V/def2-TZVP was still running
-after 35 h (nao=592) and wB97X-V/def2-TZVPPD after 67 h (nao=864). The tighter
-bound sets the scale, so both predictions stay at or above those lower bounds.
-A job that passes can still overrun.
+Atom-batch wall times on SaaS (``wenzel_data``, finished ``pyscf_hessian_for_atoms*``
+jobs through 2026-11-05) scale approximately as ``naux * nocc * nao``. The
+rates below are the 90th percentile ``seconds_per_atom / (naux * nocc * nao)`` for
+non-wB97X-V functionals, split by basis. wB97X-V uses a fixed 3× slowdown on that
+rate. Estimates stay conservative; a job that passes can still overrun.
 """
 
 try:
@@ -12,12 +12,12 @@ try:
 except ImportError:
     np = None
 
-# def2-TZVPPD / Weigend J-fit lower bound. TZVP's 35 h bound is looser under this scale.
-_REF_NATM = 32
-_REF_NAUX = 960
-_REF_NOCC = 56
-_REF_NAO = 864
-_REF_SECONDS = 67 * 3600
+# p90 s / (naux * nocc * nao), non-wB97X-V atom batches on SaaS (2026-11-05).
+_BASIS_RATE_P90 = {
+    "def2-svp": 7.828884e-06,
+    "def2-tzvp": 2.689547e-05,
+}
+_WB97XV_SLOWDOWN = 3.0
 
 
 def parse_slurm_time_to_seconds(time_str) -> int:
@@ -69,25 +69,66 @@ def _positive_int(name, value) -> int:
     return number
 
 
-def analytical_hessian_seconds(natm, naux, nocc, nao) -> float:
-    """Lower-bound wall time for one analytical DF Hessian, in seconds."""
-    atoms = _positive_int("natm", natm)
+def _normalize_basis_key(basis) -> str:
+    if basis is None or not str(basis).strip():
+        raise ValueError("basis is required before the analytical Hessian")
+    return str(basis).strip().lower()
+
+
+def _normalize_functional_key(functional) -> str:
+    if functional is None or not str(functional).strip():
+        raise ValueError("functional is required before the analytical Hessian")
+    return str(functional).strip().lower()
+
+
+def _is_wb97xv(functional) -> bool:
+    key = _normalize_functional_key(functional).replace(" ", "")
+    return "wb97x" in key and "v" in key
+
+
+def _hessian_rate_per_dim(basis) -> float:
+    key = _normalize_basis_key(basis)
+    if key in _BASIS_RATE_P90:
+        return _BASIS_RATE_P90[key]
+    if "def2-tzvppd" in key or key.endswith("tzvppd"):
+        return _BASIS_RATE_P90["def2-tzvp"]
+    if "def2-tzvp" in key:
+        return _BASIS_RATE_P90["def2-tzvp"]
+    if "def2-svp" in key:
+        return _BASIS_RATE_P90["def2-svp"]
+    raise ValueError(f"no analytical Hessian timing calibration for basis {basis!r}")
+
+
+def _functional_slowdown(functional) -> float:
+    if _is_wb97xv(functional):
+        return _WB97XV_SLOWDOWN
+    return 1.0
+
+
+def analytical_hessian_seconds_per_atom(naux, nocc, nao, *, basis, functional) -> float:
+    """Estimated wall time for one atom batch slot, in seconds."""
     aux = _positive_int("naux", naux)
     occ = _positive_int("nocc", nocc)
     orbitals = _positive_int("nao", nao)
-    product = atoms * aux * occ * orbitals
-    reference = _REF_NATM * _REF_NAUX * _REF_NOCC * _REF_NAO
-    if product == reference:
-        return float(_REF_SECONDS)
-    return _REF_SECONDS * product / reference
+    rate = _hessian_rate_per_dim(basis) * _functional_slowdown(functional)
+    return rate * aux * occ * orbitals
 
 
-def analytical_hessian_plan(mf, mol, parameters) -> dict:
-    """Dimensions, lower-bound seconds, and how many atoms fit in the Slurm time.
+def analytical_hessian_seconds(natm, naux, nocc, nao, *, basis, functional) -> float:
+    """Estimated wall time for all atom batches at once (serial), in seconds."""
+    atoms = _positive_int("natm", natm)
+    per_atom = analytical_hessian_seconds_per_atom(
+        naux, nocc, nao, basis=basis, functional=functional
+    )
+    return per_atom * atoms
+
+
+def analytical_hessian_plan(mf, mol, parameters, basis, functional) -> dict:
+    """Dimensions, estimated seconds, and how many atoms fit in the Slurm time.
 
     Raises ValueError when the mean field is not density-fitted RKS, when the
-    DF tensor does not fit in max_memory, when the time limit is missing, or
-    when one atom already exceeds that limit.
+    DF tensor does not fit in max_memory, when the time limit is missing, when
+    basis or functional is missing, or when one atom already exceeds that limit.
     """
     from molecular_qm_psi4.util.pyscf_calculator import df_hessian_memory
 
@@ -114,8 +155,14 @@ def analytical_hessian_plan(mf, mol, parameters) -> dict:
             f"which does not fit in max_memory={getattr(mf, 'max_memory', None)}"
         )
     natm = int(mol.natm)
-    seconds_full = analytical_hessian_seconds(natm, info["naux"], info["nocc"], info["nao"])
-    seconds_per_atom = seconds_full / natm
+    seconds_per_atom = analytical_hessian_seconds_per_atom(
+        info["naux"],
+        info["nocc"],
+        info["nao"],
+        basis=basis,
+        functional=functional,
+    )
+    seconds_full = seconds_per_atom * natm
     if seconds_per_atom > limit:
         raise ValueError(
             f"analytical Hessian for one atom is estimated at {seconds_per_atom:.0f} s, "

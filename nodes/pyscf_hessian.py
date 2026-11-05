@@ -63,6 +63,7 @@ from molecular_qm_psi4.util.vibration_molden import (
 )
 from molecular_qm_psi4.util.qm_engine import pyscf_resources_from_slurm
 from simstack.core.context import context
+from simstack.core.hash import complex_hash_function
 from simstack.core.node import node
 from simstack.core.simstack_result import SimstackResult
 from simstack.models import FileStack
@@ -1288,9 +1289,15 @@ async def pyscf_hessian_init(opts: PySCFHessianStageInput, **kwargs) -> Simstack
             budget_mb,
             "df_hessian",
         )
-        timing = analytical_hessian_plan(mf, mol, kwargs.get("parent_parameters"))
+        timing = analytical_hessian_plan(
+            mf,
+            mol,
+            kwargs.get("parent_parameters"),
+            pyscf_basis_name(opts.qm_input),
+            pyscf_functional_name(opts.qm_input),
+        )
         node_runner.info(
-            f"Analytical Hessian lower bound {timing['seconds_full']:.0f} s "
+            f"Analytical Hessian estimate {timing['seconds_full']:.0f} s "
             f"({timing['seconds_per_atom']:.0f} s/atom), "
             f"Slurm time {timing['time_limit_seconds']} s, "
             f"batch size {timing['batch_size']} "
@@ -1353,7 +1360,9 @@ async def pyscf_hessian_orchestrator(
     ``pyscf_hessian`` task. This process does not build a mean field and does
     not load the contribution arrays.
 
-    Contributions are stored under this task's id.
+    Contributions are stored under a hash of ``opts.qm_input``, written into
+    ``hessian_task_id``. A later call for the same input finds those rows after
+    the parent task is gone. The field name is unchanged.
 
     SimstackResult:
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1).
@@ -1376,13 +1385,15 @@ async def pyscf_hessian_orchestrator(
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
         raise ValueError("node_runner is required")
-    hessian_task_id = kwargs.get("task_id") or getattr(node_runner, "task_id", None)
-    if hessian_task_id is None or not str(hessian_task_id).strip():
-        raise ValueError("pyscf_hessian_orchestrator requires task_id")
-    hessian_task_id = str(hessian_task_id)
     try:
         if opts is None or opts.qm_input is None or opts.wavefunction is None:
             raise ValueError("qm_input and wavefunction are required")
+        calculation_id = complex_hash_function(opts.qm_input)
+        if not isinstance(calculation_id, str) or not calculation_id.strip():
+            raise ValueError(
+                f"qm_input hash must be a non-empty string, got {calculation_id!r}"
+            )
+        hessian_task_id = calculation_id
         if _MAX_HESSIAN_VMS < 1:
             raise ValueError("Hessian VM cap must be at least 1")
         heartbeat_task_id = str(getattr(node_runner, "task_id", "") or "")

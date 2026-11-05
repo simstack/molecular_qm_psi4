@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from molecular_qm_psi4.util.pyscf_hessian_analytical import (
-    analytical_hessian_seconds,
+    analytical_hessian_seconds_per_atom,
     contract_df_coulomb,
     contract_h1ao_mo1,
     parse_slurm_time_to_seconds,
@@ -19,11 +19,18 @@ class _Parameters:
         self.slurm_parameters = None if time is None else _Slurm(time)
 
 
-def test_calibration_stays_above_the_unfinished_cloud_hessians():
-    tzvp = analytical_hessian_seconds(32, 960, 56, 592)
-    tzvppd = analytical_hessian_seconds(32, 960, 56, 864)
-    assert tzvp >= 35 * 3600
-    assert tzvppd >= 67 * 3600
+def test_wb97xv_is_three_times_slower_than_pbe0_at_same_size():
+    dims = dict(naux=960, nocc=56, nao=592, basis="def2-tzvp")
+    pbe0 = analytical_hessian_seconds_per_atom(functional="pbe0", **dims)
+    wb97 = analytical_hessian_seconds_per_atom(functional="wb97x-v", **dims)
+    assert wb97 == pytest.approx(pbe0 * 3.0)
+
+
+def test_pbe0_tzvp_64_atom_estimate_fits_default_slurm_day():
+    per_atom = analytical_hessian_seconds_per_atom(
+        3236, 132, 1284, basis="def2-tzvp", functional="pbe0"
+    )
+    assert per_atom < 86400
 
 
 def test_slurm_time_is_required_and_parsed():
@@ -58,10 +65,14 @@ def test_one_atom_over_the_time_limit_raises_before_a_batch_is_chosen():
         mo_occ = np.array([2.0, 2.0, 0.0])
         with_df = type("DF", (), {"auxmol": _Aux(), "mol": None, "auxbasis": "weigend"})()
 
-    seconds = analytical_hessian_seconds(4, 30, 2, 20)
-    assert seconds / 4 > 0
     with pytest.raises(ValueError, match="one atom"):
-        analytical_hessian_plan(_Mf(), _Mol(), _Parameters("0:00:00"))
+        analytical_hessian_plan(
+            _Mf(),
+            _Mol(),
+            _Parameters("0:00:00"),
+            "def2-svp",
+            "wb97x-v",
+        )
 
 
 def test_missing_slurm_time_raises():
@@ -89,17 +100,29 @@ def test_batches_pack_the_largest_atom_count_that_fits():
         mo_occ = np.ones(56)
         with_df = type("DF", (), {"auxmol": _Aux(), "mol": None, "auxbasis": "weigend"})()
 
-    # nao is read from mol in df_hessian_memory via mol.nao. Set it.
     _Mol.nao = 592
-    per_atom = analytical_hessian_seconds(32, 960, 56, 592) / 32
+    per_atom = analytical_hessian_seconds_per_atom(
+        960, 56, 592, basis="def2-tzvp", functional="wb97x-v"
+    )
     limit = int(np.ceil(per_atom)) * 4
     hours = limit // 3600
     minutes = (limit % 3600) // 60
     seconds = limit % 60
     plan = analytical_hessian_plan(
-        _Mf(), _Mol(), _Parameters(f"{hours}:{minutes:02d}:{seconds:02d}")
+        _Mf(),
+        _Mol(),
+        _Parameters(f"{hours}:{minutes:02d}:{seconds:02d}"),
+        "def2-tzvp",
+        "wb97x-v",
     )
     assert plan["batch_size"] == 4
+
+
+def test_unknown_basis_raises():
+    with pytest.raises(ValueError, match="calibration"):
+        analytical_hessian_seconds_per_atom(
+            100, 10, 100, basis="6-31g*", functional="pbe0"
+        )
 
 
 def test_coulomb_and_response_slices_assemble_a_symmetric_hessian():

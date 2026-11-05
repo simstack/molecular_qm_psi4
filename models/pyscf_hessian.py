@@ -16,11 +16,11 @@ class PySCFHessianInput(Model):
 
 @simstack_model
 class PySCFHessianStageInput(Model):
-    """Wavefunction for one short Hessian stage, stored under the orchestrator task.
+    """Wavefunction for one short Hessian stage.
 
-    ``hessian_task_id`` is the ``pyscf_hessian_orchestrator`` task id. Init and
-    assembly are separate tasks, so contributions are not stored under their
-    own task ids.
+    ``hessian_task_id`` is a hash of the QMInput, not the parent task id. Init
+    and assembly are separate tasks, so contributions are stored under that
+    hash. The field name is unchanged.
     """
 
     field_name: str = "PySCFHessianStageInput"
@@ -36,7 +36,7 @@ class PySCFHessianPlan(Model):
     ``shell_starts[i]:shell_ends[i]`` is one aux-shell group. ``include_nlc``
     records whether the mean field includes VV10. PySCF ``do_nlc()`` returns
     that as a bool or as the libxc integers 0 and 1. The orchestrator launches
-    cloud children from this plan and from rows already stored for the task.
+    cloud children from this plan and from rows already stored for the calculation.
     """
 
     field_name: str = "PySCFHessianPlan"
@@ -49,11 +49,11 @@ class PySCFHessianPlan(Model):
 
 @simstack_model
 class PySCFHessianAtomsInput(Model):
-    """One analytical-Hessian batch for a pyscf_hessian task.
+    """One analytical-Hessian batch.
 
-    ``hessian_task_id`` is the parent task id. Contributions are stored under
-    that id, so a new child task (including one on another cloud VM) still
-    finds atoms that already finished.
+    ``hessian_task_id`` is a hash of the QMInput. Contributions are stored under
+    that hash, so a later call for the same calculation, including one on
+    another cloud VM, finds atoms that already finished.
     """
 
     field_name: str = "PySCFHessianAtomsInput"
@@ -122,7 +122,7 @@ class PySCFHessianMemoryRecord(Model):
     Written by ``pyscf_hessian_init`` and by each child that builds the mean field
     (``pyscf_hessian_for_atoms``, including the nested call on a
     ``pyscf_hessian_for_atoms_ext`` VM, and ``pyscf_hessian_partial_ext``).
-    ``hessian_task_id`` is the orchestrator task. ``task_id`` is the task that
+    ``hessian_task_id`` is a hash of the QMInput. ``task_id`` is the task that
     recorded the row. ``scope`` is ``df_hessian``, an atom span such as
     ``atoms 20-39``, or a partial span such as ``aux 0:400``.
 
