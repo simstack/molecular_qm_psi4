@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.32.6 (2026-11-06)
+
+### Bug Fixes
+
+- Print the Slurm time when a job will exceed it
+  ([`7af1de1`](https://github.com/simstack/molecular_qm_psi4/commit/7af1de1a99bc663a59fc717b37bd57445c956baa))
+
+The heartbeat reported only how far past the allocation a block would finish. Include the Slurm
+  limit so the log shows the time that was exceeded.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.32.4 (2026-11-05)
 
 ### Bug Fixes
