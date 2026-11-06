@@ -1,0 +1,18 @@
+{
+  "title": "Molecular QM Psi4 and PySCF capabilities for SimStack",
+  "workflow_environment": "SimStack",
+  "description": "A SimStack capability package containing molecular quantum chemistry models and nodes for Psi4 and PySCF calculations. The bundle includes electronic energy calculations, geometry optimization, conformer comparison, reaction-path workflows, and file-backed density and Hessian artifacts.",
+  "authors": [
+    "Wolfgang Wenzel",
+    "Phillip Dullinger"
+  ],
+  "release": "v0.32.5",
+  "keywords": [
+    "SimStack",
+    "quantum chemistry",
+    "Psi4",
+    "PySCF",
+    "geometry optimization",
+    "workflow nodes"
+  ]
+}

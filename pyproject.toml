@@ -6,7 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [
-  { name = "Wolfgang Wenzel", email = "wolfgang.wenzel@kit.edu" }
+  { name = "Wolfgang Wenzel", email = "wolfgang.wenzel@kit.edu" },
+  { name = "Phillip Dullinger" }
 ]
 dependencies = [
     "numpy>=1.26,<3",
