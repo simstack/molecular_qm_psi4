@@ -50,7 +50,7 @@ docker build \
   -f molecular_qm_psi4/Dockerfile molecular_qm_psi4
 ```
 
-## Container-only density artifacts for ML4DFT
+## Container-only PySCF density artifacts
 
 The capability provides two additional decorated node functions in
 `nodes/density_artifacts.py`. Every declared input is an ODMantic Model:
@@ -64,16 +64,16 @@ The capability provides two additional decorated node functions in
 Both density nodes refuse execution outside Docker. Private scientific implementations
 are in `util/density_calculation.py`, `util/density_fit.py`,
 `util/density_response.py` and `util/density_artifacts.py`; clients call the
-**decorated nodes**, never those utility functions. The capability has no reverse
-import or dependency on ML4DFT, PyTorch or e3nn.
+**decorated nodes**, never those utility functions. The capability has no
+dependency on PyTorch or e3nn.
 
 Results are small `PySCFArtifact` Models carrying kind, schema, logical host root,
 relative path and SHA-256. Large arrays and full provenance stay in HDF5 files;
 no wavefunctions or Hessians are returned as database arrays and no pickle is used.
 Location/source requests distinguish logical host paths from native container
-paths. ML4DFT maps directories under the resource workdir to its `/mnt` bind mount;
-returned references preserve the host path. Outputs are immutable unique files,
-written by atomic rename. Input shard checksums are verified before reconstruction.
+paths; returned references preserve the host path. Outputs are immutable unique
+files, written by atomic rename. Input shard checksums are verified before
+reconstruction.
 
 Rebuild this image from the updated source, then register the new models/nodes:
 
@@ -81,10 +81,8 @@ Rebuild this image from the updated source, then register the new models/nodes:
 docker build -t molecular-qm-psi4:latest .
 ```
 
-ML4DFT's `config.toml` routes these node names to that image. Its workflow nodes
-stay outside the scientific runtime and await the file-backed results. Analytic
-response supports the previously validated all-electron PBE RKS/UKS spherical
-s/p/d paths, with moving-grid and auxiliary-basis response and explicit CPKS
+Analytic response supports the previously validated all-electron PBE RKS/UKS
+spherical s/p/d paths, with moving-grid and auxiliary-basis response and explicit CPKS
 residual checks; unsupported configurations fail without a local or finite-
 difference fallback.
 
