@@ -301,7 +301,18 @@ def block_progress_clause(progress, now):
         f"finish_at={finish_at} within_allocated={verdict}"
     )
     if over_by > 0:
-        text += f" over_by={over_by:.0f}s"
+        allocated = checked["allocated_s"]
+        if isinstance(allocated, float) and not allocated.is_integer():
+            raise ValueError(
+                f"allocated_s must be a whole number of seconds, got {allocated!r}"
+            )
+        total = int(allocated)
+        days, remainder = divmod(total, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        clock = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        slurm_time = f"{days}-{clock}" if days else clock
+        text += f" over_by={over_by:.0f}s slurm_time={slurm_time}"
     if overrun:
         text += " bound=lower"
     return text

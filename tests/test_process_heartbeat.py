@@ -52,6 +52,7 @@ def test_finish_estimate_exceeds_the_allocation():
     )
     assert "within_allocated=no" in clause
     assert "over_by=100s" in clause
+    assert "slurm_time=00:05:00" in clause
 
 
 def test_overrunning_block_is_unknown_until_the_lower_bound_exceeds():
@@ -63,6 +64,7 @@ def test_overrunning_block_is_unknown_until_the_lower_bound_exceeds():
     exceeded = module.block_progress_clause(_progress(allocated_s=400), 1_000_250.0)
     assert "within_allocated=no" in exceeded
     assert "over_by=50s" in exceeded
+    assert "slurm_time=00:06:40" in exceeded
     assert "bound=lower" in exceeded
 
 
