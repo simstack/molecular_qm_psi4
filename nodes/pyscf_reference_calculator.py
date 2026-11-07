@@ -48,7 +48,9 @@ async def pyscf_reference_calculator(qm_input: QMInput, **kwargs) -> SimstackRes
     the density-fitted Hessian estimate is logged before any kernel starts. The
     calculation then runs in this process: ``mf.kernel``, geometry optimization
     through geometric, and ``Hessian.kernel`` plus ``harmonic_analysis``. It does
-    not call ``pyscf_optimization`` or ``pyscf_hessian_orchestrator``.
+    not call ``pyscf_optimization`` or ``pyscf_hessian_orchestrator``. A
+    fixed-geometry calculation with gradients stores the nuclear gradient, AO
+    density matrix, overlap, and basis record in the wavefunction payload.
 
     SimstackResult:
         qm_result (QMResult): Parsed result from the PySCF calculation.
@@ -223,7 +225,47 @@ async def pyscf_reference_calculator(qm_input: QMInput, **kwargs) -> SimstackRes
                 freq_info = pyscf_thermo.harmonic_analysis(mol, hessian)
                 node_runner.info("Reference frequency calculation finished")
 
+            gradient = None
+            if qm_input.gradients and not qm_input.optimization:
+                import numpy as np
+
+                gradient = np.asarray(mf.nuc_grad_method().kernel(), dtype=np.float64)
+                if gradient.shape != (mol.natm, 3):
+                    raise ValueError("nuclear gradient must have shape (n_atoms, 3)")
             payload = _payload_from_mf(mf, mol, energy, hessian=hessian, freq_info=freq_info)
+            if gradient is not None:
+                import pyscf
+
+                coefficients = np.asarray(mf.mo_coeff)
+                with_df = getattr(mf, "with_df", None)
+                auxbasis = getattr(with_df, "auxbasis", None)
+                grids = getattr(mf, "grids", None)
+                if with_df is None or auxbasis in (None, ""):
+                    raise ValueError("density fitting basis is required")
+                if grids is None or getattr(grids, "level", None) is None:
+                    raise ValueError("integration grid is required")
+                if getattr(mf, "xc", None) in (None, ""):
+                    raise ValueError("exchange-correlation functional is required")
+                payload["gradient"] = gradient
+                payload["density_matrix"] = np.asarray(mf.make_rdm1(), dtype=np.float64)
+                payload["overlap"] = np.asarray(mol.intor("int1e_ovlp"), dtype=np.float64)
+                payload["molecule_json"] = mol.dumps()
+                payload["ao_labels"] = [str(label) for label in mol.ao_labels()]
+                payload["resolved_basis"] = mol._basis
+                payload["engine_version"] = pyscf.__version__
+                payload["method"] = mf.xc
+                payload["spin_policy"] = "unrestricted" if coefficients.ndim == 3 else "restricted"
+                payload["converged"] = bool(mf.converged)
+                payload["calculation_settings"] = {
+                    "xc": mf.xc,
+                    "grid_level": grids.level,
+                    "scf_tolerance": mf.conv_tol,
+                    "orbital_gradient_tolerance": mf.conv_tol_grad,
+                    "max_scf_cycles": mf.max_cycle,
+                    "memory_mb": mf.max_memory,
+                    "dispersion": getattr(mf, "disp", None) or "off",
+                    "density_fit": auxbasis,
+                }
             qm_result = pyscf_result.parse_mf(
                 energy, mol, mf, node_runner, optimized=bool(qm_input.optimization)
             )
