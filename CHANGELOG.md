@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.33.0 (2026-11-07)
+
+### Features
+
+- Store the nuclear gradient and AO density in the reference wavefunction
+  ([`4f687f1`](https://github.com/simstack/molecular_qm_psi4/commit/4f687f19c615caa3740d2127b64440a8276ef995))
+
+Fixed-geometry gradient calculations need the density matrix, overlap, and basis record in the
+  payload so a later step can reuse the wavefunction.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.32.6 (2026-11-06)
 
 ### Bug Fixes
