@@ -6,8 +6,8 @@ from molecular_qm_psi4.nodes.compare_conformers import (
     CompareConformersResult,
     _compare_conformers_outputs,
     _final_structure_molecule,
-    _imaginary_frequency_failure,
     _kcal_per_mol_from_hartree,
+    _reoptimize_if_imaginary,
     _pair_difference,
     _qm_input_copy,
     _thermo_component,
@@ -68,11 +68,15 @@ async def compare_conformers_reference(
     """Compare two conformers at one basis set and functional.
 
     Both geometry optimizations run at the same time. Each optimization stores
-    the frequency analysis on its wavefunction. If either optimization fails,
-    this node fails and thermochemistry is not started. Otherwise both
-    thermochemistry evaluations run at the same time, at ``arg.temperature``
-    and ``arg.pressure``. If either thermochemistry evaluation fails, this
-    node fails.
+    the frequency analysis on its wavefunction. Negative frequencies are logged.
+    That conformer is then reoptimized once from its last
+    geometry on the next finer DFT grid, and the frequencies are computed again.
+    A failed first calculation is logged and, when it still has a final
+    geometry, repeated once on the next finer DFT grid. Remaining imaginary
+    frequencies or a failed retry fail this node, and thermochemistry is not
+    started. Otherwise both thermochemistry evaluations run at the same
+    time, at ``arg.temperature`` and ``arg.pressure``. If either thermochemistry
+    evaluation fails, this node fails.
 
     The calculation is PySCF. ``pyscf_reference_calculator`` children are named
     ``ref-mol1`` and ``ref-mol2``. Thermochemistry uses ``pyscf_thermochemistry``.
@@ -138,17 +142,27 @@ async def compare_conformers_reference(
         current_input = await _persist_qm_input(current_input, node_runner)
         node_runner.info(f"Starting reference optimization for molecule {index}")
         calc_result = await pyscf_reference_calculator(current_input, **child_kwargs)
-        failure = _reference_child_error(
-            calc_result, f"Optimization failed for molecule {index}"
+
+        async def rerun_on_finer_grid(retry_input, molecule_index=index):
+            retry_kwargs = dict(child_kwargs)
+            retry_kwargs["custom_name"] = f"ref-mol{molecule_index}-finer-grid"
+            persisted = await _persist_qm_input(retry_input, node_runner)
+            return await pyscf_reference_calculator(persisted, **retry_kwargs)
+
+        resolved = await _reoptimize_if_imaginary(
+            node_runner,
+            index,
+            current_input,
+            molecule,
+            calc_result,
+            rerun_on_finer_grid,
         )
-        if failure:
-            return failure
+        if isinstance(resolved, str):
+            return resolved
+        calc_result = resolved
         qm_result, error = _child_qm_result(calc_result)
         if error:
             return f"Optimization failed for molecule {index}: {error}"
-        freq_error = _imaginary_frequency_failure(calc_result, qm_result)
-        if freq_error is not None:
-            return f"Molecule {index}: {freq_error}"
         final_mol = _final_structure_molecule(qm_result, molecule)
         if final_mol is None:
             return f"Optimization returned no final_structure for molecule {index}"

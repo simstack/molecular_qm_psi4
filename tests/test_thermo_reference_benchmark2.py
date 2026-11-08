@@ -250,6 +250,166 @@ async def test_reference_optimizations_and_thermochemistry_run_in_parallel(monke
 
 
 @pytest.mark.asyncio
+async def test_reference_reoptimizes_imaginary_modes_on_a_finer_grid(monkeypatch):
+    _install_context(monkeypatch)
+    _install_persist(monkeypatch)
+    calls = []
+    thermo_energies = []
+
+    async def calculator(qm_input, engine=None, **kwargs):
+        name = kwargs["custom_name"]
+        calls.append((name, qm_input.grid_type, qm_input.molecule.atoms[0].x))
+        retry = name.endswith("-finer-grid")
+        imaginary = name == "ref-mol1"
+        structure = Molecule.from_molecule(qm_input.molecule)
+        structure.field_name = qm_input.molecule.field_name
+        if imaginary:
+            structure.atoms[0].x = 1.5
+        elif retry:
+            structure.atoms[0].x = 2.5
+        energy = -11.0 if retry else (-9.0 if name == "ref-mol1" else -8.0)
+        return SimpleNamespace(
+            status=TaskStatus.COMPLETED,
+            vibrational_frequencies=vibrational_frequency_table(
+                [120.0, 400.0] if not imaginary else [-80.0, 400.0]
+            ),
+            qm_result=QMResult(final_energy=energy, final_structure=structure),
+        )
+
+    async def thermo(qm_result, temperature, pressure, **kwargs):
+        thermo_energies.append(qm_result.final_energy)
+        return SimpleNamespace(
+            status=TaskStatus.COMPLETED,
+            G_tot=1.0,
+            G_elec=0.2,
+            H_tot=1.1,
+            ZPE_tot=0.3,
+            E_tot=0.9,
+            S_tot=0.01,
+        )
+
+    monkeypatch.setattr(reference_node, "pyscf_reference_calculator", calculator)
+    monkeypatch.setattr(reference_node, "pyscf_thermochemistry", thermo)
+    arg = _reference_argument()
+    arg.qm_input.grid_type = GridType.Grid4
+    runner = _Runner()
+    errors = []
+    runner.error = errors.append
+    result = await inspect.unwrap(compare_conformers_reference)(arg, node_runner=runner)
+
+    assert result.status == TaskStatus.COMPLETED
+    assert ("ref-mol1", GridType.Grid4, 0.0) in calls
+    assert ("ref-mol1-finer-grid", GridType.Grid5, 1.5) in calls
+    assert [name for name, _grid, _x in calls].count("ref-mol1-finer-grid") == 1
+    assert "ref-mol2-finer-grid" not in [name for name, _grid, _x in calls]
+    assert -11.0 in thermo_energies
+    assert any("Imaginary frequencies below 0 cm^-1" in message for message in errors)
+    assert any("DFT grid Grid5" in message for message in errors)
+    assert runner.result.final_molecule1.atoms[0].x == pytest.approx(2.5)
+
+
+@pytest.mark.asyncio
+async def test_reference_retries_a_failed_first_grid_from_the_last_geometry(monkeypatch):
+    _install_context(monkeypatch)
+    _install_persist(monkeypatch)
+    calls = []
+    thermo_calls = []
+
+    async def calculator(qm_input, engine=None, **kwargs):
+        name = kwargs["custom_name"]
+        calls.append((name, qm_input.grid_type, qm_input.molecule.atoms[0].x))
+        structure = Molecule.from_molecule(qm_input.molecule)
+        structure.field_name = qm_input.molecule.field_name
+        structure.atoms[0].x = 2.5
+        if name == "ref-mol1":
+            failed_structure = Molecule.from_molecule(qm_input.molecule)
+            failed_structure.field_name = qm_input.molecule.field_name
+            failed_structure.atoms[0].x = 1.5
+            return SimpleNamespace(
+                status=TaskStatus.FAILED,
+                error_message="first grid failed",
+                qm_result=QMResult(final_energy=-9.0, final_structure=failed_structure),
+            )
+        return SimpleNamespace(
+            status=TaskStatus.COMPLETED,
+            vibrational_frequencies=vibrational_frequency_table([120.0, 400.0]),
+            qm_result=QMResult(
+                final_energy=-11.0 if name.endswith("-finer-grid") else -8.0,
+                final_structure=structure,
+            ),
+        )
+
+    async def thermo(qm_result, temperature, pressure, **kwargs):
+        thermo_calls.append(qm_result.final_energy)
+        return SimpleNamespace(
+            status=TaskStatus.COMPLETED,
+            G_tot=1.0,
+            G_elec=0.2,
+            H_tot=1.1,
+            ZPE_tot=0.3,
+            E_tot=0.9,
+            S_tot=0.01,
+        )
+
+    monkeypatch.setattr(reference_node, "pyscf_reference_calculator", calculator)
+    monkeypatch.setattr(reference_node, "pyscf_thermochemistry", thermo)
+    arg = _reference_argument()
+    arg.qm_input.grid_type = GridType.Grid2
+    runner = _Runner()
+    errors = []
+    runner.error = errors.append
+    result = await inspect.unwrap(compare_conformers_reference)(arg, node_runner=runner)
+
+    assert result.status == TaskStatus.COMPLETED
+    assert ("ref-mol1", GridType.Grid2, 0.0) in calls
+    assert ("ref-mol1-finer-grid", GridType.Grid3, 1.5) in calls
+    assert calls.count(("ref-mol1-finer-grid", GridType.Grid3, 1.5)) == 1
+    assert -11.0 in thermo_calls
+    assert any("first grid failed" in message for message in errors)
+    assert any("DFT grid Grid3" in message for message in errors)
+
+
+@pytest.mark.asyncio
+async def test_reference_fails_when_finer_grid_is_still_imaginary(monkeypatch):
+    _install_context(monkeypatch)
+    _install_persist(monkeypatch)
+    calls = []
+    thermo_calls = []
+
+    async def calculator(qm_input, engine=None, **kwargs):
+        calls.append(kwargs["custom_name"])
+        structure = Molecule.from_molecule(qm_input.molecule)
+        structure.field_name = qm_input.molecule.field_name
+        structure.atoms[0].x = 1.5
+        imaginary = kwargs["custom_name"].startswith("ref-mol1")
+        return SimpleNamespace(
+            status=TaskStatus.COMPLETED,
+            vibrational_frequencies=vibrational_frequency_table(
+                [-80.0, 400.0] if imaginary else [120.0, 400.0]
+            ),
+            qm_result=QMResult(final_energy=-10.0, final_structure=structure),
+        )
+
+    async def thermo(qm_result, temperature, pressure, **kwargs):
+        thermo_calls.append(kwargs.get("custom_name"))
+        raise AssertionError("thermochemistry started after imaginary frequencies remained")
+
+    monkeypatch.setattr(reference_node, "pyscf_reference_calculator", calculator)
+    monkeypatch.setattr(reference_node, "pyscf_thermochemistry", thermo)
+    runner = _Runner()
+    result = await inspect.unwrap(compare_conformers_reference)(
+        _reference_argument(),
+        node_runner=runner,
+    )
+
+    assert result.status == TaskStatus.FAILED
+    assert "imaginary frequencies remain after increasing the DFT grid" in result.error_message
+    assert calls.count("ref-mol1-finer-grid") == 1
+    assert "ref-mol1-finer-grid-finer-grid" not in calls
+    assert thermo_calls == []
+
+
+@pytest.mark.asyncio
 async def test_reference_fails_when_one_optimization_fails(monkeypatch):
     _install_context(monkeypatch)
     _install_persist(monkeypatch)

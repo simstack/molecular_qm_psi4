@@ -1,3 +1,4 @@
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -9,12 +10,12 @@ from molecular_qm_models import (
     Molecule,
     OptimizationAccuracy,
     QMInput,
+    QMResult,
     QMThermoResult,
     SCFAccuracy,
 )
 from molecular_qm_models.basis_set import BasisSetEnum
 from molecular_qm_models.energy_units import MolecularEnergyUnitEnum, convert_energy_unit
-import inspect
 
 from molecular_qm_psi4.nodes.compare_conformers import (
     CompareConformersModel,
@@ -26,15 +27,18 @@ from molecular_qm_psi4.nodes.compare_conformers import (
     _engine_name,
     _final_structure_molecule,
     _kcal_per_mol_from_hartree,
+    _next_dft_grid,
     _pair_difference,
     _qm_input_copy,
     _thermo_component,
+    compare_conformers,
     compare_conformers_preopt,
     compare_conformers_results_to_simple_table,
     empty_compare_conformers_method_table,
     empty_compare_conformers_table,
     thermo_benchmark,
 )
+from simstack.core.definitions import TaskStatus
 from molecular_qm_psi4.nodes.multistep_optimizer import PreOptimizerInput
 from molecular_qm_psi4.util.frequency_table import vibrational_frequency_table
 from molecular_qm_psi4.util.qm_engine import QMEngine, QMEngineInput
@@ -342,8 +346,206 @@ def test_compare_conformers_outputs_stores_final_molecules():
     assert node_runner.result.final_molecule2 is other
 
 
-def test_imaginary_frequency_at_minus_49_is_allowed():
-    table = vibrational_frequency_table([-49.0, -50.0, 400.0])
+def test_next_dft_grid_steps_once():
+    assert _next_dft_grid(GridType.Grid2) is GridType.Grid3
+    assert _next_dft_grid("Grid4") is GridType.Grid5
+    with pytest.raises(ValueError, match="not set"):
+        _next_dft_grid(None)
+    with pytest.raises(ValueError, match="unsupported DFT grid"):
+        _next_dft_grid("fine")
+    with pytest.raises(ValueError, match="already the finest grid"):
+        _next_dft_grid(GridType.Grid5)
+
+
+class _CompareRunner:
+    def __init__(self):
+        self.status = None
+        self.error_message = None
+        self.errors = []
+        self.result = None
+        self.table = None
+        self.custom_name = None
+
+    def info(self, message):
+        return None
+
+    def warning(self, message):
+        return None
+
+    def error(self, message):
+        self.errors.append(message)
+
+    def fail(self, message):
+        self.status = TaskStatus.FAILED
+        self.error_message = message
+        return self
+
+    def succeed(self, message=""):
+        self.status = TaskStatus.COMPLETED
+        return self
+
+
+def _named_water(name):
+    molecule = _water()
+    molecule.field_name = name
+    molecule.smiles = "O"
+    molecule.formula = "H2O"
+    return molecule
+
+
+def _completed_calculation(qm_input, energy, frequencies, oxygen_x):
+    structure = Molecule.from_molecule(qm_input.molecule)
+    structure.atoms[0].x = oxygen_x
+    structure.field_name = qm_input.molecule.field_name
+    return SimpleNamespace(
+        status=TaskStatus.COMPLETED,
+        error_message=None,
+        vibrational_frequencies=vibrational_frequency_table(frequencies),
+        qm_result=QMResult(final_energy=energy, final_structure=structure),
+        G_tot=energy + 0.2,
+        G_elec=energy,
+        H_tot=energy + 0.1,
+        ZPE_tot=0.05,
+        E_tot=energy + 0.08,
+        S_tot=0.02,
+    )
+
+
+def _install_compare_context(monkeypatch):
+    async def initialize():
+        return None
+
+    async def save(obj):
+        return obj
+
+    monkeypatch.setattr(
+        "molecular_qm_psi4.nodes.compare_conformers.context",
+        SimpleNamespace(initialize=initialize, db=SimpleNamespace(save=save)),
+    )
+
+    async def persist_molecule(molecule, node_runner, step_name, db=None):
+        return molecule
+
+    monkeypatch.setattr(
+        "molecular_qm_psi4.nodes.compare_conformers._persist_step_molecule",
+        persist_molecule,
+    )
+
+
+@pytest.mark.asyncio
+async def test_compare_conformers_reoptimizes_imaginary_modes_on_a_finer_grid(monkeypatch):
+    _install_compare_context(monkeypatch)
+    calls = []
+
+    async def calculator(qm_input, engine=None, **kwargs):
+        name = kwargs.get("custom_name")
+        calls.append((name, qm_input.grid_type, qm_input.molecule.atoms[0].x))
+        retry = isinstance(name, str) and name.startswith("finer-grid")
+        return _completed_calculation(
+            qm_input,
+            energy=-10.5 if retry else -10.0,
+            frequencies=[120.0, 400.0] if retry else [-80.0, 400.0],
+            oxygen_x=0.0 if retry else 1.5,
+        )
+
+    monkeypatch.setattr(
+        "molecular_qm_psi4.nodes.compare_conformers.run_qm_calculator",
+        calculator,
+    )
+    left = _named_water("boat")
+    right = _named_water("chair")
+    arg = CompareConformersModel(
+        qm_input=_source(molecule=left, grid_type=GridType.Grid2),
+        molecule=right,
+    )
+    runner = _CompareRunner()
+    result = await inspect.unwrap(compare_conformers)(arg, node_runner=runner)
+
+    assert result.status == TaskStatus.COMPLETED
+    assert [call[0] for call in calls] == [
+        None,
+        "finer-grid-mol1",
+        None,
+        "finer-grid-mol2",
+    ]
+    assert [call[1] for call in calls] == [
+        GridType.Grid2,
+        GridType.Grid3,
+        GridType.Grid2,
+        GridType.Grid3,
+    ]
+    assert calls[1][2] == pytest.approx(1.5)
+    assert calls[3][2] == pytest.approx(1.5)
+    assert any("Imaginary frequencies below 0 cm^-1" in message for message in runner.errors)
+    assert any("DFT grid Grid3" in message for message in runner.errors)
+    assert runner.result.final_molecule1.atoms[0].x == pytest.approx(0.0)
+    assert runner.result.final_molecule2.atoms[0].x == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_compare_conformers_fails_when_finer_grid_is_still_imaginary(monkeypatch):
+    _install_compare_context(monkeypatch)
+    calls = []
+
+    async def calculator(qm_input, engine=None, **kwargs):
+        calls.append(kwargs.get("custom_name"))
+        return _completed_calculation(
+            qm_input,
+            energy=-10.0,
+            frequencies=[-80.0, 400.0],
+            oxygen_x=1.5,
+        )
+
+    monkeypatch.setattr(
+        "molecular_qm_psi4.nodes.compare_conformers.run_qm_calculator",
+        calculator,
+    )
+    arg = CompareConformersModel(
+        qm_input=_source(molecule=_named_water("boat"), grid_type=GridType.Grid4),
+        molecule=_named_water("chair"),
+    )
+    runner = _CompareRunner()
+    result = await inspect.unwrap(compare_conformers)(arg, node_runner=runner)
+
+    assert result.status == TaskStatus.FAILED
+    assert "imaginary frequencies remain after increasing the DFT grid" in result.error_message
+    assert calls == [None, "finer-grid-mol1"]
+    assert any("DFT grid Grid5" in message for message in runner.errors)
+
+
+@pytest.mark.asyncio
+async def test_compare_conformers_fails_when_the_dft_grid_cannot_be_increased(monkeypatch):
+    _install_compare_context(monkeypatch)
+    calls = []
+
+    async def calculator(qm_input, engine=None, **kwargs):
+        calls.append(qm_input.grid_type)
+        return _completed_calculation(
+            qm_input,
+            energy=-10.0,
+            frequencies=[-80.0, 400.0],
+            oxygen_x=1.5,
+        )
+
+    monkeypatch.setattr(
+        "molecular_qm_psi4.nodes.compare_conformers.run_qm_calculator",
+        calculator,
+    )
+    arg = CompareConformersModel(
+        qm_input=_source(molecule=_named_water("boat"), grid_type=GridType.Grid5),
+        molecule=_named_water("chair"),
+    )
+    runner = _CompareRunner()
+    result = await inspect.unwrap(compare_conformers)(arg, node_runner=runner)
+
+    assert result.status == TaskStatus.FAILED
+    assert "already the finest grid" in result.error_message
+    assert calls == [GridType.Grid5]
+    assert any("Imaginary frequencies below 0 cm^-1" in message for message in runner.errors)
+
+
+def test_zero_frequency_is_allowed():
+    table = vibrational_frequency_table([0.0, 12.0, 400.0])
     assert (
         _imaginary_frequency_failure(
             SimpleNamespace(vibrational_frequencies=table), None
@@ -352,13 +554,13 @@ def test_imaginary_frequency_at_minus_49_is_allowed():
     )
 
 
-def test_imaginary_frequency_below_minus_50_fails():
-    table = vibrational_frequency_table([10.0, -51.0, 400.0])
+def test_any_negative_frequency_fails():
+    table = vibrational_frequency_table([10.0, -0.1, 400.0])
     message = _imaginary_frequency_failure(
         SimpleNamespace(vibrational_frequencies=table), None
     )
-    assert "Imaginary frequencies below -50 cm^-1" in message
-    assert "mode 2=-51.00 cm^-1" in message
+    assert "Imaginary frequencies below 0 cm^-1" in message
+    assert "mode 2=-0.10 cm^-1" in message
 
 
 def test_imaginary_frequency_reads_qm_result_when_child_has_no_table():

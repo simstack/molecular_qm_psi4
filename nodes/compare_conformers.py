@@ -6,7 +6,7 @@ from pydantic import model_validator
 
 from molecular_qm_dftb.models.dftb_input import DftbInput
 from molecular_qm_dftb.nodes.dftb_calculator import dftb_calculator
-from molecular_qm_models import Molecule, QMInput
+from molecular_qm_models import GridType, Molecule, QMInput
 from molecular_qm_models.basis_set import BasisSet, BasisSetEnum
 from molecular_qm_models.density_functional import Functional, FunctionalEnum
 from molecular_qm_models.energy_units import MolecularEnergyUnitEnum, convert_energy_unit
@@ -19,7 +19,6 @@ from molecular_qm_psi4.nodes.multistep_optimizer import (
     _persist_step_molecule,
     multistep_optimizer,
 )
-from molecular_qm_psi4.util.frequency_table import FREQ_ZERO_CM1
 from molecular_qm_psi4.util.qm_engine import (
     QMEngine,
     QMEngineInput,
@@ -342,7 +341,7 @@ def _thermo_component(source, label: str, column: str = "tot"):
 
 
 def _imaginary_frequency_failure(source, qm_result) -> Optional[str]:
-    """Return a failure message when a reported mode is below -FREQ_ZERO_CM1.
+    """Return a failure message when a reported mode is negative.
 
     Frequencies are read from ``source.vibrational_frequencies``, otherwise from
     ``qm_result``. A missing table, an empty table, or a row without Mode or
@@ -371,11 +370,106 @@ def _imaginary_frequency_failure(source, qm_result) -> Optional[str]:
         if row.get("Wavenumber") is None:
             raise ValueError("vibrational frequency row has no Wavenumber")
         wavenumber = float(row["Wavenumber"])
-        if wavenumber < -FREQ_ZERO_CM1:
+        if wavenumber < 0.0:
             bad.append(f"mode {row['Mode']}={wavenumber:.2f} cm^-1")
     if not bad:
         return None
-    return f"Imaginary frequencies below -{FREQ_ZERO_CM1:g} cm^-1: " + ", ".join(bad)
+    return "Imaginary frequencies below 0 cm^-1: " + ", ".join(bad)
+
+
+def _next_dft_grid(grid_type) -> GridType:
+    current = getattr(grid_type, "value", grid_type)
+    if current is None:
+        raise ValueError("grid_type is not set")
+    try:
+        current_grid = GridType(current)
+    except ValueError as exc:
+        raise ValueError(f"unsupported DFT grid {current!r}") from exc
+    order = list(GridType)
+    index = order.index(current_grid)
+    if index + 1 >= len(order):
+        raise ValueError(f"DFT grid {current_grid.value} is already the finest grid")
+    return order[index + 1]
+
+
+async def _reoptimize_if_imaginary(
+    node_runner,
+    molecule_index: int,
+    qm_input: QMInput,
+    source_molecule: Molecule,
+    calc_result,
+    rerun,
+):
+    """Return the calculation, or an error string when it still cannot be used.
+
+    A failed calculation, or a completed one with a negative frequency, is
+    logged. It is then repeated once from ``final_structure`` on the next
+    finer DFT grid, including frequencies. ``rerun`` receives that QMInput.
+    A second failure or a second negative frequency returns an error string.
+    A completed calculation with no frequency table raises ValueError.
+    """
+    status = getattr(calc_result, "status", None)
+    failed = status is not None and status != TaskStatus.COMPLETED
+    attached = None
+    for name in ("qm_result", "psi4_result", "pyscf_result"):
+        value = getattr(calc_result, name, None)
+        if value is not None and getattr(value, "final_structure", None) is not None:
+            attached = value
+            break
+    if failed:
+        message = getattr(calc_result, "error_message", None)
+        if not isinstance(message, str) or not message.strip():
+            message = "calculation failed"
+        node_runner.error(f"Molecule {molecule_index}: {message}")
+        problem = message.strip()
+        qm_result = attached
+    else:
+        qm_result, child_error = _child_qm_result(calc_result)
+        if child_error:
+            node_runner.error(f"Molecule {molecule_index}: {child_error}")
+            return f"Molecule {molecule_index}: {child_error}"
+        freq_error = _imaginary_frequency_failure(calc_result, qm_result)
+        if freq_error is None:
+            return calc_result
+        node_runner.error(f"Molecule {molecule_index}: {freq_error}")
+        problem = freq_error
+    final_mol = _final_structure_molecule(qm_result, source_molecule)
+    if final_mol is None:
+        if failed:
+            return f"Molecule {molecule_index}: {problem}"
+        reason = f"Molecule {molecule_index}: no final geometry to reoptimize"
+        node_runner.error(reason)
+        return reason
+    try:
+        finer = _next_dft_grid(getattr(qm_input, "grid_type", None))
+    except ValueError as exc:
+        node_runner.error(f"Molecule {molecule_index}: {exc}")
+        return f"Molecule {molecule_index}: {problem}; {exc}"
+    retry_input = _qm_input_copy(qm_input, molecule=final_mol)
+    retry_input.grid_type = finer
+    node_runner.error(
+        f"Molecule {molecule_index}: reoptimizing from the last geometry "
+        f"with DFT grid {finer.value} and recomputing frequencies"
+    )
+    retried = await rerun(retry_input)
+    retried_status = getattr(retried, "status", None)
+    if retried_status is not None and retried_status != TaskStatus.COMPLETED:
+        message = getattr(retried, "error_message", None)
+        if not isinstance(message, str) or not message.strip():
+            message = "calculation failed"
+        node_runner.error(f"Molecule {molecule_index}: {message}")
+        return f"Molecule {molecule_index}: {message.strip()}"
+    retried_qm, retried_error = _child_qm_result(retried)
+    if retried_error:
+        return f"Molecule {molecule_index}: {retried_error}"
+    freq_error = _imaginary_frequency_failure(retried, retried_qm)
+    if freq_error is not None:
+        node_runner.error(f"Molecule {molecule_index}: {freq_error}")
+        return (
+            f"Molecule {molecule_index}: imaginary frequencies remain after "
+            f"increasing the DFT grid: {freq_error}"
+        )
+    return retried
 
 
 def _pair_difference(values) -> Optional[float]:
@@ -611,7 +705,10 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
     thermodynamic properties.
 
     This function uses ``psi4_calculator`` or ``pyscf_calculator`` (same ``QMInput``)
-    depending on ``arg.engine``.
+    depending on ``arg.engine``. Negative frequencies are logged.
+    That conformer is then reoptimized once from its last geometry on the next
+    finer DFT grid, and the frequencies are computed again. Remaining imaginary
+    frequencies fail the node.
 
     Parameters:
         arg (CompareConformersModel): The model containing the molecule data and quantum mechanical
@@ -677,79 +774,92 @@ async def compare_conformers(arg: CompareConformersModel, **kwargs) -> SimstackR
         
         calc_result = await run_qm_calculator(current_input, arg.engine, **kwargs)
 
-        if calc_result.status == TaskStatus.COMPLETED:
-            qm_result, qm_error = _child_qm_result(calc_result)
-            final_mol = _final_structure_molecule(qm_result, molecule)
-            if final_mol is not None:
-                final_mol = await _persist_step_molecule(
-                    final_mol, node_runner, f"compare-mol{i + 1}"
-                )
-            optimized_mols.append(final_mol)
-            scf_energy = None if qm_result is None else qm_result.final_energy
-            if scf_energy is None:
-                node_runner.warning(
-                    f"SCF energy not found for molecule {i+1}"
-                    + (f": {qm_error}" if qm_error else "")
-                )
-            else:
-                node_runner.info(f"Molecule {i+1} SCF energy: {scf_energy}")
-            scf_values.append(scf_energy)
+        async def rerun_on_finer_grid(retry_input, molecule_index=i + 1):
+            retry_kwargs = dict(kwargs)
+            previous_name = retry_kwargs.get("custom_name")
+            retry_name = f"finer-grid-mol{molecule_index}"
+            if isinstance(previous_name, str) and previous_name.strip():
+                retry_name = f"{previous_name.strip()}-{retry_name}"
+            retry_kwargs["custom_name"] = retry_name
+            return await run_qm_calculator(retry_input, arg.engine, **retry_kwargs)
 
-            freq_error = _imaginary_frequency_failure(calc_result, qm_result)
-            if freq_error is not None:
-                return node_runner.fail(f"Molecule {i + 1}: {freq_error}")
-
-            g_tot = _thermo_component(calc_result, "G")
-            if g_tot is None:
-                node_runner.error(f"G tot not found in thermochemistry output for molecule {i+1}")
-                return node_runner.fail(f"Gibbs Free Energy calculation failed for molecule {i+1}")
-            g_values.append(g_tot)
-            node_runner.info(f"Molecule {i+1} Gibbs Free Energy: {g_tot}")
-
-            g_elec = _thermo_component(calc_result, "G", "elec")
-            if g_elec is None:
-                node_runner.error(
-                    f"G elec not found in thermochemistry output for molecule {i+1}"
-                )
-                return node_runner.fail(
-                    f"Electronic Gibbs free energy is missing for molecule {i+1}"
-                )
-            g_minus_elec_values.append(g_tot - g_elec)
-            node_runner.info(
-                f"Molecule {i+1} G minus electronic energy: {g_tot - g_elec}"
+        resolved = await _reoptimize_if_imaginary(
+            node_runner,
+            i + 1,
+            current_input,
+            molecule,
+            calc_result,
+            rerun_on_finer_grid,
+        )
+        if isinstance(resolved, str):
+            return node_runner.fail(resolved)
+        calc_result = resolved
+        qm_result, qm_error = _child_qm_result(calc_result)
+        final_mol = _final_structure_molecule(qm_result, molecule)
+        if final_mol is not None:
+            final_mol = await _persist_step_molecule(
+                final_mol, node_runner, f"compare-mol{i + 1}"
             )
-
-            h_tot = _thermo_component(calc_result, "H")
-            if h_tot is None:
-                node_runner.error(
-                    f"H tot not found in thermochemistry output for molecule {i+1}"
-                )
-                return node_runner.fail(f"Enthalpy calculation failed for molecule {i+1}")
-            h_values.append(h_tot)
-            node_runner.info(f"Molecule {i+1} Enthalpy H tot: {h_tot}")
-
-            zpe_tot = _thermo_component(calc_result, "ZPE")
-            if zpe_tot is not None:
-                node_runner.info(f"Molecule {i+1} ZPE Total: {zpe_tot}")
-            else:
-                node_runner.warning(f"ZPE tot not found in thermochemistry output for molecule {i+1}")
-            zpe_values.append(zpe_tot)
-
-            e_tot = _thermo_component(calc_result, "E")
-            if e_tot is not None:
-                node_runner.info(f"Molecule {i+1} Thermochemistry E tot: {e_tot}")
-            else:
-                node_runner.warning(f"E tot not found in thermochemistry output for molecule {i+1}")
-            e_thermo_values.append(e_tot)
-
-            s_tot = _thermo_component(calc_result, "S")
-            if s_tot is not None:
-                node_runner.info(f"Molecule {i+1} Entropy S tot: {s_tot}")
-            else:
-                node_runner.warning(f"S tot not found in thermochemistry output for molecule {i+1}")
-            s_values.append(s_tot)
+        optimized_mols.append(final_mol)
+        scf_energy = None if qm_result is None else qm_result.final_energy
+        if scf_energy is None:
+            node_runner.warning(
+                f"SCF energy not found for molecule {i+1}"
+                + (f": {qm_error}" if qm_error else "")
+            )
         else:
-            return node_runner.fail(f"Calculation failed for molecule {i+1}: {calc_result.error_message}")
+            node_runner.info(f"Molecule {i+1} SCF energy: {scf_energy}")
+        scf_values.append(scf_energy)
+
+        g_tot = _thermo_component(calc_result, "G")
+        if g_tot is None:
+            node_runner.error(f"G tot not found in thermochemistry output for molecule {i+1}")
+            return node_runner.fail(f"Gibbs Free Energy calculation failed for molecule {i+1}")
+        g_values.append(g_tot)
+        node_runner.info(f"Molecule {i+1} Gibbs Free Energy: {g_tot}")
+
+        g_elec = _thermo_component(calc_result, "G", "elec")
+        if g_elec is None:
+            node_runner.error(
+                f"G elec not found in thermochemistry output for molecule {i+1}"
+            )
+            return node_runner.fail(
+                f"Electronic Gibbs free energy is missing for molecule {i+1}"
+            )
+        g_minus_elec_values.append(g_tot - g_elec)
+        node_runner.info(
+            f"Molecule {i+1} G minus electronic energy: {g_tot - g_elec}"
+        )
+
+        h_tot = _thermo_component(calc_result, "H")
+        if h_tot is None:
+            node_runner.error(
+                f"H tot not found in thermochemistry output for molecule {i+1}"
+            )
+            return node_runner.fail(f"Enthalpy calculation failed for molecule {i+1}")
+        h_values.append(h_tot)
+        node_runner.info(f"Molecule {i+1} Enthalpy H tot: {h_tot}")
+
+        zpe_tot = _thermo_component(calc_result, "ZPE")
+        if zpe_tot is not None:
+            node_runner.info(f"Molecule {i+1} ZPE Total: {zpe_tot}")
+        else:
+            node_runner.warning(f"ZPE tot not found in thermochemistry output for molecule {i+1}")
+        zpe_values.append(zpe_tot)
+
+        e_tot = _thermo_component(calc_result, "E")
+        if e_tot is not None:
+            node_runner.info(f"Molecule {i+1} Thermochemistry E tot: {e_tot}")
+        else:
+            node_runner.warning(f"E tot not found in thermochemistry output for molecule {i+1}")
+        e_thermo_values.append(e_tot)
+
+        s_tot = _thermo_component(calc_result, "S")
+        if s_tot is not None:
+            node_runner.info(f"Molecule {i+1} Entropy S tot: {s_tot}")
+        else:
+            node_runner.warning(f"S tot not found in thermochemistry output for molecule {i+1}")
+        s_values.append(s_tot)
 
     _compare_conformers_outputs(
         node_runner,
