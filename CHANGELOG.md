@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.33.1 (2026-11-08)
+
+### Bug Fixes
+
+- Retry conformer calculations once on a finer DFT grid
+  ([`ec0703d`](https://github.com/simstack/molecular_qm_psi4/commit/ec0703da5bc01d3811c9a24c49d8f9569135377c))
+
+Negative frequencies and a failed first grid are logged, then the last geometry is reoptimized. A
+  second failure still fails the node.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.33.0 (2026-11-07)
 
 ### Features
