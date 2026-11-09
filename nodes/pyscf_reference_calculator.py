@@ -48,9 +48,13 @@ async def pyscf_reference_calculator(qm_input: QMInput, **kwargs) -> SimstackRes
     the density-fitted Hessian estimate is logged before any kernel starts. The
     calculation then runs in this process: ``mf.kernel``, geometry optimization
     through geometric, and ``Hessian.kernel`` plus ``harmonic_analysis``. It does
-    not call ``pyscf_optimization`` or ``pyscf_hessian_orchestrator``. A
-    fixed-geometry calculation with gradients stores the nuclear gradient, AO
-    density matrix, overlap, and basis record in the wavefunction payload.
+    not call ``pyscf_optimization`` or ``pyscf_hessian_orchestrator``. Density
+    fitting uses ``qm_input.basis_set.aux_basis``: ``def2/J`` and ``def2/JK``
+    are the PySCF universal Coulomb and Coulomb-exchange fitting bases, and
+    ``none`` leaves PySCF's functional-dependent default. An auxiliary basis
+    this PySCF build cannot load raises ValueError. A fixed-geometry calculation
+    with gradients stores the nuclear gradient, AO density matrix, overlap, and
+    basis record in the wavefunction payload.
 
     SimstackResult:
         qm_result (QMResult): Parsed result from the PySCF calculation.
@@ -130,6 +134,22 @@ async def pyscf_reference_calculator(qm_input: QMInput, **kwargs) -> SimstackRes
             mf = calculator.build_mean_field(mol)
             if stdout_tee is not None:
                 mf.stdout = stdout_tee
+            requested_auxbasis = getattr(calculator, "auxbasis", None)
+            if requested_auxbasis is not None:
+                fitted = getattr(mf, "with_df", None)
+                chosen = getattr(fitted, "auxbasis", None)
+                if fitted is None or chosen in (None, ""):
+                    raise ValueError(
+                        f"auxiliary basis {requested_auxbasis} was not applied"
+                    )
+                if isinstance(chosen, str) and chosen != requested_auxbasis:
+                    raise ValueError(
+                        f"auxiliary basis {requested_auxbasis} was not applied; "
+                        f"density fitting uses {chosen}"
+                    )
+                node_runner.info(
+                    f"Density fitting auxiliary basis {requested_auxbasis}"
+                )
 
             restart_payload = None
             if qm_input.restart_files:
