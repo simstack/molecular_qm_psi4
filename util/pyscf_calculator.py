@@ -267,6 +267,56 @@ def method_name_from_qm_input(qm_input) -> str:
     return str(_named_value(method, "DFT")).upper()
 
 
+# QMInput auxiliary labels and the PySCF basis file for the same fitting set.
+_AUXBASIS_FOR_PYSCF = (
+    ("def2/J", "def2-universal-jfit"),
+    ("def2/JK", "def2-universal-jkfit"),
+    ("def2-SVP/C", "def2-svp-ri"),
+    ("def2-TZVP/C", "def2-tzvp-ri"),
+    ("AutoAux", "autoaux"),
+    ("cc-pVDZ/JK", "cc-pvdz-jkfit"),
+    ("cc-pVTZ/JK", "cc-pvtz-jkfit"),
+    ("cc-pVQZ/JK", "cc-pvqz-jkfit"),
+    ("cc-pVDZ/C", "cc-pvdz-ri"),
+    ("cc-pVTZ/C", "cc-pvtz-ri"),
+    ("cc-pVQZ/C", "cc-pvqz-ri"),
+    ("Universal/J", "def2-universal-jfit"),
+)
+
+
+def pyscf_auxbasis_name(qm_input):
+    """PySCF density-fitting basis selected by ``basis_set.aux_basis``.
+
+    A missing auxiliary basis or ``none`` returns None, and density fitting
+    keeps PySCF's functional-dependent default. Any other name that this
+    PySCF build cannot load raises ValueError.
+    """
+    basis_set = getattr(qm_input, "basis_set", None)
+    aux = getattr(basis_set, "aux_basis", None) if basis_set is not None else None
+    if aux is None:
+        return None
+    aux_val = getattr(aux, "aux_basis", None)
+    if aux_val is None:
+        raise ValueError("auxiliary basis is required")
+    raw = _named_value(aux_val, None)
+    if raw is None:
+        raise ValueError("auxiliary basis is required")
+    name = str(raw).strip()
+    if name.lower() == "none":
+        return None
+    if name == "":
+        raise ValueError("auxiliary basis is required")
+    folded = name.lower()
+    for label, pyscf_name in _AUXBASIS_FOR_PYSCF:
+        if label.lower() == folded:
+            return pyscf_name
+    known = ", ".join(label for label, _pyscf_name in _AUXBASIS_FOR_PYSCF)
+    raise ValueError(
+        f"auxiliary basis {name!r} has no PySCF density-fitting basis; "
+        f"known auxiliary bases are {known}"
+    )
+
+
 def harmonic_cartesian_constraints(qm_input) -> list:
     molecule = getattr(qm_input, "molecule", None)
     if molecule is None:
@@ -553,12 +603,10 @@ class PySCFCalculator:
         return mol
 
     def _apply_density_fit(self, mf):
-        aux = getattr(getattr(self.qm_input, "basis_set", None), "aux_basis", None)
-        aux_val = getattr(aux, "aux_basis", aux)
-        aux_name = _named_value(aux_val, "NONE")
-        if aux_name and str(aux_name).lower() not in {"none", ""}:
-            return mf.density_fit(auxbasis=str(aux_name))
-        return mf.density_fit()
+        self.auxbasis = pyscf_auxbasis_name(self.qm_input)
+        if self.auxbasis is None:
+            return mf.density_fit()
+        return mf.density_fit(auxbasis=self.auxbasis)
 
     def _apply_solvent(self, mf):
         if not getattr(self.qm_input, "use_solvent", False):
@@ -627,7 +675,8 @@ class PySCFCalculator:
                 f"grid_level={getattr(getattr(mf, 'grids', None), 'level', None)}, "
                 f"disp={getattr(mf, 'disp', None)}, "
                 f"open_shell={open_shell}, "
-                f"density_fit={bool(density_fit)}"
+                f"density_fit={bool(density_fit)}, "
+                f"auxbasis={getattr(self, 'auxbasis', None)}"
             )
         return mf
 

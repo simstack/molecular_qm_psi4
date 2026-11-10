@@ -5,7 +5,10 @@ from molecular_qm_psi4.nodes.pyscf_reference_calculator import pyscf_reference_c
 from simstack.core.context import context
 from simstack.core.definitions import TaskStatus
 from simstack.core.node import node
-from simstack.core.resource_assignment import normalize_call_path
+from simstack.core.resource_assignment import (
+    normalize_call_path,
+    resolve_resource_assignment,
+)
 from simstack.core.simstack_result import SimstackResult
 from simstack.models import Parameters, StringData
 from simstack.models.node_registry import NodeRegistry
@@ -24,8 +27,9 @@ async def recover_pyscf_reference_coordinator(call_path: StringData, /, **kwargs
     with status timeout whose call path matches is recovered. The latest
     MoleculeSnapshot on that node, or on a direct child, supplies the geometry
     and wavefunction. ``pyscf_reference_calculator`` is started as a child of
-    the timed-out node, on its own cloud VM. The VM deadline is that child's
-    slurm time, measured from when the new VM starts. Matching jobs are
+    the timed-out node, on its own cloud VM. The VM deadline is the slurm time
+    on the assignment rule for this coordinator's ``pyscf_reference_calculator``
+    path, measured from when the new VM starts. Matching jobs are
     recovered at the same time. When a
     child completes, its results and status replace that timed-out node's
     registry results and status. A failed child leaves its original node at
@@ -59,6 +63,32 @@ async def recover_pyscf_reference_coordinator(call_path: StringData, /, **kwargs
         return node_runner.succeed()
     node_runner.info(
         f"Recovering {len(matches)} timeout nodes matching {pattern!r} in parallel"
+    )
+    coordinator_call_path = kwargs.get("call_path")
+    if not isinstance(coordinator_call_path, str) or not coordinator_call_path.strip():
+        raise ValueError("coordinator call_path is required")
+    recovery_call_path = (
+        normalize_call_path(coordinator_call_path) + ".pyscf_reference_calculator"
+    )
+    recovery_resolution = await resolve_resource_assignment(
+        context.db,
+        call_path=recovery_call_path,
+        base_parameters=Parameters(),
+    )
+    recovery_rule = recovery_resolution.matched_rule
+    if recovery_rule is None:
+        raise ValueError(f"no resource assignment rule matches {recovery_call_path}")
+    rule_slurm = recovery_rule.slurm_parameters or recovery_rule.slurm_parameters_patch or {}
+    if not isinstance(rule_slurm, dict):
+        raise ValueError(
+            f"assignment rule {recovery_rule.name} slurm_parameters is not a dict"
+        )
+    recovery_time = rule_slurm.get("time")
+    if recovery_time is None or not str(recovery_time).strip():
+        raise ValueError(f"assignment rule {recovery_rule.name} has no slurm time")
+    recovery_time = str(recovery_time).strip()
+    node_runner.info(
+        f"Recovery VM slurm time {recovery_time} from rule {recovery_rule.name}"
     )
 
     async def recover_one(entry):
@@ -105,9 +135,7 @@ async def recover_pyscf_reference_coordinator(call_path: StringData, /, **kwargs
             child_parameters = entry.parameters.model_copy(deep=True)
             if child_parameters.slurm_parameters is None:
                 raise ValueError(f"timed-out node {entry.id} has no slurm_parameters")
-            recovery_time = child_parameters.slurm_parameters.time
-            if recovery_time is None or not str(recovery_time).strip():
-                raise ValueError(f"timed-out node {entry.id} has no slurm time")
+            child_parameters.slurm_parameters.time = recovery_time
             child_parameters.in_docker = True
             child_parameters.force_rerun = True
             child_parameters.separate_cloud_vm = True
