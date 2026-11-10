@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.34.0 (2026-11-10)
+
+### Bug Fixes
+
+- Take the PySCF recovery deadline from its assignment rule
+  ([`649cc3f`](https://github.com/simstack/molecular_qm_psi4/commit/649cc3f769c2e2c38676dd2b5f706275c1d15393))
+
+The recovery VM was keeping the timed-out job's Slurm time instead of the time on the coordinator's
+  pyscf_reference_calculator rule.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+### Features
+
+- Use the QMInput auxiliary basis in PySCF reference DFT
+  ([`2da4fe0`](https://github.com/simstack/molecular_qm_psi4/commit/2da4fe08db4fce55b870d61580bff3af697e934a))
+
+Map labels such as def2/J and def2/JK onto PySCF fitting bases and fail when the requested basis
+  cannot be loaded.
+
+
 ## v0.33.1 (2026-11-08)
 
 ### Bug Fixes
