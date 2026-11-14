@@ -29,9 +29,15 @@ def test_density_fit_auxmol_is_attached_when_pyscf_leaves_it_unset():
         attach_df_auxmol(type("MF", (), {"with_df": None, "mol": mol})(), mol)
 
 
-def test_largest_aux_block_fits_the_nine_component_tensor():
+def test_largest_aux_block_fits_the_ipip2_peak():
     blk = largest_aux_blk(814, 2058, 80, 27200, 0)
-    assert 200 <= blk <= 250
+    assert blk == 157
+    # aux-632-944 was SIGKILLed on a 77-function int3c2e_ipip2 block at
+    # nao=1136, naux=2856. 27904 MB is the 32G container minus the 4096 MB
+    # reserve. 337 occupied orbitals and 6000 MB already resident is a
+    # mid-size case for that basis, and it must stay far under 77 functions.
+    narrowed = largest_aux_blk(1136, 2856, 337, 27904, 6000)
+    assert narrowed == 20
     with pytest.raises(ValueError, match="does not fit"):
         largest_aux_blk(814, 2058, 80, 1000, 0)
     with pytest.raises(ValueError, match="current_mb"):

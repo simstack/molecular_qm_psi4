@@ -462,11 +462,15 @@ def attach_df_auxmol(mf, mol=None):
 
 
 def largest_aux_blk(nao, naux, nocc, max_memory_mb, current_mb) -> int:
-    """Largest aux-function block whose ``int3c2e_ipip1`` peak fits in memory.
+    """Largest aux-function block whose ``int3c2e_ipip2`` peak fits in memory.
 
-    PySCF's own ``0.3`` block heuristic assumes one ``(nao, nao, blk)`` slice.
-    The DF Hessian allocates nine Cartesian components and copies that tensor
-    for the GEMM, which is the peak counted by ``df_hessian_memory``.
+    ``current_mb`` is the RSS before ``_partial_ejk_window`` builds the
+    full-aux metric and the block-sized stacks. The peak that crosses a 32 GB
+    cgroup is later: those stacks are still live when ``int3c2e_ipip2``
+    ``(9, nao, nao, blk)`` is allocated, and ``int3c2e_ip2`` ``(3, nao, nao, blk)``
+    is allocated before that tensor is released. Libcint keeps a scratch copy
+    of the 9-component integral as well. A block sized from the earlier
+    ``int3c2e_ipip1`` contraction is wide enough to be SIGKILLed there.
     """
     if max_memory_mb is None:
         raise ValueError("max_memory is required")
@@ -485,11 +489,33 @@ def largest_aux_blk(nao, naux, nocc, max_memory_mb, current_mb) -> int:
         raise ValueError(
             f"nao, naux and nocc must be positive, got nao={nao!r}, naux={naux!r}, nocc={nocc!r}"
         )
+    orbital_pair = orbitals * orbitals
+    aux_pair = aux * aux
+    # int2c, int2c_ip1, inverse, three metric products, int2c_ipip1,
+    # int2c_ip_ip, rho2c_0, and the int2c2e_ip1ip2 buffer. All are (naux, naux)
+    # copies still referenced at the int3c2e_ipip2 call.
+    metric_mb = (1 + 3 + 1 + 3 + 9 + 9 + 1 + 9) * aux_pair * 8 / 1e6
     rhok0_mb = aux * orbitals * occ * 8 / 1e6
-    per_function_mb = 2.0 * (9 + 1) * orbitals * orbitals * 8 / 1e6
+    rhok0_pp_mb = aux * occ * occ * 8 / 1e6
+    # vj1_diag, vk1_diag, and vk2buf, each (3, 3, nao, nao).
+    diag_mb = 3.0 * 9.0 * orbital_pair * 8 / 1e6
+    # ikp_atoms (3), wk_ip2 (3), int3c2e_ipip2 (9), int3c2e_ip2 (3),
+    # and one scratch copy of the 9-component integral.
+    per_function_mb = (
+        (3 + 3 + 9 + 3 + 9) * orbital_pair * 8 / 1e6
+        + 3 * occ * occ * 8 / 1e6
+    )
     if per_function_mb <= 0:
         raise ValueError("DF Hessian aux-block size is not defined for this basis")
-    remaining = budget - rhok0_mb - _DF_HESS_OVERHEAD_MB - resident
+    remaining = (
+        budget
+        - rhok0_mb
+        - rhok0_pp_mb
+        - metric_mb
+        - diag_mb
+        - _DF_HESS_OVERHEAD_MB
+        - resident
+    )
     blk = int(remaining / per_function_mb)
     if blk > _DF_HESS_AUX_BLK:
         blk = _DF_HESS_AUX_BLK
