@@ -43,6 +43,7 @@ from molecular_qm_psi4.util.pyscf_hessian_analytical import (
     contract_h1ao_mo1,
     slurm_time_limit_seconds,
 )
+from molecular_qm_psi4.util.pyscf_hessian_cphf import solve_df_rks_cphf
 from molecular_qm_psi4.util.pyscf_hessian_h1 import make_df_rks_h1, make_h1_memory
 from molecular_qm_psi4.util.pyscf_hessian_partial import (
     aux_blocks_cover,
@@ -859,8 +860,18 @@ async def pyscf_hessian_for_atoms(
                 interval_s=_HEARTBEAT_INTERVAL_S,
                 task_id=heartbeat_task_id,
             ):
-                mo1s, mo_e1s = hessian.solve_mo1(
-                    mf.mo_energy, mf.mo_coeff, mf.mo_occ, h1ao, None, pending
+                # get_jk sizes its aux block from RSS and ignores the
+                # density-fitting file's page cache. Reserve the response
+                # matrices and drop that cache, as make_h1 does.
+                mo1s, mo_e1s = solve_df_rks_cphf(
+                    hessian,
+                    mf.mo_energy,
+                    mf.mo_coeff,
+                    mf.mo_occ,
+                    h1ao,
+                    pending,
+                    budget_mb,
+                    log=node_runner.info,
                 )
             node_runner.info(
                 f"Contracting Coulomb slices for atoms {pending} of task {hessian_task_id}"
