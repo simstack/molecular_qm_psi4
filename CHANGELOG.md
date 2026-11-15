@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v0.34.1 (2026-11-15)
+
+### Bug Fixes
+
+- Size the Hessian CPHF aux block from reserved memory
+  ([`c3eb5f6`](https://github.com/simstack/molecular_qm_psi4/commit/c3eb5f659baa8eaf8a328d35c96c6f7efe9e30a7))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+- Size the Hessian partial aux block from the int3c2e_ipip2 peak
+  ([`76304d7`](https://github.com/simstack/molecular_qm_psi4/commit/76304d748423355fcdf9e42c9f5e74085373c903))
+
+The earlier ipip1 estimate left a 77-function block that was killed on a 32 GB VM while the
+  9-component integral and int3c_ip2 were still live.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.34.0 (2026-11-10)
 
 ### Bug Fixes
