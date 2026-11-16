@@ -5,6 +5,7 @@ from molecular_qm_psi4.util.pyscf_calculator import largest_aux_blk
 from molecular_qm_psi4.util.pyscf_hessian_partial import (
     aux_blocks_cover,
     aux_shell_groups,
+    pending_aux_blocks,
     shell_blocks,
 )
 
@@ -56,6 +57,18 @@ def test_aux_shell_groups_and_blocks_tile_the_basis():
     assert aux_blocks_cover(blocks, 0, 5)
     with pytest.raises(ValueError, match="above the block size"):
         shell_blocks(loc, 0, 4, 1)
+    # One function per shell. A stored 0:6 block is wider than blk=4, which is
+    # the 633:670 row that overlapped the new 633:661 block. The stored range
+    # stays, and only the gap is split.
+    one = list(range(11))
+    pending = pending_aux_blocks([(0, 6)], 0, 10, one, 4)
+    assert pending == [(6, 10)]
+    assert pending_aux_blocks([(0, 10)], 0, 10, one, 4) == []
+    assert pending_aux_blocks([], 0, 10, one, 4) == [(0, 4), (4, 8), (8, 10)]
+    with pytest.raises(ValueError, match="another stored block"):
+        pending_aux_blocks([(0, 6), (4, 8)], 0, 10, one, 4)
+    with pytest.raises(ValueError, match="without matching that block"):
+        pending_aux_blocks([(0, 12)], 0, 10, one, 4)
 
 
 class _AllocationLog:

@@ -53,7 +53,7 @@ from molecular_qm_psi4.util.pyscf_hessian_partial import (
     partial_nlc,
     partial_response2_cross,
     partial_xc_and_e1,
-    shell_blocks,
+    pending_aux_blocks,
     stack_aux_response,
 )
 from molecular_qm_psi4.util.pyscf_result import PySCFResult
@@ -1116,36 +1116,23 @@ async def pyscf_hessian_partial_ext(
         node_runner.info(
             f"JK aux block size {blk} functions at max_memory={float(budget_mb)} MB"
         )
-        blocks = shell_blocks(auxmol.ao_loc, shell_start, shell_end, blk)
-        pending_blocks = []
-        for block_start, block_end in blocks:
-            matches = [
-                record
-                for record in existing
-                if record.piece == "aux"
-                and int(record.shell_start) == block_start
-                and int(record.shell_end) == block_end
-            ]
-            if len(matches) > 1:
-                raise ValueError(
-                    f"multiple Hessian aux partials for shells {block_start}:{block_end}"
-                )
-            if matches:
-                node_runner.info(
-                    f"Hessian aux shells {block_start}:{block_end} of task {hessian_task_id} "
-                    "are already stored"
-                )
+        stored_aux = []
+        for record in existing:
+            if record.piece != "aux":
                 continue
-            for record in existing:
-                if record.piece != "aux":
-                    continue
-                if int(record.shell_end) <= block_start or int(record.shell_start) >= block_end:
-                    continue
-                raise ValueError(
-                    f"stored aux shells {record.shell_start}:{record.shell_end} overlap "
-                    f"{block_start}:{block_end} without matching that block"
-                )
-            pending_blocks.append((block_start, block_end))
+            left = int(record.shell_start)
+            right = int(record.shell_end)
+            if right <= shell_start or left >= shell_end:
+                continue
+            stored_aux.append((left, right))
+        pending_blocks = pending_aux_blocks(
+            stored_aux, shell_start, shell_end, auxmol.ao_loc, blk
+        )
+        for left, right in stored_aux:
+            node_runner.info(
+                f"Hessian aux shells {left}:{right} of task {hessian_task_id} "
+                "are already stored"
+            )
         if not pending_blocks:
             return node_runner.succeed()
         allocated_s = slurm_time_limit_seconds(kwargs.get("parent_parameters"))
