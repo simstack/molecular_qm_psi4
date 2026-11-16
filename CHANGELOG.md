@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.34.2 (2026-11-16)
+
+### Bug Fixes
+
+- Keep stored Hessian aux blocks from an older block size
+  ([`ade3616`](https://github.com/simstack/molecular_qm_psi4/commit/ade361606498c82a9d003459c0d83011fb5a7261))
+
+A rerun raised when shells 633:670 overlapped the narrower 633:661 block. Finished ranges stay, and
+  only the gap is computed.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.34.1 (2026-11-15)
 
 ### Bug Fixes
