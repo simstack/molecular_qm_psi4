@@ -146,6 +146,61 @@ def shell_blocks(ao_loc, shell0, shell1, blk):
     return blocks
 
 
+def pending_aux_blocks(stored, shell0, shell1, ao_loc, blk):
+    """Blocks still to compute inside ``[shell0, shell1)``.
+
+    Stored ranges that lie inside the span are kept, including ranges wider
+    than ``blk`` from an earlier block size. ``shell_blocks`` splits only the
+    gaps. Stored ranges that overlap each other or cross the span raise
+    ``ValueError``, because those rows cannot be added without double-counting.
+    """
+    if isinstance(shell0, bool) or isinstance(shell1, bool):
+        raise ValueError(f"shell bounds must be ints, got {shell0!r}, {shell1!r}")
+    try:
+        start = int(shell0)
+        stop = int(shell1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"shell bounds must be ints, got {shell0!r}, {shell1!r}") from exc
+    if stop <= start:
+        raise ValueError(f"aux shell range {start}:{stop} is empty")
+    ranges = []
+    for block in stored:
+        try:
+            left_raw, right_raw = block[0], block[1]
+        except (TypeError, IndexError) as exc:
+            raise ValueError(f"aux block must be a shell pair, got {block!r}") from exc
+        if isinstance(left_raw, bool) or isinstance(right_raw, bool):
+            raise ValueError(f"aux block must be a shell pair, got {block!r}")
+        try:
+            left, right = int(left_raw), int(right_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"aux block must be a shell pair, got {block!r}") from exc
+        if right <= left or left < start or right > stop:
+            raise ValueError(
+                f"stored aux shells {left}:{right} overlap {start}:{stop} "
+                "without matching that block"
+            )
+        ranges.append((left, right))
+    ranges.sort()
+    cursor = start
+    gaps = []
+    for left, right in ranges:
+        if left < cursor:
+            raise ValueError(
+                f"stored aux shells {left}:{right} overlap another stored block "
+                f"in {start}:{stop}"
+            )
+        if left > cursor:
+            gaps.append((cursor, left))
+        cursor = right
+    if cursor < stop:
+        gaps.append((cursor, stop))
+    pending = []
+    for gap0, gap1 in gaps:
+        pending.extend(shell_blocks(ao_loc, gap0, gap1, blk))
+    return pending
+
+
 def aux_blocks_cover(blocks, shell0, shell1):
     """True when ``blocks`` tile ``[shell0, shell1)`` without gaps or overlaps."""
     try:
