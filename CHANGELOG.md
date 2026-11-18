@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.34.3 (2026-11-18)
+
+### Bug Fixes
+
+- Solve DF Hessian ip1 per AO shell so the partial fits in 32 GB
+  ([`9643a52`](https://github.com/simstack/molecular_qm_psi4/commit/9643a5284450fed3da10b818bd939e94737223a0))
+
+The full-atom int3c2e_ip1 and its metric-solve copies sit beside rhok0 and are killed by the cgroup
+  even when the aux block fits.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.34.2 (2026-11-16)
 
 ### Bug Fixes
