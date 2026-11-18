@@ -63,6 +63,7 @@ ENV BABEL_DATADIR=/opt/conda/share/openbabel-data
 # Unactivated conda: CFFI extensions (dftd3._libdftd3) need this to dlopen.
 ENV CONDA_PREFIX=/opt/conda
 ENV LD_LIBRARY_PATH=/opt/conda/lib
+ENV MPLBACKEND=Agg
 
 ENV UV_PYTHON=/opt/conda/bin/python
 ENV UV_PROJECT_ENVIRONMENT=/opt/conda
@@ -72,9 +73,9 @@ ENV PATH="/opt/conda/bin:/root/.local/bin:$PATH"
 # installed from conda-forge for geometry optimization.
 # PyPI pyscf-properties 0.1.0 crashes GIAO NMR in the CPHF solver
 # (reshape of the response vector). The repository copy accepts that vector.
-RUN uv pip install --system pyscf pyscf-dispersion \
+RUN uv pip install --system pyscf pyscf-dispersion matplotlib \
     "pyscf-properties @ git+https://github.com/pyscf/properties.git" \
- && python -c "import pyscf; from pyscf.geomopt.geometric_solver import optimize; from pyscf.prop import nmr; print('pyscf', pyscf.__version__)"
+ && python -c "import pyscf, matplotlib; from pyscf.geomopt.geometric_solver import optimize; from pyscf.prop import nmr; print('pyscf', pyscf.__version__); print('matplotlib', matplotlib.__version__)"
 
 # Capability package only. Build context must be this repo (or the
 # molecular_qm_psi4 subdirectory). simstack / molecular_qm_models /
@@ -116,7 +117,7 @@ print('pybel format filter', len(pybel.informats), 'inputs')"
 # Check imports only after applying the pybel compatibility patch.
 RUN python -c "from openbabel import openbabel, pybel; print('openbabel', openbabel.__file__)"
 RUN python -c "import simstack, molecular_qm_models, molecular_qm_util, molecular_qm_psi4; print(simstack.__file__); print(molecular_qm_models.__file__); print(molecular_qm_util.__file__); print(molecular_qm_psi4.__file__)"
-RUN python -c "from molecular_qm_psi4.nodes.pyscf_calculator import pyscf_calculator; from molecular_qm_psi4.nodes.pyscf_nmr import pyscf_nmr; from pyscf.prop import nmr; import pyscf; print('pyscf node ok', pyscf.__version__)"
+RUN python -c "from molecular_qm_psi4.nodes.pyscf_calculator import pyscf_calculator; from molecular_qm_psi4.nodes.pyscf_nmr import pyscf_nmr; from molecular_qm_psi4.nodes.intramolecular_interaction import intramolecular_interaction; from pyscf.prop import nmr; import pyscf; print('pyscf node ok', pyscf.__version__)"
 RUN python -c "from dftd3.library import get_api_version as d3v; from dftd4.library import get_api_version as d4v; import qcengine as qcng; print('dftd3 C-API', d3v()); print('dftd4 C-API', d4v()); print('s-dftd3', qcng.get_program('s-dftd3')); print('dftd4', qcng.get_program('dftd4'))"
 
 WORKDIR /app

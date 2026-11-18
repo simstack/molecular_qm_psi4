@@ -26,6 +26,10 @@ from molecular_qm_psi4.nodes.pyscf_hessian import (
     pyscf_hessian_partial_ext,
 )
 from molecular_qm_psi4.models.int_list import IntList
+from molecular_qm_psi4.models.intramolecular_interaction import (
+    IntramolecularInteractionInput,
+)
+from molecular_qm_psi4.nodes.intramolecular_interaction import intramolecular_interaction
 from molecular_qm_psi4.models.pyscf_hessian import (
     PySCFHessianAtomContribution,
     PySCFHessianAtomsInput,
@@ -119,6 +123,8 @@ __all__ = [
     "pyscf_hessian_orchestrator",
     "pyscf_hessian_partial_ext",
     "IntList",
+    "IntramolecularInteractionInput",
+    "intramolecular_interaction",
     "PySCFHessianInput",
     "PySCFHessianStageInput",
     "PySCFHessianPlan",
