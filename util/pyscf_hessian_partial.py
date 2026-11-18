@@ -432,17 +432,50 @@ def _partial_ejk_window(
     ikp_atoms = []
     pki_atoms = []
 
+    ao_loc_orb = _ao_loc_list(mol.ao_loc)
+
     def solved_ip1(shl0, shl1, p0, p1, atom_index, label):
-        note(
-            "allocating",
-            f"int3c2e_ip1 {label} atom {atom_index}",
-            (3, p1 - p0, nao, naux),
-        )
-        int3c_ip1 = get_int3c_ip1((shl0, shl1, 0, nbas, 0, auxmol.nbas))
-        note("allocated", f"int3c2e_ip1 {label} atom {atom_index}", int3c_ip1.shape)
+        # The whole atom is (3, nao_atom, nao, naux) plus the solve buffer, and
+        # the transpose of that integral is a third copy. That size follows the
+        # full aux basis, not the aux-shell block, so a 32 GB VM is killed
+        # while the block sizer still reports a fit. One AO shell at a time
+        # keeps a single shell's integral and its right-hand side.
+        if ao_loc_orb[shl0] != p0 or ao_loc_orb[shl1] != p1:
+            raise ValueError(
+                f"AO shells {shl0}:{shl1} span {ao_loc_orb[shl0]}:{ao_loc_orb[shl1]}, "
+                f"expected {p0}:{p1}"
+            )
         solved_shape = (naux, 3, p1 - p0, nao)
         note("allocating", f"solve_j2c {label} atom {atom_index}", solved_shape)
-        solved = solve_j2c(int3c_ip1.reshape(-1, naux).T).reshape(*solved_shape)
+        solved = np.empty(solved_shape)
+        for shell in range(shl0, shl1):
+            sp0 = ao_loc_orb[shell]
+            sp1 = ao_loc_orb[shell + 1]
+            count = sp1 - sp0
+            if count < 1:
+                raise ValueError(f"AO shell {shell} is empty")
+            block_shape = (3, count, nao, naux)
+            note(
+                "allocating",
+                f"int3c2e_ip1 {label} atom {atom_index} shell {shell}",
+                block_shape,
+            )
+            block = get_int3c_ip1((shell, shell + 1, 0, nbas, 0, auxmol.nbas))
+            note(
+                "allocated",
+                f"int3c2e_ip1 {label} atom {atom_index} shell {shell}",
+                block.shape,
+            )
+            if tuple(int(dim) for dim in block.shape) != block_shape:
+                raise ValueError(
+                    f"int3c2e_ip1 shell {shell} has shape {block.shape}, expected {block_shape}"
+                )
+            rhs = np.ascontiguousarray(block.reshape(3 * count * nao, naux).T)
+            del block
+            column = solve_j2c(rhs).reshape(naux, 3, count, nao)
+            del rhs
+            solved[:, :, sp0 - p0 : sp1 - p0, :] = column
+            del column
         note("allocated", f"solve_j2c {label} atom {atom_index}", solved.shape)
         return solved
 
@@ -607,8 +640,8 @@ def _partial_ejk_window(
                 ek[i0, j0] += lib.einsum("xypq,pq->xy", vk1[:, :, q0:q1], dm0[q0:q1])
         if not hessobj.auxbasis_response:
             continue
-        wk1_pij = solved_ip1(shl0, shl1, p0, p1, i0, "response")
-        rhoj1_p = lib.einsum("pxij,ji->px", wk1_pij, dm0[:, p0:p1])
+        wk1_full = solved_ip1(shl0, shl1, p0, p1, i0, "response")
+        rhoj1_p = lib.einsum("pxij,ji->px", wk1_full, dm0[:, p0:p1])
         if with_j or with_k:
             note(
                 "allocating",
@@ -632,9 +665,21 @@ def _partial_ejk_window(
         if with_k:
             rhok_p_i = lib.einsum("plj,il->pji", rhok0, dm0[p0:p1])
             rhok_pji = lib.einsum("pji,Jj->pJi", rhok_p_i, mocc_2)
+            rho2c = lib.einsum("pxij,qji->xqp", wk1_full, rhok_pji)
+        # The j-atom loop reads only this aux window. wk1_pji is another
+        # (3, naux, nao, nao_atom) buffer and must not sit beside the full solve.
+        window_shape = (nwin, 3, p1 - p0, nao)
+        note("allocating", f"response ip1 window atom {i0}", window_shape)
+        wk1_pij = np.array(wk1_full[ao0:ao1], copy=True)
+        note("allocated", f"response ip1 window atom {i0}", wk1_pij.shape)
+        del wk1_full
+        if tuple(int(dim) for dim in wk1_pij.shape) != window_shape:
+            raise ValueError(
+                f"response ip1 window has shape {wk1_pij.shape}, expected {window_shape}"
+            )
+        if with_k:
             wk1_pji = lib.einsum("ypq,qji->ypji", int2c_ip1, rhok_pji)
             wk1_ipj = lib.einsum("ipyk,kj->ipyj", wk_ip2[p0:p1], dm0)
-            rho2c = lib.einsum("pxij,qji->xqp", wk1_pij, rhok_pji)
         for j_atom in range(auxslices.shape[0]):
             q0 = int(auxslices[j_atom, 2])
             q1 = int(auxslices[j_atom, 3])
@@ -656,9 +701,13 @@ def _partial_ejk_window(
                 piece_k = lib.einsum(
                     "xijp,pji->x", int3c_ip1ip2[:, :, :, loc0:loc1], rhok_pji[left:right]
                 ).reshape(3, 3)
-                piece_k -= lib.einsum("pxij,ypji->xy", wk1_pij[left:right], wk1_pji[:, left:right])
+                piece_k -= lib.einsum(
+                    "pxij,ypji->xy", wk1_pij[loc0:loc1], wk1_pji[:, left:right]
+                )
                 piece_k -= lib.einsum("xqp,yqp->xy", rho2c[:, left:right], int2c_ip1[:, left:right])
-                piece_k += lib.einsum("pxij,ipyj->xy", wk1_pij[left:right], wk1_ipj[:, loc0:loc1])
+                piece_k += lib.einsum(
+                    "pxij,ipyj->xy", wk1_pij[loc0:loc1], wk1_ipj[:, loc0:loc1]
+                )
                 k_factor = 1.0 if response > 1 else 0.5
                 ek[i0, j_atom] += piece_k * k_factor
                 ek[j_atom, i0] += piece_k.T * k_factor
