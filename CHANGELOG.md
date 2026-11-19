@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.36.0 (2026-11-19)
+
+### Features
+
+- Derive the intramolecular fragments from three atom selections
+  ([`6b26203`](https://github.com/simstack/molecular_qm_psi4/commit/6b2620388496b1cc9511dbc2881216621eb7d551))
+
+The molecule supplies the two fragment atoms and the linker atom. The saved PySCF file stays a
+  separate input.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.35.0 (2026-11-19)
 
 ### Features
