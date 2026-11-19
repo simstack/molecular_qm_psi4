@@ -14,8 +14,6 @@ _NCI_DENSITY_WINDOW = 0.05
 _NCI_SCATTER_RDG_MAX = 2.0
 # Reduced gradient is undefined where the density is not positive.
 _UNDEFINED_RDG = 1.0e10
-# Same atoms, same order. Larger than binary roundoff, smaller than a real move.
-_GEOMETRY_MATCH_ANGSTROM = 1.0e-5
 _LINK_ASSIGNMENTS = frozenset(
     {"AB", "C", "SAO0", "SAO1", "SAO2", "SIAO0", "SIAO1", "SIAO2"}
 )
@@ -115,7 +113,12 @@ def load_wavefunction_payload(path):
 
 
 def require_molecule_matches_wavefunction(molecule, payload):
-    """The selection molecule and the saved SCF geometry are the same atom list."""
+    """Same elements and bonds at the same indices. Coordinates may differ.
+
+    Returns atoms placed at the saved wavefunction geometry. Fragment
+    selection uses those coordinates; the input molecule supplies the
+    atom selections.
+    """
     rows = atom_rows(payload)
     atoms = getattr(molecule, "atoms", None)
     if not atoms:
@@ -130,33 +133,56 @@ def require_molecule_matches_wavefunction(molecule, payload):
             raise ValueError(
                 f"atom {index} element {element!r} does not match wavefunction element {row[0]!r}"
             )
-        try:
-            coords = (float(atom.x), float(atom.y), float(atom.z))
-        except (TypeError, ValueError, AttributeError) as exc:
-            raise ValueError(f"atom {index} coordinates must be numeric") from exc
-        if not all(np.isfinite(value) for value in coords):
-            raise ValueError(f"atom {index} coordinates must be finite")
-        delta = max(abs(coords[axis] - row[axis + 1]) for axis in range(3))
-        if delta > _GEOMETRY_MATCH_ANGSTROM:
-            raise ValueError(
-                f"atom {index} is {delta:.6f} Angstrom from the wavefunction geometry"
-            )
+    from molecular_qm_models import Atom
+    from molecular_qm_psi4.util.pyscf_nmr import _bond_neighbors
+
+    wavefunction_atoms = [
+        Atom(element=element, x=x, y=y, z=z) for element, x, y, z in rows
+    ]
+    molecule_bonds = _bond_neighbors(atoms)
+    wavefunction_bonds = _bond_neighbors(wavefunction_atoms)
+    only_molecule = []
+    only_wavefunction = []
+    for index, (molecule_neighbors, wavefunction_neighbors) in enumerate(
+        zip(molecule_bonds, wavefunction_bonds)
+    ):
+        for other in molecule_neighbors - wavefunction_neighbors:
+            if index < other:
+                only_molecule.append((index, other))
+        for other in wavefunction_neighbors - molecule_neighbors:
+            if index < other:
+                only_wavefunction.append((index, other))
+    if only_molecule or only_wavefunction:
+        raise ValueError(
+            "molecule bond topology does not match the wavefunction geometry: "
+            f"bonds only in the molecule {only_molecule}, "
+            f"bonds only in the wavefunction {only_wavefunction}"
+        )
+    return wavefunction_atoms
 
 
-def fragments_from_atom_selections(molecule):
+def fragments_from_atom_selections(molecule, geometry_atoms):
     """Derive A, B, and the linker from exactly three 1-based atom selections.
 
-    Two of the selected atoms belong to fragments A and B, one to each
-    fragment. The linker is bonded to those atoms and does not contain them.
-    The third selected atom belongs to the linker. Exactly one of the three
-    choices may split the bond graph that way. Indices in the result are
-    0-based and sorted.
+    Selections are read from ``molecule``. Bonds are taken from
+    ``geometry_atoms``, which are the saved wavefunction positions in the
+    same atom order. Two of the selected atoms belong to fragments A and B,
+    one to each fragment. The linker is bonded to those atoms and does not
+    contain them. The third selected atom belongs to the linker. Exactly one
+    of the three choices may split the bond graph that way. Indices in the
+    result are 0-based and sorted.
     """
     if molecule is None:
         raise ValueError("molecule is required")
+    if not geometry_atoms:
+        raise ValueError("wavefunction geometry is required")
     atoms = getattr(molecule, "atoms", None)
     if not atoms:
         raise ValueError("molecule has no atoms")
+    if len(geometry_atoms) != len(atoms):
+        raise ValueError(
+            f"molecule has {len(atoms)} atoms, wavefunction geometry has {len(geometry_atoms)}"
+        )
     properties = getattr(molecule, "properties", None)
     if not isinstance(properties, dict):
         raise ValueError("molecule selections are required")
@@ -178,8 +204,8 @@ def fragments_from_atom_selections(molecule):
         if isinstance(item, bool) or not isinstance(item, (int, np.integer)):
             raise ValueError(f"atom selection index {item!r} must be an integer")
         number = int(item)
-        if number < 1 or number > len(atoms):
-            raise ValueError(f"atom selection {number} is outside 1..{len(atoms)}")
+        if number < 1 or number > len(geometry_atoms):
+            raise ValueError(f"atom selection {number} is outside 1..{len(geometry_atoms)}")
         indices.append(number - 1)
     if len(indices) != 3:
         raise ValueError(
@@ -189,7 +215,7 @@ def fragments_from_atom_selections(molecule):
         raise ValueError("the 3 atom selections must be three different atoms")
     from molecular_qm_psi4.util.pyscf_nmr import _bond_neighbors
 
-    neighbors = _bond_neighbors(atoms)
+    neighbors = _bond_neighbors(geometry_atoms)
 
     def reachable(start, blocked):
         seen = {start}
@@ -224,7 +250,7 @@ def fragments_from_atom_selections(molecule):
             linker & fragment_a
             or linker & fragment_b
             or fragment_a & fragment_b
-            or len(covered) != len(atoms)
+            or len(covered) != len(geometry_atoms)
         ):
             continue
         contacts = {

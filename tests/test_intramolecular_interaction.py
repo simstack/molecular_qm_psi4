@@ -43,6 +43,10 @@ def _methanediol(selections):
     return molecule
 
 
+def _fragments(molecule):
+    return fragments_from_atom_selections(molecule, molecule.atoms)
+
+
 def _water_geometry():
     return {
         "atom": [
@@ -88,7 +92,7 @@ def test_three_atom_selections_become_the_linker_and_two_sides():
             {"type": "atom", "atoms": [3]},
         ]
     )
-    fragment_a, fragment_b, linker = fragments_from_atom_selections(molecule)
+    fragment_a, fragment_b, linker = _fragments(molecule)
     assert fragment_a == (1, 5)
     assert fragment_b == (2, 6)
     assert linker == (0, 3, 4)
@@ -99,11 +103,11 @@ def test_three_atom_selections_become_the_linker_and_two_sides():
 
 def test_atom_selections_must_be_three_distinct_viewer_atoms():
     with pytest.raises(ValueError, match="exactly 3 atom selections"):
-        fragments_from_atom_selections(
+        _fragments(
             _methanediol([{"type": "atom", "atoms": [1]}, {"type": "atom", "atoms": [2]}])
         )
     with pytest.raises(ValueError, match="exactly 3 atom selections"):
-        fragments_from_atom_selections(
+        _fragments(
             _methanediol(
                 [
                     {"type": "atom", "atoms": [2]},
@@ -113,7 +117,7 @@ def test_atom_selections_must_be_three_distinct_viewer_atoms():
             )
         )
     with pytest.raises(ValueError, match="outside 1.."):
-        fragments_from_atom_selections(
+        _fragments(
             _methanediol(
                 [
                     {"type": "atom", "atoms": [0]},
@@ -123,7 +127,7 @@ def test_atom_selections_must_be_three_distinct_viewer_atoms():
             )
         )
     with pytest.raises(ValueError, match="three different atoms"):
-        fragments_from_atom_selections(
+        _fragments(
             _methanediol(
                 [
                     {"type": "atom", "atoms": [1]},
@@ -133,7 +137,7 @@ def test_atom_selections_must_be_three_distinct_viewer_atoms():
             )
         )
     with pytest.raises(ValueError, match="found 3 ways"):
-        fragments_from_atom_selections(
+        _fragments(
             _methanediol(
                 [
                     {"type": "atom", "atoms": [2]},
@@ -143,7 +147,7 @@ def test_atom_selections_must_be_three_distinct_viewer_atoms():
             )
         )
     with pytest.raises(ValueError, match="one atom"):
-        fragments_from_atom_selections(
+        _fragments(
             _methanediol(
                 [
                     {"type": "atom", "atoms": [1, 4]},
@@ -171,8 +175,21 @@ def test_molecule_must_match_the_saved_wavefunction_geometry():
         ]
     }
     require_molecule_matches_wavefunction(molecule, payload)
-    payload["atom"][0] = ("C", 0.0, 0.0, 0.1)
-    with pytest.raises(ValueError, match="wavefunction geometry"):
+    shifted = {
+        "atom": [
+            (element, x, y, z + (0.000392 if index == 0 else 0.0))
+            for index, (element, (x, y, z)) in enumerate(
+                zip(["C", "O", "O", "H", "H", "H", "H"], _METHANEDIOL_SITES)
+            )
+        ]
+    }
+    require_molecule_matches_wavefunction(molecule, shifted)
+    payload["atom"][0] = ("N", *_METHANEDIOL_SITES[0])
+    with pytest.raises(ValueError, match="element"):
+        require_molecule_matches_wavefunction(molecule, payload)
+    payload["atom"][0] = ("C", *_METHANEDIOL_SITES[0])
+    payload["atom"][5] = ("H", 8.0, 8.0, 8.0)
+    with pytest.raises(ValueError, match="bond topology"):
         require_molecule_matches_wavefunction(molecule, payload)
 
 

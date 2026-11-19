@@ -31,7 +31,9 @@ async def intramolecular_interaction(
 
     The PySCF calculator writes ``result.wfn.npy`` after SCF. This node loads
     that file. It does not construct orbitals from the molecule. The molecule
-    must match that geometry atom for atom and must have three atom selections.
+    must have the same elements and the same bonds at the same atom indices.
+    Its coordinates may differ. Fragment bonds and the I-SAPT geometry come
+    from the wavefunction. The three atom selections come from the molecule.
     Two of those atoms belong to fragments A and B. The linker does not
     contain them. Psi4 recomputes
     density-fitted Hartree–Fock in ``sapt_basis`` and does not read the PySCF
@@ -68,8 +70,10 @@ async def intramolecular_interaction(
             raise ValueError("wavefunction is required")
         downloaded = Path(opts.wavefunction.get(local_dir=Path(".")))
         payload = load_wavefunction_payload(downloaded)
-        require_molecule_matches_wavefunction(opts.molecule, payload)
-        fragment_a, fragment_b, linker = fragments_from_atom_selections(opts.molecule)
+        geometry = require_molecule_matches_wavefunction(opts.molecule, payload)
+        fragment_a, fragment_b, linker = fragments_from_atom_selections(
+            opts.molecule, geometry
+        )
         node_runner.info(
             "loaded PySCF SCF file "
             f"{downloaded.name}: basis {named_basis(payload)}, "

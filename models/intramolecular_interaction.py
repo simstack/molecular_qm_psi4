@@ -23,7 +23,9 @@ class IntramolecularInteractionInput(Model):
     That file is the SCF result: geometry in Angstrom, charge, spin, basis
     name, and ``mo_coeff`` / ``mo_occ``. This node does not run SCF and does
     not build orbitals from the molecule. The molecule must list the same
-    atoms in the same order. Psi4 recomputes density-fitted Hartree–Fock in
+    elements in the same order and have the same bonds. Its coordinates may
+    differ; the saved wavefunction geometry is the one that is used.
+    Psi4 recomputes density-fitted Hartree–Fock in
     ``sapt_basis``. ``link_assignment`` is Psi4 ``FISAPT_LINK_ASSIGNMENT``.
     The NCI grid uses ``grid_spacing_bohr`` and keeps contact points whose
     reduced density gradient is below ``rdg_cutoff``.
