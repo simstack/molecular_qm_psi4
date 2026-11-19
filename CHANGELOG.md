@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.36.1 (2026-11-19)
+
+### Bug Fixes
+
+- Match a PySCF wavefunction by bonds and atom indices
+  ([`a7df9e6`](https://github.com/simstack/molecular_qm_psi4/commit/a7df9e68557027ed80c239372c6b20195b418258))
+
+A stored geometry can differ by a fraction of a milliångström. Fragments use that geometry and the
+  molecule's atom selections.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.36.0 (2026-11-19)
 
 ### Features
