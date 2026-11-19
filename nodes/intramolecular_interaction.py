@@ -7,8 +7,11 @@ from molecular_qm_psi4.models.intramolecular_interaction import (
 )
 from molecular_qm_psi4.util.intramolecular_interaction import (
     evaluate_nci,
+    fragments_from_atom_selections,
     interaction_partition,
     load_wavefunction_payload,
+    named_basis,
+    require_molecule_matches_wavefunction,
     run_isapt,
     write_interaction_files,
 )
@@ -26,10 +29,14 @@ async def intramolecular_interaction(
 ) -> SimstackResult:
     """I-SAPT0 components and an NCI picture of one intramolecular contact.
 
-    The geometry, charge and spin come from the saved PySCF wavefunction.
-    Psi4 recomputes density-fitted Hartree–Fock in ``sapt_basis`` and does not
-    read the PySCF orbitals. The images use those orbitals and the named basis
-    stored in the payload, with no second SCF. Energies are Hartree.
+    The PySCF calculator writes ``result.wfn.npy`` after SCF. This node loads
+    that file. It does not construct orbitals from the molecule. The molecule
+    must match that geometry atom for atom and must have three atom selections.
+    Two of those atoms belong to fragments A and B. The linker does not
+    contain them. Psi4 recomputes
+    density-fitted Hartree–Fock in ``sapt_basis`` and does not read the PySCF
+    orbitals. The images rebuild the density from the saved ``mo_coeff`` and
+    ``mo_occ`` with no second SCF. Energies are Hartree.
 
     SimstackResult:
         elst (FloatData): I-SAPT0 electrostatics in Hartree.
@@ -55,15 +62,29 @@ async def intramolecular_interaction(
             raise ValueError(f"required package is not installed: {exc}") from exc
         memory_mb, threads, resource_log = pyscf_resources_from_slurm(kwargs)
         node_runner.info(resource_log)
+        if opts.molecule is None:
+            raise ValueError("molecule is required")
         if opts.wavefunction is None:
             raise ValueError("wavefunction is required")
         downloaded = Path(opts.wavefunction.get(local_dir=Path(".")))
         payload = load_wavefunction_payload(downloaded)
+        require_molecule_matches_wavefunction(opts.molecule, payload)
+        fragment_a, fragment_b, linker = fragments_from_atom_selections(opts.molecule)
+        node_runner.info(
+            "loaded PySCF SCF file "
+            f"{downloaded.name}: basis {named_basis(payload)}, "
+            f"charge {payload.get('charge')}, spin {payload.get('spin')}; "
+            "NCI density is make_rdm1 of the saved orbitals, not a new SCF"
+        )
+        node_runner.info(
+            "fragments from the 3 atom selections "
+            f"A={list(fragment_a)} B={list(fragment_b)} linker={list(linker)}"
+        )
         partition = interaction_partition(
             payload,
-            opts.fragment_a,
-            opts.fragment_b,
-            opts.linker,
+            fragment_a,
+            fragment_b,
+            linker,
             (opts.charge_a, opts.charge_b, opts.charge_linker),
             (opts.multiplicity_a, opts.multiplicity_b, opts.multiplicity_linker),
         )

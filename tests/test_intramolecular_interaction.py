@@ -10,14 +10,37 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from molecular_qm_models import Molecule
 from molecular_qm_psi4.util.intramolecular_interaction import (
     evaluate_nci,
+    fragments_from_atom_selections,
     interaction_partition,
     load_wavefunction_payload,
     named_basis,
+    require_molecule_matches_wavefunction,
     run_isapt,
     write_interaction_files,
 )
+
+
+_METHANEDIOL_SITES = [
+    [0.0, 0.0, 0.0],
+    [-1.15, 0.85, 0.20],
+    [1.15, 0.85, -0.20],
+    [-0.50, -0.70, 0.80],
+    [0.50, -0.70, -0.80],
+    [-1.70, 1.20, -0.55],
+    [1.70, 1.20, 0.55],
+]
+
+
+def _methanediol(selections):
+    molecule = Molecule.from_sites(
+        ["C", "O", "O", "H", "H", "H", "H"],
+        _METHANEDIOL_SITES,
+    )
+    molecule.properties = {"selections": selections}
+    return molecule
 
 
 def _water_geometry():
@@ -55,6 +78,102 @@ def test_partition_rejects_overlap_missing_atoms_and_charge_sum():
         _partition(payload, [1], [2], [0], charges=(1, 0, 0))
     with pytest.raises(ValueError, match="multiplicity_a"):
         _partition(payload, [1], [2], [0], multiplicities=(0, 2, 1))
+
+
+def test_three_atom_selections_become_the_linker_and_two_sides():
+    molecule = _methanediol(
+        [
+            {"type": "atom", "atoms": [2]},
+            {"type": "atom", "atoms": [1]},
+            {"type": "atom", "atoms": [3]},
+        ]
+    )
+    fragment_a, fragment_b, linker = fragments_from_atom_selections(molecule)
+    assert fragment_a == (1, 5)
+    assert fragment_b == (2, 6)
+    assert linker == (0, 3, 4)
+    assert 1 in fragment_a and 1 not in linker
+    assert 2 in fragment_b and 2 not in linker
+    assert 0 in linker and 0 not in fragment_a and 0 not in fragment_b
+
+
+def test_atom_selections_must_be_three_distinct_viewer_atoms():
+    with pytest.raises(ValueError, match="exactly 3 atom selections"):
+        fragments_from_atom_selections(
+            _methanediol([{"type": "atom", "atoms": [1]}, {"type": "atom", "atoms": [2]}])
+        )
+    with pytest.raises(ValueError, match="exactly 3 atom selections"):
+        fragments_from_atom_selections(
+            _methanediol(
+                [
+                    {"type": "atom", "atoms": [2]},
+                    {"type": "bond", "atoms": [1, 2]},
+                    {"type": "atom", "atoms": [3]},
+                ]
+            )
+        )
+    with pytest.raises(ValueError, match="outside 1.."):
+        fragments_from_atom_selections(
+            _methanediol(
+                [
+                    {"type": "atom", "atoms": [0]},
+                    {"type": "atom", "atoms": [1]},
+                    {"type": "atom", "atoms": [2]},
+                ]
+            )
+        )
+    with pytest.raises(ValueError, match="three different atoms"):
+        fragments_from_atom_selections(
+            _methanediol(
+                [
+                    {"type": "atom", "atoms": [1]},
+                    {"type": "atom", "atoms": [1]},
+                    {"type": "atom", "atoms": [2]},
+                ]
+            )
+        )
+    with pytest.raises(ValueError, match="found 3 ways"):
+        fragments_from_atom_selections(
+            _methanediol(
+                [
+                    {"type": "atom", "atoms": [2]},
+                    {"type": "atom", "atoms": [3]},
+                    {"type": "atom", "atoms": [4]},
+                ]
+            )
+        )
+    with pytest.raises(ValueError, match="one atom"):
+        fragments_from_atom_selections(
+            _methanediol(
+                [
+                    {"type": "atom", "atoms": [1, 4]},
+                    {"type": "atom", "atoms": [2]},
+                    {"type": "atom", "atoms": [3]},
+                ]
+            )
+        )
+
+
+def test_molecule_must_match_the_saved_wavefunction_geometry():
+    molecule = _methanediol(
+        [
+            {"type": "atom", "atoms": [2]},
+            {"type": "atom", "atoms": [1]},
+            {"type": "atom", "atoms": [3]},
+        ]
+    )
+    payload = {
+        "atom": [
+            (element, *site)
+            for element, site in zip(
+                ["C", "O", "O", "H", "H", "H", "H"], _METHANEDIOL_SITES
+            )
+        ]
+    }
+    require_molecule_matches_wavefunction(molecule, payload)
+    payload["atom"][0] = ("C", 0.0, 0.0, 0.1)
+    with pytest.raises(ValueError, match="wavefunction geometry"):
+        require_molecule_matches_wavefunction(molecule, payload)
 
 
 def test_named_basis_rejects_a_stored_dictionary():

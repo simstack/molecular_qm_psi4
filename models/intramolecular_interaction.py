@@ -1,31 +1,37 @@
-"""Caller-defined A/B/linker partition for one intramolecular contact."""
+"""Molecule selections and fragment charges for one intramolecular contact."""
 
 from odmantic import Model, Reference
 
-from molecular_qm_psi4.models.int_list import IntList
+from molecular_qm_models import Molecule
 from simstack.models import FileStack, simstack_model
 
 
 @simstack_model
 class IntramolecularInteractionInput(Model):
-    """PySCF wavefunction plus the fragments for I-SAPT0 and the NCI picture.
+    """Molecule, saved PySCF orbitals, and the fragment charges for one contact.
 
-    ``fragment_a``, ``fragment_b`` and ``linker`` are 0-based indices into the
-    saved PySCF atom list. They must be non-empty, disjoint, and cover every
-    atom. Charges are the fragment charges passed to Psi4. Multiplicities are
-    the fragment multiplicities: cutting one single bond on each side of the
-    linker is usually two doublets and a singlet linker. ``sapt_basis`` is the
-    Psi4 basis for density-fitted Hartree–Fock I-SAPT0. ``link_assignment`` is
-    Psi4 ``FISAPT_LINK_ASSIGNMENT``. The NCI grid uses ``grid_spacing_bohr``
-    and keeps contact points whose reduced density gradient is below
-    ``rdg_cutoff``.
+    ``molecule`` must carry exactly three atom selections. Each selection is
+    one atom, numbered from 1 as in the molecule viewer. Two of those atoms
+    belong to fragments A and B. The linker is bonded to them and does not
+    contain them. The third atom belongs to the linker. The node derives the
+    0-based fragment lists from that split. Charges are
+    the fragment charges passed to Psi4. Multiplicities are the fragment
+    multiplicities: cutting one single bond on each side of the linker is
+    usually two doublets and a singlet linker.
+
+    ``wavefunction`` is the ``result.wfn.npy`` written by the PySCF calculator.
+    That file is the SCF result: geometry in Angstrom, charge, spin, basis
+    name, and ``mo_coeff`` / ``mo_occ``. This node does not run SCF and does
+    not build orbitals from the molecule. The molecule must list the same
+    atoms in the same order. Psi4 recomputes density-fitted Hartree–Fock in
+    ``sapt_basis``. ``link_assignment`` is Psi4 ``FISAPT_LINK_ASSIGNMENT``.
+    The NCI grid uses ``grid_spacing_bohr`` and keeps contact points whose
+    reduced density gradient is below ``rdg_cutoff``.
     """
 
     field_name: str = "IntramolecularInteractionInput"
+    molecule: Molecule = Reference()
     wavefunction: FileStack = Reference()
-    fragment_a: IntList = Reference()
-    fragment_b: IntList = Reference()
-    linker: IntList = Reference()
     charge_a: int
     charge_b: int
     charge_linker: int

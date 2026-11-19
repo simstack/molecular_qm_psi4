@@ -14,6 +14,8 @@ _NCI_DENSITY_WINDOW = 0.05
 _NCI_SCATTER_RDG_MAX = 2.0
 # Reduced gradient is undefined where the density is not positive.
 _UNDEFINED_RDG = 1.0e10
+# Same atoms, same order. Larger than binary roundoff, smaller than a real move.
+_GEOMETRY_MATCH_ANGSTROM = 1.0e-5
 _LINK_ASSIGNMENTS = frozenset(
     {"AB", "C", "SAO0", "SAO1", "SAO2", "SIAO0", "SIAO1", "SIAO2"}
 )
@@ -110,6 +112,145 @@ def load_wavefunction_payload(path):
     if payload.get("kind") != "pyscf":
         raise ValueError("wavefunction payload kind must be pyscf")
     return payload
+
+
+def require_molecule_matches_wavefunction(molecule, payload):
+    """The selection molecule and the saved SCF geometry are the same atom list."""
+    rows = atom_rows(payload)
+    atoms = getattr(molecule, "atoms", None)
+    if not atoms:
+        raise ValueError("molecule has no atoms")
+    if len(atoms) != len(rows):
+        raise ValueError(
+            f"molecule has {len(atoms)} atoms, wavefunction geometry has {len(rows)}"
+        )
+    for index, (atom, row) in enumerate(zip(atoms, rows)):
+        element = getattr(atom, "element", None)
+        if not isinstance(element, str) or element.strip() != row[0]:
+            raise ValueError(
+                f"atom {index} element {element!r} does not match wavefunction element {row[0]!r}"
+            )
+        try:
+            coords = (float(atom.x), float(atom.y), float(atom.z))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError(f"atom {index} coordinates must be numeric") from exc
+        if not all(np.isfinite(value) for value in coords):
+            raise ValueError(f"atom {index} coordinates must be finite")
+        delta = max(abs(coords[axis] - row[axis + 1]) for axis in range(3))
+        if delta > _GEOMETRY_MATCH_ANGSTROM:
+            raise ValueError(
+                f"atom {index} is {delta:.6f} Angstrom from the wavefunction geometry"
+            )
+
+
+def fragments_from_atom_selections(molecule):
+    """Derive A, B, and the linker from exactly three 1-based atom selections.
+
+    Two of the selected atoms belong to fragments A and B, one to each
+    fragment. The linker is bonded to those atoms and does not contain them.
+    The third selected atom belongs to the linker. Exactly one of the three
+    choices may split the bond graph that way. Indices in the result are
+    0-based and sorted.
+    """
+    if molecule is None:
+        raise ValueError("molecule is required")
+    atoms = getattr(molecule, "atoms", None)
+    if not atoms:
+        raise ValueError("molecule has no atoms")
+    properties = getattr(molecule, "properties", None)
+    if not isinstance(properties, dict):
+        raise ValueError("molecule selections are required")
+    selections = properties.get("selections")
+    if not isinstance(selections, list):
+        raise ValueError("molecule selections are required")
+    indices = []
+    for selection in selections:
+        if not isinstance(selection, dict) or selection.get("type") != "atom":
+            found = selection.get("type") if isinstance(selection, dict) else selection
+            raise ValueError(
+                "molecule must have exactly 3 atom selections, "
+                f"found selection {found!r}"
+            )
+        raw = selection.get("atoms")
+        if isinstance(raw, (str, bytes)) or not isinstance(raw, (list, tuple)) or len(raw) != 1:
+            raise ValueError(f"atom selection must contain one atom, got {raw!r}")
+        item = raw[0]
+        if isinstance(item, bool) or not isinstance(item, (int, np.integer)):
+            raise ValueError(f"atom selection index {item!r} must be an integer")
+        number = int(item)
+        if number < 1 or number > len(atoms):
+            raise ValueError(f"atom selection {number} is outside 1..{len(atoms)}")
+        indices.append(number - 1)
+    if len(indices) != 3:
+        raise ValueError(
+            f"molecule must have exactly 3 atom selections, found {len(indices)}"
+        )
+    if len(set(indices)) != 3:
+        raise ValueError("the 3 atom selections must be three different atoms")
+    from molecular_qm_psi4.util.pyscf_nmr import _bond_neighbors
+
+    neighbors = _bond_neighbors(atoms)
+
+    def reachable(start, blocked):
+        seen = {start}
+        pending = [start]
+        while pending:
+            current = pending.pop()
+            for other in neighbors[current]:
+                if other in blocked or other in seen:
+                    continue
+                seen.add(other)
+                pending.append(other)
+        return seen
+
+    found = []
+    for interior_at, interior in enumerate(indices):
+        ends = [indices[pos] for pos in range(3) if pos != interior_at]
+        linker = reachable(interior, set(ends))
+        if ends[0] in linker or ends[1] in linker:
+            continue
+        fragment_a = reachable(ends[0], linker)
+        fragment_b = reachable(ends[1], linker)
+        if (
+            interior not in linker
+            or ends[0] in linker
+            or ends[1] in linker
+            or ends[0] not in fragment_a
+            or ends[1] not in fragment_b
+        ):
+            continue
+        covered = linker | fragment_a | fragment_b
+        if (
+            linker & fragment_a
+            or linker & fragment_b
+            or fragment_a & fragment_b
+            or len(covered) != len(atoms)
+        ):
+            continue
+        contacts = {
+            other
+            for atom in linker
+            for other in neighbors[atom]
+            if other not in linker
+        }
+        if contacts != set(ends):
+            continue
+        if any(other in fragment_b for atom in fragment_a for other in neighbors[atom]):
+            continue
+        split = (
+            tuple(sorted(fragment_a)),
+            tuple(sorted(fragment_b)),
+            tuple(sorted(linker)),
+        )
+        if split not in found:
+            found.append(split)
+    if len(found) != 1:
+        raise ValueError(
+            "the 3 atom selections must put 2 atoms in the two fragments "
+            "and the other atom in the linker, "
+            f"found {len(found)} ways"
+        )
+    return found[0]
 
 
 def interaction_partition(payload, fragment_a, fragment_b, linker, charges, multiplicities):
