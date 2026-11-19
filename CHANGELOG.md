@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.35.0 (2026-11-19)
+
+### Features
+
+- Analyze an intramolecular contact with I-SAPT0 and NCI images
+  ([`a95f037`](https://github.com/simstack/molecular_qm_psi4/commit/a95f037c7d974a6f2d99fccc63668ce8282a9fc2))
+
+Reuse the saved PySCF geometry for Psi4 and the saved orbitals for the density picture.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.34.3 (2026-11-18)
 
 ### Bug Fixes
