@@ -68,7 +68,14 @@ async def intramolecular_interaction(
             raise ValueError("molecule is required")
         if opts.wavefunction is None:
             raise ValueError("wavefunction is required")
-        downloaded = Path(opts.wavefunction.get(local_dir=Path(".")))
+        wavefunction_name = getattr(opts.wavefunction, "name", None)
+        if not isinstance(wavefunction_name, str) or not wavefunction_name.strip():
+            raise ValueError("wavefunction file name is required")
+        local_dir = Path(".")
+        existing = local_dir / wavefunction_name
+        if existing.is_file():
+            existing.unlink()
+        downloaded = Path(opts.wavefunction.get(local_dir=local_dir))
         payload = load_wavefunction_payload(downloaded)
         geometry = require_molecule_matches_wavefunction(opts.molecule, payload)
         fragment_a, fragment_b, linker = fragments_from_atom_selections(
