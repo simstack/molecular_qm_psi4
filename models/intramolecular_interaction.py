@@ -10,10 +10,10 @@ from simstack.models import FileStack, simstack_model
 class IntramolecularInteractionInput(Model):
     """Molecule, saved PySCF orbitals, and the fragment charges for one contact.
 
-    ``molecule`` must carry exactly three atom selections. Each selection is
-    one atom, numbered from 1 as in the molecule viewer. Two of those atoms
-    belong to fragments A and B. The linker is bonded to them and does not
-    contain them. The third atom belongs to the linker. The node derives the
+    ``molecule`` must carry exactly two atom selections. Each selection is
+    one atom, numbered from 1 as in the molecule viewer. The first atom
+    belongs to fragment A and the second to fragment B. The linker is the
+    piece between those atoms and does not contain them. The node derives the
     0-based fragment lists from that split. Charges are
     the fragment charges passed to Psi4. Multiplicities are the fragment
     multiplicities: cutting one single bond on each side of the linker is

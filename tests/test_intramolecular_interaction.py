@@ -84,11 +84,10 @@ def test_partition_rejects_overlap_missing_atoms_and_charge_sum():
         _partition(payload, [1], [2], [0], multiplicities=(0, 2, 1))
 
 
-def test_three_atom_selections_become_the_linker_and_two_sides():
+def test_two_atom_selections_split_off_the_linker():
     molecule = _methanediol(
         [
             {"type": "atom", "atoms": [2]},
-            {"type": "atom", "atoms": [1]},
             {"type": "atom", "atoms": [3]},
         ]
     )
@@ -101,18 +100,23 @@ def test_three_atom_selections_become_the_linker_and_two_sides():
     assert 0 in linker and 0 not in fragment_a and 0 not in fragment_b
 
 
-def test_atom_selections_must_be_three_distinct_viewer_atoms():
-    with pytest.raises(ValueError, match="exactly 3 atom selections"):
+def test_atom_selections_must_be_two_distinct_viewer_atoms():
+    with pytest.raises(ValueError, match="exactly 2 atom selections"):
         _fragments(
-            _methanediol([{"type": "atom", "atoms": [1]}, {"type": "atom", "atoms": [2]}])
+            _methanediol(
+                [
+                    {"type": "atom", "atoms": [2]},
+                    {"type": "atom", "atoms": [1]},
+                    {"type": "atom", "atoms": [3]},
+                ]
+            )
         )
-    with pytest.raises(ValueError, match="exactly 3 atom selections"):
+    with pytest.raises(ValueError, match="exactly 2 atom selections"):
         _fragments(
             _methanediol(
                 [
                     {"type": "atom", "atoms": [2]},
                     {"type": "bond", "atoms": [1, 2]},
-                    {"type": "atom", "atoms": [3]},
                 ]
             )
         )
@@ -121,28 +125,25 @@ def test_atom_selections_must_be_three_distinct_viewer_atoms():
             _methanediol(
                 [
                     {"type": "atom", "atoms": [0]},
-                    {"type": "atom", "atoms": [1]},
                     {"type": "atom", "atoms": [2]},
                 ]
             )
         )
-    with pytest.raises(ValueError, match="three different atoms"):
+    with pytest.raises(ValueError, match="two different atoms"):
         _fragments(
             _methanediol(
                 [
-                    {"type": "atom", "atoms": [1]},
-                    {"type": "atom", "atoms": [1]},
+                    {"type": "atom", "atoms": [2]},
                     {"type": "atom", "atoms": [2]},
                 ]
             )
         )
-    with pytest.raises(ValueError, match="found 3 ways"):
+    with pytest.raises(ValueError, match="no linker"):
         _fragments(
             _methanediol(
                 [
                     {"type": "atom", "atoms": [2]},
-                    {"type": "atom", "atoms": [3]},
-                    {"type": "atom", "atoms": [4]},
+                    {"type": "atom", "atoms": [6]},
                 ]
             )
         )
@@ -152,10 +153,21 @@ def test_atom_selections_must_be_three_distinct_viewer_atoms():
                 [
                     {"type": "atom", "atoms": [1, 4]},
                     {"type": "atom", "atoms": [2]},
-                    {"type": "atom", "atoms": [3]},
                 ]
             )
         )
+    ring = Molecule.from_sites(
+        ["C", "C", "C", "C"],
+        [[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [1.5, 1.5, 0.0], [0.0, 1.5, 0.0]],
+    )
+    ring.properties = {
+        "selections": [
+            {"type": "atom", "atoms": [1]},
+            {"type": "atom", "atoms": [3]},
+        ]
+    }
+    with pytest.raises(ValueError, match="found 2"):
+        _fragments(ring)
 
 
 def test_molecule_must_match_the_saved_wavefunction_geometry():

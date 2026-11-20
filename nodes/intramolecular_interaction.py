@@ -33,9 +33,10 @@ async def intramolecular_interaction(
     that file. It does not construct orbitals from the molecule. The molecule
     must have the same elements and the same bonds at the same atom indices.
     Its coordinates may differ. Fragment bonds and the I-SAPT geometry come
-    from the wavefunction. The three atom selections come from the molecule.
-    Two of those atoms belong to fragments A and B. The linker does not
-    contain them. Psi4 recomputes
+    from the wavefunction. The two atom selections come from the molecule.
+    The first selected atom belongs to fragment A and the second to fragment
+    B. The linker is the piece between them and does not contain those atoms.
+    Psi4 recomputes
     density-fitted Hartree–Fock in ``sapt_basis`` and does not read the PySCF
     orbitals. The images rebuild the density from the saved ``mo_coeff`` and
     ``mo_occ`` with no second SCF. Energies are Hartree.
@@ -88,7 +89,7 @@ async def intramolecular_interaction(
             "NCI density is make_rdm1 of the saved orbitals, not a new SCF"
         )
         node_runner.info(
-            "fragments from the 3 atom selections "
+            "fragments from the 2 atom selections "
             f"A={list(fragment_a)} B={list(fragment_b)} linker={list(linker)}"
         )
         partition = interaction_partition(

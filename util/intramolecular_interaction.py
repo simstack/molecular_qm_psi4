@@ -162,15 +162,15 @@ def require_molecule_matches_wavefunction(molecule, payload):
 
 
 def fragments_from_atom_selections(molecule, geometry_atoms):
-    """Derive A, B, and the linker from exactly three 1-based atom selections.
+    """Derive fragment A, the linker, and fragment B from two atom selections.
 
     Selections are read from ``molecule``. Bonds are taken from
-    ``geometry_atoms``, which are the saved wavefunction positions in the
-    same atom order. Two of the selected atoms belong to fragments A and B,
-    one to each fragment. The linker is bonded to those atoms and does not
-    contain them. The third selected atom belongs to the linker. Exactly one
-    of the three choices may split the bond graph that way. Indices in the
-    result are 0-based and sorted.
+    ``geometry_atoms``, the saved wavefunction positions in the same atom
+    order. The first selected atom belongs to fragment A and the second to
+    fragment B. Those two atoms are the atoms the linker bonds to. The linker
+    is every atom on the single path between them, plus substituents of that
+    path, and does not contain the selected atoms. Indices in the result are
+    0-based and sorted.
     """
     if molecule is None:
         raise ValueError("molecule is required")
@@ -194,7 +194,7 @@ def fragments_from_atom_selections(molecule, geometry_atoms):
         if not isinstance(selection, dict) or selection.get("type") != "atom":
             found = selection.get("type") if isinstance(selection, dict) else selection
             raise ValueError(
-                "molecule must have exactly 3 atom selections, "
+                "molecule must have exactly 2 atom selections, "
                 f"found selection {found!r}"
             )
         raw = selection.get("atoms")
@@ -207,76 +207,77 @@ def fragments_from_atom_selections(molecule, geometry_atoms):
         if number < 1 or number > len(geometry_atoms):
             raise ValueError(f"atom selection {number} is outside 1..{len(geometry_atoms)}")
         indices.append(number - 1)
-    if len(indices) != 3:
+    if len(indices) != 2:
         raise ValueError(
-            f"molecule must have exactly 3 atom selections, found {len(indices)}"
+            f"molecule must have exactly 2 atom selections, found {len(indices)}"
         )
-    if len(set(indices)) != 3:
-        raise ValueError("the 3 atom selections must be three different atoms")
+    if len(set(indices)) != 2:
+        raise ValueError("the 2 atom selections must be two different atoms")
     from molecular_qm_psi4.util.pyscf_nmr import _bond_neighbors
 
     neighbors = _bond_neighbors(geometry_atoms)
+    end_a, end_b = indices
+    paths = []
+    pending = [(end_a, [end_a])]
+    while pending and len(paths) < 2:
+        current, path = pending.pop()
+        if current == end_b:
+            paths.append(path)
+            continue
+        for other in neighbors[current]:
+            if other not in path:
+                pending.append((other, path + [other]))
+    if len(paths) != 1:
+        raise ValueError(
+            "the 2 atom selections must have one bond path between them, "
+            f"found {len(paths)}"
+        )
+    interior = paths[0][1:-1]
+    if not interior:
+        raise ValueError("the 2 atom selections leave no linker between them")
 
     def reachable(start, blocked):
         seen = {start}
-        pending = [start]
-        while pending:
-            current = pending.pop()
+        waiting = [start]
+        while waiting:
+            current = waiting.pop()
             for other in neighbors[current]:
                 if other in blocked or other in seen:
                     continue
                 seen.add(other)
-                pending.append(other)
+                waiting.append(other)
         return seen
 
-    found = []
-    for interior_at, interior in enumerate(indices):
-        ends = [indices[pos] for pos in range(3) if pos != interior_at]
-        linker = reachable(interior, set(ends))
-        if ends[0] in linker or ends[1] in linker:
-            continue
-        fragment_a = reachable(ends[0], linker)
-        fragment_b = reachable(ends[1], linker)
-        if (
-            interior not in linker
-            or ends[0] in linker
-            or ends[1] in linker
-            or ends[0] not in fragment_a
-            or ends[1] not in fragment_b
-        ):
-            continue
-        covered = linker | fragment_a | fragment_b
-        if (
-            linker & fragment_a
-            or linker & fragment_b
-            or fragment_a & fragment_b
-            or len(covered) != len(geometry_atoms)
-        ):
-            continue
-        contacts = {
-            other
-            for atom in linker
-            for other in neighbors[atom]
-            if other not in linker
-        }
-        if contacts != set(ends):
-            continue
-        if any(other in fragment_b for atom in fragment_a for other in neighbors[atom]):
-            continue
-        split = (
-            tuple(sorted(fragment_a)),
-            tuple(sorted(fragment_b)),
-            tuple(sorted(linker)),
-        )
-        if split not in found:
-            found.append(split)
-    if len(found) != 1:
+    linker = set()
+    for atom in interior:
+        linker.update(reachable(atom, {end_a, end_b}))
+    fragment_a = reachable(end_a, linker)
+    fragment_b = reachable(end_b, linker)
+    covered = linker | fragment_a | fragment_b
+    contacts = {
+        other
+        for atom in linker
+        for other in neighbors[atom]
+        if other not in linker
+    }
+    if (
+        end_a not in fragment_a
+        or end_b not in fragment_b
+        or end_a in linker
+        or end_b in linker
+        or not set(interior) <= linker
+        or linker & fragment_a
+        or linker & fragment_b
+        or fragment_a & fragment_b
+        or len(covered) != len(geometry_atoms)
+        or contacts != {end_a, end_b}
+        or any(other in fragment_b for atom in fragment_a for other in neighbors[atom])
+    ):
         raise ValueError(
-            "the 3 atom selections must put 2 atoms in the two fragments "
-            "and the other atom in the linker, "
-            f"found {len(found)} ways"
+            "the 2 atom selections do not split the molecule into "
+            "fragment A, the linker, and fragment B"
         )
-    return found[0]
+    return tuple(sorted(fragment_a)), tuple(sorted(fragment_b)), tuple(sorted(linker))
 
 
 def interaction_partition(payload, fragment_a, fragment_b, linker, charges, multiplicities):
