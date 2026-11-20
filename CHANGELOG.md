@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.36.2 (2026-11-20)
+
+### Bug Fixes
+
+- Remove an existing wavefunction file before downloading it
+  ([`d5918d0`](https://github.com/simstack/molecular_qm_psi4/commit/d5918d0712f00f393310a1122186c4a9710ca46a))
+
+FileStack.get refuses to overwrite result.wfn.npy when a previous run left it in the work directory.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.36.1 (2026-11-19)
 
 ### Bug Fixes
