@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.36.3 (2026-11-20)
+
+### Bug Fixes
+
+- Derive the intramolecular linker from two atom selections
+  ([`c9a97ac`](https://github.com/simstack/molecular_qm_psi4/commit/c9a97acae454222af076810c8a9c16dd02f5f6b2))
+
+Two selected atoms stay in fragments A and B, and the unique bridge between them is the linker.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.36.2 (2026-11-20)
 
 ### Bug Fixes
