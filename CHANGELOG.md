@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.36.4 (2026-11-21)
+
+### Bug Fixes
+
+- Solve the Hessian ip1 integral one aux chunk at a time
+  ([`20b7824`](https://github.com/simstack/molecular_qm_psi4/commit/20b78243bcb56b644a71cf0dbfefa01e51f44f32))
+
+The full-aux atom tensor was killed on a 32 GB VM during the first partial block. Only the aux
+  window is kept.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.36.3 (2026-11-20)
 
 ### Bug Fixes
