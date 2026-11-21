@@ -12,7 +12,8 @@ class IntramolecularInteractionInput(Model):
 
     ``molecule`` must carry exactly two atom selections. Each selection is
     one atom, numbered from 1 as in the molecule viewer. The first atom
-    belongs to fragment A and the second to fragment B. The linker is the
+    belongs to fragment A and the second to fragment B. More than one bond
+    path between them is allowed when a ring connects them. The linker is the
     piece between those atoms and does not contain them. The node derives the
     0-based fragment lists from that split. Charges are
     the fragment charges passed to Psi4. Multiplicities are the fragment

@@ -156,9 +156,37 @@ def test_atom_selections_must_be_two_distinct_viewer_atoms():
                 ]
             )
         )
+    loose = Molecule.from_sites(
+        ["C", "C", "C", "C", "C"],
+        [
+            [0.0, 0.0, 0.0],
+            [1.5, 0.0, 0.0],
+            [1.5, 1.5, 0.0],
+            [0.0, 1.5, 0.0],
+            [10.0, 10.0, 10.0],
+        ],
+    )
+    loose.properties = {
+        "selections": [
+            {"type": "atom", "atoms": [1]},
+            {"type": "atom", "atoms": [3]},
+        ]
+    }
+    with pytest.raises(ValueError, match="3 non-intersecting"):
+        _fragments(loose)
+
+
+def test_two_bond_paths_through_a_ring_stay_one_linker():
     ring = Molecule.from_sites(
-        ["C", "C", "C", "C"],
-        [[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [1.5, 1.5, 0.0], [0.0, 1.5, 0.0]],
+        ["C", "C", "C", "C", "C", "C"],
+        [
+            [0.0, 0.0, 0.0],
+            [1.5, 0.0, 0.0],
+            [1.5, 1.5, 0.0],
+            [0.0, 1.5, 0.0],
+            [-1.5, 0.0, 0.0],
+            [3.0, 1.5, 0.0],
+        ],
     )
     ring.properties = {
         "selections": [
@@ -166,8 +194,12 @@ def test_atom_selections_must_be_two_distinct_viewer_atoms():
             {"type": "atom", "atoms": [3]},
         ]
     }
-    with pytest.raises(ValueError, match="found 2"):
-        _fragments(ring)
+    fragment_a, fragment_b, linker = _fragments(ring)
+    assert fragment_a == (0, 4)
+    assert fragment_b == (2, 5)
+    assert linker == (1, 3)
+    assert 0 in fragment_a and 0 not in linker
+    assert 2 in fragment_b and 2 not in linker
 
 
 def test_molecule_must_match_the_saved_wavefunction_geometry():

@@ -167,10 +167,13 @@ def fragments_from_atom_selections(molecule, geometry_atoms):
     Selections are read from ``molecule``. Bonds are taken from
     ``geometry_atoms``, the saved wavefunction positions in the same atom
     order. The first selected atom belongs to fragment A and the second to
-    fragment B. Those two atoms are the atoms the linker bonds to. The linker
-    is every atom on the single path between them, plus substituents of that
-    path, and does not contain the selected atoms. Indices in the result are
-    0-based and sorted.
+    fragment B. Rings may put more than one bond path between them. Removing
+    the two atoms must leave three non-intersecting sets: the side that
+    touches only the first atom, the side that touches only the second, and
+    every piece that touches both. That last piece is the linker. It does not
+    contain the selected atoms. Each selected atom must belong to exactly one
+    set, and it must be the only atom of its fragment bonded to the linker.
+    Indices in the result are 0-based and sorted.
     """
     if molecule is None:
         raise ValueError("molecule is required")
@@ -217,66 +220,76 @@ def fragments_from_atom_selections(molecule, geometry_atoms):
 
     neighbors = _bond_neighbors(geometry_atoms)
     end_a, end_b = indices
-    paths = []
-    pending = [(end_a, [end_a])]
-    while pending and len(paths) < 2:
-        current, path = pending.pop()
-        if current == end_b:
-            paths.append(path)
-            continue
-        for other in neighbors[current]:
-            if other not in path:
-                pending.append((other, path + [other]))
-    if len(paths) != 1:
-        raise ValueError(
-            "the 2 atom selections must have one bond path between them, "
-            f"found {len(paths)}"
-        )
-    interior = paths[0][1:-1]
-    if not interior:
-        raise ValueError("the 2 atom selections leave no linker between them")
+    selected = {end_a, end_b}
 
-    def reachable(start, blocked):
+    def component_from(start):
         seen = {start}
         waiting = [start]
         while waiting:
             current = waiting.pop()
             for other in neighbors[current]:
-                if other in blocked or other in seen:
+                if other in selected or other in seen:
                     continue
                 seen.add(other)
                 waiting.append(other)
         return seen
 
+    only_a = set()
+    only_b = set()
     linker = set()
-    for atom in interior:
-        linker.update(reachable(atom, {end_a, end_b}))
-    fragment_a = reachable(end_a, linker)
-    fragment_b = reachable(end_b, linker)
-    covered = linker | fragment_a | fragment_b
-    contacts = {
+    outside = set()
+    visited = set()
+    for start in range(len(geometry_atoms)):
+        if start in selected or start in visited:
+            continue
+        component = component_from(start)
+        visited |= component
+        touched = {
+            other
+            for atom in component
+            for other in neighbors[atom]
+            if other in selected
+        }
+        if touched == {end_a}:
+            only_a |= component
+        elif touched == {end_b}:
+            only_b |= component
+        elif touched == selected:
+            linker |= component
+        else:
+            outside |= component
+    if not linker:
+        raise ValueError("the 2 atom selections leave no linker between them")
+    fragment_a = {end_a} | only_a
+    fragment_b = {end_b} | only_b
+    covered = fragment_a | fragment_b | linker
+    if (
+        outside
+        or fragment_a & fragment_b
+        or fragment_a & linker
+        or fragment_b & linker
+        or len(covered) != len(geometry_atoms)
+        or end_a not in fragment_a
+        or end_b not in fragment_b
+    ):
+        raise ValueError(
+            "the 2 atom selections must divide the bond graph into "
+            "3 non-intersecting sets"
+        )
+    contacts_a = {
+        atom for atom in fragment_a if any(other in linker for other in neighbors[atom])
+    }
+    contacts_b = {
+        atom for atom in fragment_b if any(other in linker for other in neighbors[atom])
+    }
+    linker_contacts = {
         other
         for atom in linker
         for other in neighbors[atom]
         if other not in linker
     }
-    if (
-        end_a not in fragment_a
-        or end_b not in fragment_b
-        or end_a in linker
-        or end_b in linker
-        or not set(interior) <= linker
-        or linker & fragment_a
-        or linker & fragment_b
-        or fragment_a & fragment_b
-        or len(covered) != len(geometry_atoms)
-        or contacts != {end_a, end_b}
-        or any(other in fragment_b for atom in fragment_a for other in neighbors[atom])
-    ):
-        raise ValueError(
-            "the 2 atom selections do not split the molecule into "
-            "fragment A, the linker, and fragment B"
-        )
+    if contacts_a != {end_a} or contacts_b != {end_b} or linker_contacts != selected:
+        raise ValueError("the assignment of the selected atoms is not unique")
     return tuple(sorted(fragment_a)), tuple(sorted(fragment_b)), tuple(sorted(linker))
 
 

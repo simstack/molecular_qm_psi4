@@ -35,7 +35,8 @@ async def intramolecular_interaction(
     Its coordinates may differ. Fragment bonds and the I-SAPT geometry come
     from the wavefunction. The two atom selections come from the molecule.
     The first selected atom belongs to fragment A and the second to fragment
-    B. The linker is the piece between them and does not contain those atoms.
+    B. A ring may connect them by more than one bond path. The linker is the
+    piece between them and does not contain those atoms.
     Psi4 recomputes
     density-fitted Hartree–Fock in ``sapt_basis`` and does not read the PySCF
     orbitals. The images rebuild the density from the saved ``mo_coeff`` and
