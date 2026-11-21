@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.36.6 (2026-11-21)
+
+### Bug Fixes
+
+- Separate the supermolecule charge and explain multiplicity mismatches
+  ([`0b23325`](https://github.com/simstack/molecular_qm_psi4/commit/0b2332565139ff0c511318f209816c50a7088df4))
+
+Psi4 treats a charge line with no atoms as the whole molecule only when it is its own block. Report
+  every fragment whose electron count cannot have the given multiplicity.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.36.5 (2026-11-21)
 
 ### Bug Fixes
