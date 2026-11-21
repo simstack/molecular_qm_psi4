@@ -434,63 +434,137 @@ def _partial_ejk_window(
 
     ao_loc_orb = _ao_loc_list(mol.ao_loc)
 
-    def solved_ip1(shl0, shl1, p0, p1, atom_index, label):
-        # The whole atom is (3, nao_atom, nao, naux) plus the solve buffer, and
-        # the transpose of that integral is a third copy. That size follows the
-        # full aux basis, not the aux-shell block, so a 32 GB VM is killed
-        # while the block sizer still reports a fit. One AO shell at a time
-        # keeps a single shell's integral and its right-hand side.
+    def solved_ip1(shl0, shl1, p0, p1, atom_index, label, rhoj1_p=None, rhok_pji=None, rho2c=None):
+        # The callers use aux functions inside this block, plus two reductions
+        # over the whole aux basis. Keeping (naux, 3, nao_atom, nao) for the
+        # atom, and the full-aux integral beside it, is what SIGKILLs a 32 GB
+        # VM on the first block. Each AO shell is solved from aux chunks of
+        # ``block_limit`` functions, and only the window is retained.
         if ao_loc_orb[shl0] != p0 or ao_loc_orb[shl1] != p1:
             raise ValueError(
                 f"AO shells {shl0}:{shl1} span {ao_loc_orb[shl0]}:{ao_loc_orb[shl1]}, "
                 f"expected {p0}:{p1}"
             )
-        solved_shape = (naux, 3, p1 - p0, nao)
-        note("allocating", f"solve_j2c {label} atom {atom_index}", solved_shape)
-        solved = np.empty(solved_shape)
+        atom_nao = p1 - p0
+        if atom_nao < 1:
+            raise ValueError(f"atom {atom_index} has no AOs")
+        if rho2c is not None and rhok_pji is None:
+            raise ValueError("rhok_pji is required to accumulate the aux response")
+        if rhoj1_p is not None and tuple(rhoj1_p.shape) != (naux, 3):
+            raise ValueError(
+                f"rhoj1_p has shape {rhoj1_p.shape}, expected {(naux, 3)}"
+            )
+        if rho2c is not None and tuple(rho2c.shape) != (3, naux, naux):
+            raise ValueError(
+                f"rho2c has shape {rho2c.shape}, expected {(3, naux, naux)}"
+            )
+        if rhok_pji is not None and tuple(rhok_pji.shape) != (naux, nao, atom_nao):
+            raise ValueError(
+                f"rhok_pji has shape {rhok_pji.shape}, expected {(naux, nao, atom_nao)}"
+            )
+        window = np.empty((nwin, 3, atom_nao, nao))
         for shell in range(shl0, shl1):
             sp0 = ao_loc_orb[shell]
             sp1 = ao_loc_orb[shell + 1]
             count = sp1 - sp0
             if count < 1:
                 raise ValueError(f"AO shell {shell} is empty")
-            block_shape = (3, count, nao, naux)
+            rhs_shape = (naux, 3, count, nao)
+            resident = float(lib.current_memory()[0])
+            if resident < 0:
+                raise ValueError(f"current memory must be >= 0, got {resident}")
+            rhs_mb = naux * 3 * count * nao * 8 / 1e6
+            if resident + 2.0 * rhs_mb > float(budget):
+                raise ValueError(
+                    f"int3c2e_ip1 shell {shell} needs {rhs_mb:.0f} MB twice on top of "
+                    f"{resident:.0f} MB, above max_memory={budget} MB"
+                )
             note(
                 "allocating",
-                f"int3c2e_ip1 {label} atom {atom_index} shell {shell}",
-                block_shape,
+                f"solve_j2c {label} atom {atom_index} shell {shell}",
+                rhs_shape,
             )
-            block = get_int3c_ip1((shell, shell + 1, 0, nbas, 0, auxmol.nbas))
+            rhs = np.empty((naux, 3 * count * nao))
+            aux_shell = 0
+            while aux_shell < nbas_aux:
+                aux_end = aux_shell + 1
+                funcs = loc[aux_end] - loc[aux_shell]
+                if funcs < 1:
+                    raise ValueError(f"aux shell {aux_shell} is empty")
+                while (
+                    aux_end < nbas_aux
+                    and funcs + (loc[aux_end + 1] - loc[aux_end]) <= block_limit
+                ):
+                    funcs += loc[aux_end + 1] - loc[aux_end]
+                    aux_end += 1
+                if funcs > block_limit:
+                    raise ValueError(
+                        f"aux shell {aux_shell} has {funcs} functions, above the block size "
+                        f"{block_limit} that fits in this task's memory"
+                    )
+                width = loc[aux_end] - loc[aux_shell]
+                block = get_int3c_ip1((shell, shell + 1, 0, nbas, aux_shell, aux_end))
+                block_shape = (3, count, nao, width)
+                if tuple(int(dim) for dim in block.shape) != block_shape:
+                    raise ValueError(
+                        f"int3c2e_ip1 shell {shell} aux {aux_shell}:{aux_end} has shape "
+                        f"{block.shape}, expected {block_shape}"
+                    )
+                rhs[loc[aux_shell] : loc[aux_end]] = np.ascontiguousarray(
+                    block.reshape(3 * count * nao, width).T
+                )
+                del block
+                aux_shell = aux_end
+            column = np.ascontiguousarray(solve_j2c(rhs).reshape(naux, 3, count, nao))
+            del rhs
+            if tuple(int(dim) for dim in column.shape) != rhs_shape:
+                raise ValueError(
+                    f"solve_j2c shell {shell} has shape {column.shape}, expected {rhs_shape}"
+                )
+            local = sp0 - p0
+            window[:, :, local : local + count, :] = column[ao0:ao1]
+            if rhoj1_p is not None:
+                dm_shell = dm0[:, sp0:sp1]
+                if tuple(dm_shell.shape) != (nao, count):
+                    raise ValueError(
+                        f"dm0 shell {shell} has shape {dm_shell.shape}, expected {(nao, count)}"
+                    )
+                vec = np.ascontiguousarray(dm_shell.T).reshape(-1)
+                rhoj1_p += (column.reshape(naux * 3, count * nao) @ vec).reshape(naux, 3)
+            if rho2c is not None:
+                rhok_shell = np.ascontiguousarray(rhok_pji[:, :, local : local + count])
+                if rhok_shell.shape != (naux, nao, count):
+                    raise ValueError(
+                        f"rhok shell {shell} has shape {rhok_shell.shape}, "
+                        f"expected {(naux, nao, count)}"
+                    )
+                packed = np.ascontiguousarray(column.transpose(0, 1, 3, 2)).reshape(
+                    naux, 3, nao * count
+                )
+                metric = rhok_shell.reshape(naux, nao * count)
+                for ix in range(3):
+                    rho2c[ix] += metric @ packed[:, ix].T
+                del packed
+            del column
             note(
                 "allocated",
-                f"int3c2e_ip1 {label} atom {atom_index} shell {shell}",
-                block.shape,
+                f"solve_j2c {label} atom {atom_index} shell {shell}",
+                rhs_shape,
             )
-            if tuple(int(dim) for dim in block.shape) != block_shape:
-                raise ValueError(
-                    f"int3c2e_ip1 shell {shell} has shape {block.shape}, expected {block_shape}"
-                )
-            rhs = np.ascontiguousarray(block.reshape(3 * count * nao, naux).T)
-            del block
-            column = solve_j2c(rhs).reshape(naux, 3, count, nao)
-            del rhs
-            solved[:, :, sp0 - p0 : sp1 - p0, :] = column
-            del column
-        note("allocated", f"solve_j2c {label} atom {atom_index}", solved.shape)
-        return solved
+        return window
 
     for ia in range(natm):
         shl0, shl1, p0, p1 = aoslices[ia]
         if not with_k:
             break
-        solved = solved_ip1(shl0, shl1, p0, p1, ia, "ao")
-        # A slice of the full-aux contraction is a view. Holding one per atom
-        # retains 3*nao*naux*nao floats and SIGKILLs a 32 GB VM (rc=137).
         window_shape = (nwin, 3, p1 - p0, nao)
         note("allocating", f"ip1 window atom {ia}", window_shape)
-        window_solved = np.copy(solved[ao0:ao1])
+        window_solved = solved_ip1(shl0, shl1, p0, p1, ia, "ao")
         note("allocated", f"ip1 window atom {ia}", window_solved.shape)
-        del solved
+        if tuple(int(dim) for dim in window_solved.shape) != window_shape:
+            raise ValueError(
+                f"ip1 window atom {ia} has shape {window_solved.shape}, expected {window_shape}"
+            )
         transformed_shape = (nao, p1 - p0, nwin, 3)
         note("allocating", f"ip1 transform atom {ia}", transformed_shape)
         transformed = lib.einsum("pykl,li->ikpy", window_solved, dm0)
@@ -640,8 +714,21 @@ def _partial_ejk_window(
                 ek[i0, j0] += lib.einsum("xypq,pq->xy", vk1[:, :, q0:q1], dm0[q0:q1])
         if not hessobj.auxbasis_response:
             continue
-        wk1_full = solved_ip1(shl0, shl1, p0, p1, i0, "response")
-        rhoj1_p = lib.einsum("pxij,ji->px", wk1_full, dm0[:, p0:p1])
+        rhoj1_p = np.zeros((naux, 3))
+        rhok_pji = None
+        rho2c = None
+        if with_k:
+            rhok_p_i = lib.einsum("plj,il->pji", rhok0, dm0[p0:p1])
+            rhok_pji = lib.einsum("pji,Jj->pJi", rhok_p_i, mocc_2)
+            del rhok_p_i
+            if tuple(rhok_pji.shape) != (naux, nao, p1 - p0):
+                raise ValueError(
+                    f"rhok_pji has shape {rhok_pji.shape}, expected {(naux, nao, p1 - p0)}"
+                )
+            rho2c = np.zeros((3, naux, naux))
+        wk1_pij = solved_ip1(
+            shl0, shl1, p0, p1, i0, "response", rhoj1_p, rhok_pji, rho2c
+        )
         if with_j or with_k:
             note(
                 "allocating",
@@ -658,21 +745,9 @@ def _partial_ejk_window(
             wj11 = np.zeros((contracted.shape[0], naux))
             wj11[:, ao0:ao1] = contracted
         wj0_01 = lib.einsum("ypq,q->yp", int2c_ip1, rhoj0) if with_j else None
-        rhok_pji = None
         wk1_pji = None
         wk1_ipj = None
-        rho2c = None
-        if with_k:
-            rhok_p_i = lib.einsum("plj,il->pji", rhok0, dm0[p0:p1])
-            rhok_pji = lib.einsum("pji,Jj->pJi", rhok_p_i, mocc_2)
-            rho2c = lib.einsum("pxij,qji->xqp", wk1_full, rhok_pji)
-        # The j-atom loop reads only this aux window. wk1_pji is another
-        # (3, naux, nao, nao_atom) buffer and must not sit beside the full solve.
         window_shape = (nwin, 3, p1 - p0, nao)
-        note("allocating", f"response ip1 window atom {i0}", window_shape)
-        wk1_pij = np.array(wk1_full[ao0:ao1], copy=True)
-        note("allocated", f"response ip1 window atom {i0}", wk1_pij.shape)
-        del wk1_full
         if tuple(int(dim) for dim in wk1_pij.shape) != window_shape:
             raise ValueError(
                 f"response ip1 window has shape {wk1_pij.shape}, expected {window_shape}"
