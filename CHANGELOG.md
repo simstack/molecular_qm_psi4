@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.36.5 (2026-11-21)
+
+### Bug Fixes
+
+- Allow several bond paths between the intramolecular fragment atoms
+  ([`3e366b9`](https://github.com/simstack/molecular_qm_psi4/commit/3e366b9ce2378b7aea2c9dd717edd2a04d416861))
+
+A ring stays one linker when the two selected atoms cut the bond graph into three disjoint sets.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.36.4 (2026-11-21)
 
 ### Bug Fixes
