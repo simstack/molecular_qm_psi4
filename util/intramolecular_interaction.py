@@ -351,7 +351,49 @@ def interaction_partition(payload, fragment_a, fragment_b, linker, charges, mult
     ):
         if multiplicity < 1:
             raise ValueError(f"{name} must be a positive integer")
-    lines = [f"{charge} {spin + 1}"]
+    from pyscf import gto
+
+    total_nuclear = 0
+    multiplicity_sentences = []
+    multiplicity_rejected = False
+    for label, group, fragment_charge, multiplicity in zip(
+        ("fragment A", "fragment B", "the linker"),
+        groups,
+        charge_values,
+        multiplicity_values,
+    ):
+        nuclear = sum(int(gto.charge(atoms[index][0])) for index in group)
+        total_nuclear += nuclear
+        electrons = nuclear - fragment_charge
+        title = label[:1].upper() + label[1:]
+        if electrons < 0:
+            multiplicity_sentences.append(
+                f"{title} charge {fragment_charge} gives a negative electron count."
+            )
+            multiplicity_rejected = True
+        elif electrons % 2 == multiplicity % 2:
+            counted = "electron" if electrons == 1 else "electrons"
+            multiplicity_sentences.append(
+                f"{title} has {electrons} {counted}, so multiplicity {multiplicity} is impossible."
+            )
+            multiplicity_rejected = True
+        else:
+            counted = "electron" if electrons == 1 else "electrons"
+            multiplicity_sentences.append(
+                f"{title} has {electrons} {counted}, so multiplicity {multiplicity} is valid."
+            )
+    if multiplicity_rejected:
+        raise ValueError(" ".join(multiplicity_sentences))
+    total_electrons = total_nuclear - charge
+    if total_electrons < 0 or total_electrons % 2 == (spin + 1) % 2:
+        counted = "electron" if total_electrons == 1 else "electrons"
+        raise ValueError(
+            f"The molecule has {total_electrons} {counted}, so multiplicity {spin + 1} is impossible."
+        )
+    # A charge/multiplicity block with no atoms is the supermolecule. It has
+    # to be separated from fragment A. Otherwise Psi4 leaves the next "0 1"
+    # unparsed.
+    lines = [f"{charge} {spin + 1}", "--"]
     offset = 0
     for size, fragment_charge, multiplicity in zip(
         (len(group) for group in groups), charge_values, multiplicity_values
@@ -371,20 +413,20 @@ def interaction_partition(payload, fragment_a, fragment_b, linker, charges, mult
         "charges": charge_values,
         "multiplicities": multiplicity_values,
         "molecule_text": "\n".join(lines) + "\n",
+        "multiplicity": spin + 1,
     }
 
 
-def run_isapt(molecule_text, sapt_basis, link_assignment, memory_mb, threads):
-    """Density-fitted Hartree–Fock I-SAPT0. Returns component energies in Hartree."""
+def run_isapt(molecule_text, multiplicity, sapt_basis, link_assignment, memory_mb, threads):
+    """Density-fitted Hartree–Fock I-SAPT0. Returns component energies in Hartree.
+
+    ``multiplicity`` is the supermolecule multiplicity, ``spin + 1`` from the
+    saved wavefunction. The molecule text starts with that same charge and
+    multiplicity, then the three fragments.
+    """
     if not isinstance(molecule_text, str) or "no_com" not in molecule_text or "no_reorient" not in molecule_text:
         raise ValueError("Psi4 molecule text must keep the PySCF orientation")
-    header = molecule_text.strip().splitlines()[0].split()
-    if len(header) != 2:
-        raise ValueError("Psi4 molecule text must start with charge and multiplicity")
-    try:
-        multiplicity = int(header[1])
-    except ValueError as exc:
-        raise ValueError("Psi4 molecule multiplicity must be an integer") from exc
+    multiplicity = require_int(multiplicity, "multiplicity")
     if multiplicity < 1:
         raise ValueError("Psi4 molecule multiplicity must be a positive integer")
     reference = "rhf" if multiplicity == 1 else "uhf"

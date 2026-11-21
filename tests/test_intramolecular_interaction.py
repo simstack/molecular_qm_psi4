@@ -247,6 +247,18 @@ def test_named_basis_rejects_a_stored_dictionary():
         named_basis(payload)
 
 
+def test_fragment_multiplicity_must_match_the_electron_count():
+    payload = _water_geometry()
+    with pytest.raises(ValueError) as caught:
+        _partition(payload, [1], [2], [0], multiplicities=(1, 2, 1))
+    message = str(caught.value)
+    assert message == (
+        "Fragment A has 1 electron, so multiplicity 1 is impossible. "
+        "Fragment B has 1 electron, so multiplicity 2 is valid. "
+        "The linker has 8 electrons, so multiplicity 1 is valid."
+    )
+
+
 def test_molecule_text_orders_fragments_and_fixes_orientation():
     payload = _water_geometry()
     partition = _partition(payload, [1], [2], [0])
@@ -254,11 +266,12 @@ def test_molecule_text_orders_fragments_and_fixes_orientation():
     assert partition["order"] == [1, 2, 0]
     lines = text.strip().splitlines()
     assert lines[0] == "0 1"
-    assert lines[1] == "0 2"
-    assert lines[2].startswith("H ")
+    assert lines[1] == "--"
+    assert lines[2] == "0 2"
+    assert lines[3].startswith("H ")
     assert lines[-4:] == ["symmetry c1", "no_reorient", "no_com", "units angstrom"]
     separators = [index for index, line in enumerate(lines) if line == "--"]
-    assert len(separators) == 2
+    assert len(separators) == 3
     oxygen = next(index for index, line in enumerate(lines) if line.startswith("O "))
     assert oxygen > separators[-1]
 
@@ -275,7 +288,7 @@ def test_load_payload_requires_pyscf_kind(tmp_path):
 
 def test_link_assignment_is_not_defaulted():
     with pytest.raises(ValueError, match="FISAPT_LINK_ASSIGNMENT"):
-        run_isapt("0 1\nno_reorient\nno_com\n", "cc-pvdz", "siao1", 500, 1)
+        run_isapt("0 1\nno_reorient\nno_com\n", 1, "cc-pvdz", "siao1", 500, 1)
 
 
 def _water_payload():
@@ -369,7 +382,7 @@ def test_isapt_methanediol_components_sum():
     }
     partition = _partition(payload, [1, 5], [2, 6], [0, 3, 4])
     energies = run_isapt(
-        partition["molecule_text"], "cc-pvdz", "SIAO1", 4000, 2
+        partition["molecule_text"], partition["multiplicity"], "cc-pvdz", "SIAO1", 4000, 2
     )
     total = energies["elst"] + energies["exch"] + energies["induction"] + energies["dispersion"]
     assert energies["total"] == pytest.approx(total)

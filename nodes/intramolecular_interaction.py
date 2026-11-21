@@ -107,6 +107,7 @@ async def intramolecular_interaction(
         )
         energies = run_isapt(
             partition["molecule_text"],
+            partition["multiplicity"],
             opts.sapt_basis,
             opts.link_assignment,
             memory_mb,
