@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## v0.37.0 (2026-11-23)
+
+### Features
+
+- Store DF integrals on the shared simstack work directory
+  ([`80092da`](https://github.com/simstack/molecular_qm_psi4/commit/80092daa7b19e452e7a9851c6e5ec40dcf40daa0))
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.36.6 (2026-11-21)
 
 ### Bug Fixes
