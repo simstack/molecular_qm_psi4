@@ -294,6 +294,71 @@ def _aux_metric_pinv(metric):
     return refined
 
 
+def prepare_full_range_density(mol, auxmol, mo_coeff, mo_occ, stored_integrals, with_k):
+    """Solved full-range ``int2c``, ``rhoj0`` and ``rhok0`` from a stored integral file.
+
+    The file is read once. ``rhok0`` is None when ``with_k`` is false. A missing
+    file or a basis that does not match ``mol`` and ``auxmol`` raises ValueError.
+    """
+    from pyscf import lib
+    from pyscf.df.hessian.rhf import _gen_metric_solver
+
+    from molecular_qm_psi4.nodes.pyscf_df_integrals import (
+        load_stored_int2c,
+        load_stored_int3c,
+        open_stored_df_integrals,
+    )
+
+    _require_numpy()
+    if mol is None or auxmol is None:
+        raise ValueError("molecule and aux basis are required")
+    if mo_coeff is None or mo_occ is None:
+        raise ValueError("mo_coeff and mo_occ are required")
+    if not isinstance(with_k, bool):
+        raise ValueError(f"with_k must be a bool, got {with_k!r}")
+    if stored_integrals is None:
+        raise ValueError("stored DF integral file is required")
+    mocc = mo_coeff[:, mo_occ > 0]
+    nocc = int(mocc.shape[1])
+    if nocc < 1:
+        raise ValueError("occupied orbitals are required")
+    dm0 = np.dot(mocc, mocc.T) * 2
+    mocc_2 = lib.einsum("pi,i->pi", mocc, mo_occ[mo_occ > 0] ** 0.5) if with_k else None
+    nao = int(mol.nao)
+    naux = int(auxmol.nao)
+    aoslices = mol.aoslice_by_atom()
+    handle = open_stored_df_integrals(stored_integrals, mol, auxmol)
+    try:
+        int2c = load_stored_int2c(handle)
+        solve_j2c = _gen_metric_solver(int2c)
+        rhoj0 = np.zeros(naux)
+        rhok0 = np.empty((naux, nao, nocc)) if with_k else None
+        for atom_index, (_shl0, _shl1, p0, p1) in enumerate(aoslices):
+            p0 = int(p0)
+            p1 = int(p1)
+            int3c = load_stored_int3c(handle, atom_index, p1 - p0, nao)
+            rhoj0 += lib.einsum("klp,kl->p", int3c, dm0[p0:p1])
+            if with_k:
+                solved = solve_j2c(
+                    lib.einsum("ijp,jk->pik", int3c, mocc_2).reshape(naux, -1)
+                )
+                rhok0[:, p0:p1] = solved.reshape(naux, p1 - p0, nocc)
+                del solved
+            del int3c
+        rhoj0 = solve_j2c(rhoj0)
+    finally:
+        handle.close()
+    if tuple(int(dim) for dim in int2c.shape) != (naux, naux):
+        raise ValueError(f"int2c2e has shape {int2c.shape}, expected {(naux, naux)}")
+    if tuple(int(dim) for dim in rhoj0.shape) != (naux,):
+        raise ValueError(f"rhoj0 has shape {rhoj0.shape}, expected {(naux,)}")
+    if with_k and tuple(rhok0.shape) != (naux, nao, nocc):
+        raise ValueError(
+            f"rhok0 has shape {rhok0.shape}, expected {(naux, nao, nocc)}"
+        )
+    return int2c, rhoj0, rhok0
+
+
 def _partial_ejk_window(
     hessobj,
     mo_energy,
@@ -308,6 +373,7 @@ def _partial_ejk_window(
     block_limit,
     *,
     node_runner,
+    prepared=None,
 ):
     """JK contribution of aux shells ``[shell0, shell1)`` to ``ej`` and ``ek``.
 
@@ -384,36 +450,62 @@ def _partial_ejk_window(
     aoslices = mol.aoslice_by_atom()
     auxslices = auxmol.aoslice_by_atom()
     natm = mol.natm
-    note("allocating", "int2c2e", (naux, naux))
-    int2c = auxmol.intor("int2c2e", aosym="s1")
-    note("allocated", "int2c2e", int2c.shape)
-    solve_j2c = _gen_metric_solver(int2c)
+    if prepared is None:
+        note("allocating", "int2c2e", (naux, naux))
+        int2c = auxmol.intor("int2c2e", aosym="s1")
+        note("allocated", "int2c2e", int2c.shape)
+        solve_j2c = _gen_metric_solver(int2c)
+        get_int3c = _int3c_wrapper(mol, auxmol, "int3c2e", "s1")
+        rhoj0 = np.zeros(naux)
+        if with_k:
+            note("allocating", "rhok0", (naux, nao, nocc))
+            rhok0 = np.empty((naux, nao, nocc))
+            note("allocated", "rhok0", rhok0.shape)
+        else:
+            rhok0 = None
+        for atom_index, (shl0, shl1, p0, p1) in enumerate(aoslices):
+            note("allocating", f"int3c2e atom {atom_index}", (p1 - p0, nao, naux))
+            int3c = get_int3c((shl0, shl1, 0, nbas, 0, auxmol.nbas))
+            note("allocated", f"int3c2e atom {atom_index}", int3c.shape)
+            rhoj0 += lib.einsum("klp,kl->p", int3c, dm0[p0:p1])
+            if with_k:
+                solved_shape = (naux, p1 - p0, nocc)
+                note("allocating", f"rhok0 solve atom {atom_index}", solved_shape)
+                solved = solve_j2c(lib.einsum("ijp,jk->pik", int3c, mocc_2).reshape(naux, -1))
+                note("allocated", f"rhok0 solve atom {atom_index}", solved.shape)
+                rhok0[:, p0:p1] = solved.reshape(naux, p1 - p0, nocc)
+            int3c = None
+        note("allocating", "rhoj0 solve", (naux,))
+        rhoj0 = solve_j2c(rhoj0)
+        note("allocated", "rhoj0 solve", rhoj0.shape)
+    else:
+        try:
+            int2c, rhoj0, rhok0 = prepared
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "prepared full-range density must be (int2c, rhoj0, rhok0)"
+            ) from exc
+        if tuple(getattr(int2c, "shape", ())) != (naux, naux):
+            raise ValueError(
+                f"prepared int2c has shape {getattr(int2c, 'shape', None)}, expected {(naux, naux)}"
+            )
+        if tuple(getattr(rhoj0, "shape", ())) != (naux,):
+            raise ValueError(
+                f"prepared rhoj0 has shape {getattr(rhoj0, 'shape', None)}, expected {(naux,)}"
+            )
+        if with_k:
+            if rhok0 is None or tuple(rhok0.shape) != (naux, nao, nocc):
+                raise ValueError(
+                    f"prepared rhok0 has shape {None if rhok0 is None else rhok0.shape}, "
+                    f"expected {(naux, nao, nocc)}"
+                )
+        elif rhok0 is not None:
+            raise ValueError("prepared rhok0 was passed without exchange")
+        solve_j2c = _gen_metric_solver(int2c)
+        note("allocated", "stored int2c2e", int2c.shape)
     note("allocating", "int2c2e_ip1", (3, naux, naux))
     int2c_ip1 = auxmol.intor("int2c2e_ip1", aosym="s1")
     note("allocated", "int2c2e_ip1", int2c_ip1.shape)
-    get_int3c = _int3c_wrapper(mol, auxmol, "int3c2e", "s1")
-    rhoj0 = np.zeros(naux)
-    if with_k:
-        note("allocating", "rhok0", (naux, nao, nocc))
-        rhok0 = np.empty((naux, nao, nocc))
-        note("allocated", "rhok0", rhok0.shape)
-    else:
-        rhok0 = None
-    for atom_index, (shl0, shl1, p0, p1) in enumerate(aoslices):
-        note("allocating", f"int3c2e atom {atom_index}", (p1 - p0, nao, naux))
-        int3c = get_int3c((shl0, shl1, 0, nbas, 0, auxmol.nbas))
-        note("allocated", f"int3c2e atom {atom_index}", int3c.shape)
-        rhoj0 += lib.einsum("klp,kl->p", int3c, dm0[p0:p1])
-        if with_k:
-            solved_shape = (naux, p1 - p0, nocc)
-            note("allocating", f"rhok0 solve atom {atom_index}", solved_shape)
-            solved = solve_j2c(lib.einsum("ijp,jk->pik", int3c, mocc_2).reshape(naux, -1))
-            note("allocated", f"rhok0 solve atom {atom_index}", solved.shape)
-            rhok0[:, p0:p1] = solved.reshape(naux, p1 - p0, nocc)
-        int3c = None
-    note("allocating", "rhoj0 solve", (naux,))
-    rhoj0 = solve_j2c(rhoj0)
-    note("allocated", "rhoj0 solve", rhoj0.shape)
 
     window = (0, nbas, 0, nbas, start, stop)
     get_int3c_ipip1 = _int3c_wrapper(mol, auxmol, "int3c2e_ipip1", "s1")
@@ -931,6 +1023,8 @@ def partial_jk_span(
     block_limit,
     *,
     node_runner,
+    stored_integrals=None,
+    fit_cache=None,
 ):
     """Additive JK piece of one aux-shell range, without the one-electron term.
 
@@ -949,7 +1043,7 @@ def partial_jk_span(
     if node_runner is None:
         raise ValueError("node_runner is required")
 
-    mol, mf, _, _ = _closed_shell_df_rks(hessobj)
+    mol, mf, auxmol, _ = _closed_shell_df_rks(hessobj)
     ni = mf._numint
     omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, spin=mol.spin)
     if omega is None or alpha is None or hyb is None:
@@ -961,6 +1055,17 @@ def partial_jk_span(
         raise ValueError(f"aux block limit must be an int, got {block_limit!r}")
     if block_limit < 1:
         raise ValueError(f"aux block limit must be positive, got {block_limit!r}")
+    prepared = None
+    if stored_integrals is not None:
+        if fit_cache is None:
+            raise ValueError("stored DF integrals require a fit cache")
+        if "density" not in fit_cache:
+            fit_cache["density"] = prepare_full_range_density(
+                mol, auxmol, mo_coeff, mo_occ, stored_integrals, hybrid
+            )
+        prepared = fit_cache["density"]
+    elif fit_cache is not None:
+        raise ValueError("fit cache requires stored DF integrals")
     _ej, ek, wj_ip2, wk_ip2 = _partial_ejk_window(
         hessobj,
         mo_energy,
@@ -974,6 +1079,7 @@ def partial_jk_span(
         True,
         block_limit,
         node_runner=node_runner,
+        prepared=prepared,
     )
     de2 = _ej - float(hyb) * ek
     wk_ip2_lr = None
@@ -1018,7 +1124,7 @@ def partial_jk_span(
     return de2, wj_ip2, wk_ip2, wk_ip2_lr
 
 
-def _response2_quadratic(auxmol, wj_ip2, wk_ip2, with_j, with_k):
+def _response2_quadratic(mol, auxmol, wj_ip2, wk_ip2, with_j, with_k, stored_integrals=None):
     """Quadratic second-order RI terms for one Coulomb kernel.
 
     ``with_j`` and ``with_k`` select the Coulomb and exchange products. The
@@ -1053,7 +1159,21 @@ def _response2_quadratic(auxmol, wj_ip2, wk_ip2, with_j, with_k):
         raise ValueError("wk_ip2 was passed without the exchange aux response")
     else:
         wk = None
-    int2c = auxmol.intor("int2c2e", aosym="s1")
+    if stored_integrals is None:
+        int2c = auxmol.intor("int2c2e", aosym="s1")
+    else:
+        from molecular_qm_psi4.nodes.pyscf_df_integrals import (
+            load_stored_int2c,
+            open_stored_df_integrals,
+        )
+
+        if mol is None:
+            raise ValueError("molecule is required to read stored DF integrals")
+        handle = open_stored_df_integrals(stored_integrals, mol, auxmol)
+        try:
+            int2c = load_stored_int2c(handle)
+        finally:
+            handle.close()
     int2c_inv = _aux_metric_pinv(int2c)
     if int2c_inv.shape != (naux, naux):
         raise ValueError(f"aux metric inverse has shape {int2c_inv.shape}, expected {(naux, naux)}")
@@ -1151,7 +1271,7 @@ def stack_aux_response(ao_loc, blocks):
     return full
 
 
-def partial_response2_cross(hessobj, wj_ip2, wk_ip2, wk_ip2_lr):
+def partial_response2_cross(hessobj, wj_ip2, wk_ip2, wk_ip2_lr, stored_integrals=None):
     """Second-order RI products that couple different aux windows.
 
     Added once after every aux window has been summed. The long-range product
@@ -1169,13 +1289,15 @@ def partial_response2_cross(hessobj, wj_ip2, wk_ip2, wk_ip2_lr):
     if omega is None or alpha is None or hyb is None:
         raise ValueError(f"range-separation coefficients for xc {mf.xc!r} are required")
     hybrid = bool(ni.libxc.is_hybrid_xc(mf.xc))
-    ej, ek = _response2_quadratic(auxmol, wj_ip2, wk_ip2, True, hybrid)
+    ej, ek = _response2_quadratic(
+        mol, auxmol, wj_ip2, wk_ip2, True, hybrid, stored_integrals
+    )
     de2 = ej - float(hyb) * ek
     if hybrid and float(omega) != 0.0:
         if wk_ip2_lr is None:
             raise ValueError("long-range aux response exchange tensor is required")
         with mf.with_df.range_coulomb(float(omega)):
-            _ej_lr, ek_lr = _response2_quadratic(auxmol, None, wk_ip2_lr, False, True)
+            _ej_lr, ek_lr = _response2_quadratic(mol, auxmol, None, wk_ip2_lr, False, True, None)
         de2 = de2 - ek_lr * (float(alpha) - float(hyb))
     elif wk_ip2_lr is not None:
         raise ValueError("long-range aux response exchange tensor was passed without range separation")

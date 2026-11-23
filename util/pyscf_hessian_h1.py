@@ -295,7 +295,16 @@ def _hstack_aux(group, start, stop, natm):
     return stacked
 
 
-def gen_df_jk(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, with_k, log=None):
+def gen_df_jk(
+    hessobj,
+    mo_coeff,
+    mo_occ,
+    atom_indexes,
+    max_memory_mb,
+    with_k,
+    log=None,
+    stored_integrals=None,
+):
     """Yield ``(atom, hcore, vj, vk)`` for ``atom_indexes`` without a 480-block.
 
     The yielded arrays match ``pyscf.df.hessian.rhf._gen_jk`` for those atoms.
@@ -335,7 +344,17 @@ def gen_df_jk(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, with_k, lo
     ftmp = lib.H5TmpFile()
     rho0_pij = ftmp.create_group("rho0_Pij")
     wj_ip1_pij = ftmp.create_group("wj_ip1_pij")
-    int2c = auxmol.intor("int2c2e", aosym="s1")
+    integral_file = None
+    if stored_integrals is not None:
+        from molecular_qm_psi4.nodes.pyscf_df_integrals import (
+            load_stored_int2c,
+            open_stored_df_integrals,
+        )
+
+        integral_file = open_stored_df_integrals(stored_integrals, mol, auxmol)
+        int2c = load_stored_int2c(integral_file)
+    else:
+        int2c = auxmol.intor("int2c2e", aosym="s1")
     solve_j2c = _gen_metric_solver(int2c)
     del int2c
     int2c_ip1 = auxmol.intor("int2c2e_ip1", aosym="s1")
@@ -362,7 +381,12 @@ def gen_df_jk(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, with_k, lo
     for atom, (shl0, shl1, p0, p1) in enumerate(aoslices):
         p0 = int(p0)
         p1 = int(p1)
-        int3c = get_int3c((int(shl0), int(shl1), 0, nbas, 0, auxmol.nbas))
+        if integral_file is None:
+            int3c = get_int3c((int(shl0), int(shl1), 0, nbas, 0, auxmol.nbas))
+        else:
+            from molecular_qm_psi4.nodes.pyscf_df_integrals import load_stored_int3c
+
+            int3c = load_stored_int3c(integral_file, atom, p1 - p0, nao)
         coef3c = solve_j2c(int3c.reshape(-1, naux).T).reshape(naux, p1 - p0, nao)
         del int3c
         rho0_pij[f"{atom:04d}"] = coef3c
@@ -397,6 +421,8 @@ def gen_df_jk(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, with_k, lo
                     stored[a0:a1] = lib.einsum("xqp,pij->qixj", int2c_ip1[:, a0:a1], coef3c)
                     _release_h5_cache(ftmp, True)
         del coef3c
+    if integral_file is not None:
+        integral_file.close()
 
     get_int3c_ip1 = _int3c_wrapper(mol, auxmol, "int3c2e_ip1", "s1")
     get_int3c_ip2 = _int3c_wrapper(mol, auxmol, "int3c2e_ip2", "s1")
@@ -481,7 +507,9 @@ def gen_df_jk(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, with_k, lo
         yield atom, hcore_deriv(atom), vj1, vk1
 
 
-def make_df_rks_h1(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, log=None):
+def make_df_rks_h1(
+    hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, log=None, stored_integrals=None
+):
     """``make_h1`` for ``atom_indexes`` with an aux block that fits in memory.
 
     The returned list has one ``(3, nao, nao)`` array per molecule atom and
@@ -521,7 +549,14 @@ def make_df_rks_h1(hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, log=N
     gc.collect()
 
     for atom, h1, vj1, vk1 in gen_df_jk(
-        hessobj, mo_coeff, mo_occ, indexes, budget, hybrid, log=log
+        hessobj,
+        mo_coeff,
+        mo_occ,
+        indexes,
+        budget,
+        hybrid,
+        log=log,
+        stored_integrals=stored_integrals,
     ):
         kept[atom] += h1 + vj1
         if hybrid:

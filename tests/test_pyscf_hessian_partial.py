@@ -177,6 +177,76 @@ def test_partial_chunks_match_pyscf_partial_hess_elec():
             raise AssertionError(f"missing allocated log for {name}")
 
 
+def test_stored_integrals_match_the_live_partial_block(tmp_path):
+    from pyscf import dft, gto
+
+    from molecular_qm_psi4.nodes.pyscf_df_integrals import write_df_integrals
+    from molecular_qm_psi4.nodes.pyscf_hessian import coulomb_j_slices
+    from molecular_qm_psi4.util.pyscf_hessian_partial import partial_jk_span, shell_blocks
+
+    mol = gto.M(
+        atom="H 0 0 0; H 0 0 0.74",
+        basis="sto-3g",
+        verbose=0,
+        spin=0,
+        charge=0,
+    )
+    mf = dft.RKS(mol).density_fit()
+    mf.xc = "pbe"
+    mf.grids.level = 0
+    mf.max_memory = 4000
+    mf.conv_tol = 1e-10
+    mf.kernel()
+    if not mf.converged:
+        raise AssertionError("SCF did not converge")
+    hessian = mf.Hessian()
+    hessian.max_memory = 4000
+    indexes = list(range(mol.natm))
+    slices = coulomb_j_slices(mf, indexes)
+    rhoj1 = np.stack([slices[index][0] for index in indexes], axis=0)
+    wj1 = np.stack([slices[index][1] for index in indexes], axis=0)
+    destination = tmp_path / "df_integrals.h5"
+    write_df_integrals(mol, mf.with_df.auxbasis, destination)
+    aux_loc = mf.with_df.auxmol.ao_loc
+    shell0, shell1 = shell_blocks(aux_loc, 0, len(aux_loc) - 1, 8)[0]
+    log = _AllocationLog()
+    live = partial_jk_span(
+        hessian,
+        mf.mo_energy,
+        mf.mo_coeff,
+        mf.mo_occ,
+        shell0,
+        shell1,
+        rhoj1,
+        wj1,
+        8,
+        node_runner=log,
+    )
+    cached = partial_jk_span(
+        hessian,
+        mf.mo_energy,
+        mf.mo_coeff,
+        mf.mo_occ,
+        shell0,
+        shell1,
+        rhoj1,
+        wj1,
+        8,
+        node_runner=log,
+        stored_integrals=destination,
+        fit_cache={},
+    )
+    for left, right in zip(live, cached):
+        if left is None or right is None:
+            if left is not None or right is not None:
+                raise AssertionError("stored and live partials disagree on a missing array")
+            continue
+        if not np.allclose(left, right, rtol=1e-6, atol=1e-8):
+            raise AssertionError(
+                f"stored integrals differ from the live partial by {np.max(np.abs(left - right))}"
+            )
+
+
 def test_hessian_failure_text_keeps_the_task_group_child():
     from molecular_qm_psi4.nodes.pyscf_hessian import hessian_failure_text
 

@@ -27,6 +27,7 @@ class PySCFHessianStageInput(Model):
     hessian_task_id: str
     qm_input: QMInput = Reference()
     wavefunction: FileStack = Reference()
+    integrals: FileStack = Reference()
 
 
 @simstack_model
@@ -60,6 +61,7 @@ class PySCFHessianAtomsInput(Model):
     hessian_task_id: str
     qm_input: QMInput = Reference()
     wavefunction: FileStack = Reference()
+    integrals: FileStack = Reference()
 
 
 @simstack_model
@@ -97,6 +99,7 @@ class PySCFHessianPartialInput(Model):
     hessian_task_id: str
     qm_input: QMInput = Reference()
     wavefunction: FileStack = Reference()
+    integrals: FileStack = Reference()
     piece: str
     shell_start: int
     shell_end: int

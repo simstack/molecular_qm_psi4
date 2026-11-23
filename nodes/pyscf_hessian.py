@@ -19,6 +19,10 @@ from molecular_qm_psi4.models.pyscf_hessian import (
     PySCFHessianPlan,
     PySCFHessianStageInput,
 )
+from molecular_qm_psi4.nodes.pyscf_df_integrals import (
+    pyscf_df_integrals,
+    stored_integral_path,
+)
 from molecular_qm_psi4.nodes.pyscf_calculator import (
     _FREQ_KEY,
     _WFN_NPY_NAME,
@@ -654,7 +658,7 @@ def require_df_rks_hessian(mf):
     return hessian
 
 
-def coulomb_j_slices(mf, atom_indexes):
+def coulomb_j_slices(mf, atom_indexes, stored_integrals=None):
     """Per-atom ``rhoj1`` / ``wj1`` from the DF Coulomb 3-center derivatives.
 
     ``partial_hess_elec(atmlst=batch)`` is not used. That routine allocates
@@ -668,7 +672,19 @@ def coulomb_j_slices(mf, atom_indexes):
     mo_occ = mf.mo_occ
     mocc = mf.mo_coeff[:, mo_occ > 0]
     dm0 = mocc @ mocc.T * 2
-    int2c = auxmol.intor("int2c2e", aosym="s1")
+    if stored_integrals is None:
+        int2c = auxmol.intor("int2c2e", aosym="s1")
+    else:
+        from molecular_qm_psi4.nodes.pyscf_df_integrals import (
+            load_stored_int2c,
+            open_stored_df_integrals,
+        )
+
+        handle = open_stored_df_integrals(stored_integrals, mol, auxmol)
+        try:
+            int2c = load_stored_int2c(handle)
+        finally:
+            handle.close()
     solve_j2c = _gen_metric_solver(int2c)
     get_int3c_ip1 = _int3c_wrapper(mol, auxmol, "int3c2e_ip1", "s1")
     aoslices = mol.aoslice_by_atom()
@@ -759,6 +775,9 @@ async def pyscf_hessian_for_atoms(
             raise ValueError("qm_input is required")
         if opts.wavefunction is None:
             raise ValueError("wavefunction is required")
+        if opts.integrals is None:
+            raise ValueError("stored DF integrals are required")
+        integral_path = stored_integral_path(opts.integrals)
         hessian_task_id = str(opts.hessian_task_id)
         budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
         node_runner.info(resource_log)
@@ -838,6 +857,7 @@ async def pyscf_hessian_for_atoms(
                     pending,
                     budget_mb,
                     log=node_runner.info,
+                    stored_integrals=integral_path,
                 )
             # make_h1's range_coulomb caches an RSH DF object that shares the
             # full-range auxmol, then restores auxmol.omega to 0. CPHF get_jk
@@ -882,7 +902,7 @@ async def pyscf_hessian_for_atoms(
                 interval_s=_HEARTBEAT_INTERVAL_S,
                 task_id=heartbeat_task_id,
             ):
-                j_slices = coulomb_j_slices(mf, pending)
+                j_slices = coulomb_j_slices(mf, pending, integral_path)
             nao = int(mol.nao)
             nocc = int((mf.mo_occ > 0).sum())
             naux = int(j_slices[pending[0]][0].shape[0])
@@ -974,6 +994,9 @@ async def pyscf_hessian_partial_ext(
             raise ValueError("qm_input is required")
         if opts.wavefunction is None:
             raise ValueError("wavefunction is required")
+        if opts.integrals is None:
+            raise ValueError("stored DF integrals are required")
+        integral_path = stored_integral_path(opts.integrals)
         piece = opts.piece
         if piece not in {"aux", "xc", "nlc"}:
             raise ValueError(f"Hessian partial piece must be aux, xc or nlc, got {piece!r}")
@@ -1135,6 +1158,10 @@ async def pyscf_hessian_partial_ext(
             )
         if not pending_blocks:
             return node_runner.succeed()
+        fit_cache = {}
+        node_runner.info(
+            f"JK partial of task {hessian_task_id} reads DF integrals from {integral_path}"
+        )
         allocated_s = slurm_time_limit_seconds(kwargs.get("parent_parameters"))
         progress_path = Path("heartbeat.progress.json")
         completed_s = 0.0
@@ -1191,6 +1218,8 @@ async def pyscf_hessian_partial_ext(
                     wj1,
                     blk,
                     node_runner=node_runner,
+                    stored_integrals=integral_path,
+                    fit_cache=fit_cache,
                 )
                 response_arrays = {}
                 if wj_ip2 is not None:
@@ -1375,6 +1404,7 @@ async def pyscf_hessian_orchestrator(
         vibration_molden (FileStack): Normal modes in Molden format
             (``vibrations.molden``) for visualization in Molden or Avogadro.
     Called Nodes:
+        pyscf_df_integrals
         pyscf_hessian_init
         pyscf_hessian_for_atoms_ext
         pyscf_hessian_partial_ext
@@ -1396,10 +1426,23 @@ async def pyscf_hessian_orchestrator(
             raise ValueError("Hessian VM cap must be at least 1")
         heartbeat_task_id = str(getattr(node_runner, "task_id", "") or "")
         parent_name = kwargs.get("custom_name") or ""
+        integral_name = "df-integrals"
+        if parent_name:
+            integral_name = f"{parent_name}-{integral_name}"
+        integral_kwargs = dict(kwargs)
+        integral_kwargs["custom_name"] = integral_name
+        node_runner.info(f"Calling pyscf_df_integrals for task {hessian_task_id}")
+        integrals = await pyscf_df_integrals(opts, **integral_kwargs)
+        integral_error = getattr(integrals, "error_message", None)
+        if integral_error:
+            raise ValueError(integral_error)
+        if integrals is None or not hasattr(integrals, "get"):
+            raise ValueError("pyscf_df_integrals did not return a file")
         stage = PySCFHessianStageInput(
             hessian_task_id=hessian_task_id,
             qm_input=opts.qm_input,
             wavefunction=opts.wavefunction,
+            integrals=integrals,
         )
         init_name = "hessian-init"
         if parent_name:
@@ -1459,6 +1502,7 @@ async def pyscf_hessian_orchestrator(
             hessian_task_id=hessian_task_id,
             qm_input=opts.qm_input,
             wavefunction=opts.wavefunction,
+            integrals=integrals,
         )
         pending = []
         for atom_index in range(n_atoms):
@@ -1580,6 +1624,7 @@ async def pyscf_hessian_orchestrator(
                         hessian_task_id=hessian_task_id,
                         qm_input=opts.qm_input,
                         wavefunction=opts.wavefunction,
+                        integrals=integrals,
                         piece=piece,
                         shell_start=shell0,
                         shell_end=shell1,
@@ -1656,6 +1701,9 @@ async def pyscf_hessian(opts: PySCFHessianStageInput, **kwargs) -> SimstackResul
             raise ValueError("hessian_task_id is required")
         if opts.qm_input is None or opts.wavefunction is None:
             raise ValueError("qm_input and wavefunction are required")
+        if opts.integrals is None:
+            raise ValueError("stored DF integrals are required")
+        integral_path = stored_integral_path(opts.integrals)
         hessian_task_id = str(opts.hessian_task_id)
         try:
             import pyscf  # noqa: F401
@@ -1757,7 +1805,9 @@ async def pyscf_hessian(opts: PySCFHessianStageInput, **kwargs) -> SimstackResul
                 raise ValueError(f"stored aux response for task {hessian_task_id} has no wj_ip2")
             wk_ip2 = stacked["wk_ip2"] if "wk_ip2" in stacked else None
             wk_ip2_lr = stacked["wk_ip2_lr"] if "wk_ip2_lr" in stacked else None
-            partial = partial + partial_response2_cross(hessian_obj, stacked["wj_ip2"], wk_ip2, wk_ip2_lr)
+            partial = partial + partial_response2_cross(
+                hessian_obj, stacked["wj_ip2"], wk_ip2, wk_ip2_lr, integral_path
+            )
         elif response_level == 1:
             if aux_response_blocks:
                 raise ValueError(

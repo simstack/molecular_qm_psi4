@@ -54,6 +54,102 @@ def write_df_integrals(mol, auxbasis, destination: Path) -> Path:
     return destination
 
 
+def stored_integral_path(integrals):
+    """Return the work-directory path of a stored integral ``FileStack``.
+
+    ``None`` means this Hessian was not given a stored file. A file that
+    ``get()`` cannot open is an error.
+    """
+    if integrals is None:
+        return None
+    path = Path(integrals.get())
+    if not path.is_file():
+        raise ValueError(f"stored DF integral file is missing: {path}")
+    return path
+
+
+def open_stored_df_integrals(path, mol, auxmol):
+    """Open ``int2c2e`` and ``int3c2e`` written by ``write_df_integrals``.
+
+    The caller closes the handle. A missing file or a basis that does not
+    match ``mol`` and ``auxmol`` raises ``ValueError``.
+    """
+    import h5py
+
+    if path is None:
+        raise ValueError("stored DF integral file is required")
+    if mol is None or auxmol is None:
+        raise ValueError("molecule and aux basis are required")
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f"stored DF integral file is missing: {path}")
+    handle = h5py.File(path, "r")
+    try:
+        for name in ("nao", "naux", "natm"):
+            if name not in handle.attrs:
+                raise ValueError(f"stored DF integral file is missing attribute {name}")
+        nao = int(handle.attrs["nao"])
+        naux = int(handle.attrs["naux"])
+        natm = int(handle.attrs["natm"])
+        if nao != int(mol.nao) or naux != int(auxmol.nao) or natm != int(mol.natm):
+            raise ValueError(
+                f"stored DF integrals have nao={nao}, naux={naux}, natm={natm}; "
+                f"molecule has nao={int(mol.nao)}, naux={int(auxmol.nao)}, natm={int(mol.natm)}"
+            )
+        if "int2c2e" not in handle or "int3c2e" not in handle:
+            raise ValueError("stored DF integral file has no int2c2e or int3c2e")
+        int2c = handle["int2c2e"]
+        if tuple(int(dim) for dim in int2c.shape) != (naux, naux):
+            raise ValueError(
+                f"stored int2c2e has shape {tuple(int2c.shape)}, expected {(naux, naux)}"
+            )
+        group = handle["int3c2e"]
+        if len(group) != natm:
+            raise ValueError(
+                f"stored int3c2e has {len(group)} atoms, molecule has {natm}"
+            )
+    except Exception:
+        handle.close()
+        raise
+    return handle
+
+
+def load_stored_int2c(handle):
+    """Copy ``int2c2e`` out of an open stored-integral file."""
+    import numpy as np
+
+    if handle is None or "int2c2e" not in handle:
+        raise ValueError("stored DF integral file has no int2c2e")
+    naux = int(handle.attrs["naux"])
+    int2c = np.array(handle["int2c2e"], dtype=float, copy=True)
+    if tuple(int(dim) for dim in int2c.shape) != (naux, naux):
+        raise ValueError(
+            f"stored int2c2e has shape {tuple(int2c.shape)}, expected {(naux, naux)}"
+        )
+    return int2c
+
+
+def load_stored_int3c(handle, atom, atom_nao, nao):
+    """Copy one atom's ``int3c2e`` block out of an open stored-integral file."""
+    import numpy as np
+
+    if handle is None or "int3c2e" not in handle:
+        raise ValueError("stored DF integral file has no int3c2e")
+    if isinstance(atom, bool) or not isinstance(atom, int) or atom < 0:
+        raise ValueError(f"atom index must be a non-negative int, got {atom!r}")
+    key = f"{atom:04d}"
+    if key not in handle["int3c2e"]:
+        raise ValueError(f"stored DF integral file is missing int3c2e/{key}")
+    block = np.array(handle["int3c2e"][key], dtype=float, copy=True)
+    naux = int(handle.attrs["naux"])
+    expected = (int(atom_nao), int(nao), naux)
+    if tuple(int(dim) for dim in block.shape) != expected:
+        raise ValueError(
+            f"stored int3c2e/{key} has shape {tuple(block.shape)}, expected {expected}"
+        )
+    return block
+
+
 @node
 async def pyscf_df_integrals(opts: PySCFHessianInput, **kwargs) -> FileStack:
     """
