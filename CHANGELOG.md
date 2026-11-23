@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.38.0 (2026-11-23)
+
+### Features
+
+- Reuse stored DF integrals in the Hessian
+  ([`2edeafd`](https://github.com/simstack/molecular_qm_psi4/commit/2edeafdbc718ac7b5bf4d9f87ecaf5cf7b7880b1))
+
+The orchestrator writes the full-range int2c2e and int3c2e once, and the atom, partial, and assembly
+  tasks read that file instead of recomputing it for every aux block.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.37.0 (2026-11-23)
 
 ### Features
