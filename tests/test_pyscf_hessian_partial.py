@@ -192,7 +192,7 @@ def test_stored_integrals_match_the_live_partial_block(tmp_path):
         charge=0,
     )
     mf = dft.RKS(mol).density_fit()
-    mf.xc = "pbe"
+    mf.xc = "pbe0"
     mf.grids.level = 0
     mf.max_memory = 4000
     mf.conv_tol = 1e-10
@@ -208,7 +208,58 @@ def test_stored_integrals_match_the_live_partial_block(tmp_path):
     destination = tmp_path / "df_integrals.h5"
     write_df_integrals(mol, mf.with_df.auxbasis, destination)
     aux_loc = mf.with_df.auxmol.ao_loc
-    shell0, shell1 = shell_blocks(aux_loc, 0, len(aux_loc) - 1, 8)[0]
+    nbas_aux = len(aux_loc) - 1
+    blocks = shell_blocks(aux_loc, 0, nbas_aux, 8)
+    shell0, shell1 = blocks[0]
+    from molecular_qm_psi4.util.pyscf_hessian_partial import (
+        prepare_full_range_density,
+        prepare_solved_ip1_span,
+    )
+    import h5py
+
+    hybrid = bool(mf._numint.libxc.is_hybrid_xc(mf.xc))
+    density = prepare_full_range_density(
+        mol, mf.with_df.auxmol, mf.mo_coeff, mf.mo_occ, destination, hybrid
+    )
+    solved = tmp_path / "ip1_solved.h5"
+    prepare_solved_ip1_span(
+        mol,
+        mf.with_df.auxmol,
+        mf.mo_coeff,
+        mf.mo_occ,
+        destination,
+        0,
+        nbas_aux,
+        solved,
+        hybrid,
+        density,
+        8,
+    )
+    from molecular_qm_psi4.util.pyscf_hessian_h1 import make_df_rks_h1
+
+    live_h1 = make_df_rks_h1(hessian, mf.mo_coeff, mf.mo_occ, indexes, 4000)
+    filled = {}
+    stored_h1 = make_df_rks_h1(
+        hessian,
+        mf.mo_coeff,
+        mf.mo_occ,
+        indexes,
+        4000,
+        stored_integrals=destination,
+        coulomb_slices=filled,
+    )
+    for atom in indexes:
+        if not np.allclose(stored_h1[atom], live_h1[atom], rtol=1e-6, atol=1e-8):
+            raise AssertionError(f"stored int3c2e_ip1 h1 differs for atom {atom}")
+        rho_stored, wj_stored = filled[atom]
+        if not np.allclose(rho_stored, slices[atom][0], rtol=1e-6, atol=1e-8):
+            raise AssertionError(f"stored rhoj1 differs for atom {atom}")
+        if not np.allclose(wj_stored, slices[atom][1], rtol=1e-6, atol=1e-8):
+            raise AssertionError(f"stored wj1 differs for atom {atom}")
+    with h5py.File(destination, "a") as handle:
+        for key in handle["int3c2e_ip1"]:
+            handle["int3c2e_ip1"][key][:] = 0
+    span = h5py.File(solved, "r")
     log = _AllocationLog()
     live = partial_jk_span(
         hessian,
@@ -234,8 +285,9 @@ def test_stored_integrals_match_the_live_partial_block(tmp_path):
         8,
         node_runner=log,
         stored_integrals=destination,
-        fit_cache={},
+        fit_cache={"density": density, "ip1": span},
     )
+    span.close()
     for left, right in zip(live, cached):
         if left is None or right is None:
             if left is not None or right is not None:

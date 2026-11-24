@@ -68,6 +68,8 @@ async def test_successful_hessian_removes_partials_and_integrals(tmp_path):
     integral = tmp_path / "pyscf_df_integrals" / "node" / "df_integrals.h5"
     integral.parent.mkdir(parents=True)
     integral.write_bytes(b"integrals")
+    solved = row / "ip1_solved_0_4.h5"
+    solved.write_bytes(b"solved-ip1")
     record = object()
     previous = _use(tmp_path, [record])
     try:
@@ -78,6 +80,7 @@ async def test_successful_hessian_removes_partials_and_integrals(tmp_path):
     finally:
         _restore(*previous)
     assert not partial.exists()
+    assert not solved.exists()
     assert kept.read_bytes() == b"atom"
     assert other.read_bytes() == b"other"
     assert not integral.exists()

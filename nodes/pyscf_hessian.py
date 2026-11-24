@@ -22,6 +22,7 @@ from molecular_qm_psi4.models.pyscf_hessian import (
 from molecular_qm_psi4.nodes.pyscf_df_integrals import (
     pyscf_df_integrals,
     stored_integral_path,
+    stored_integrals_need_rewrite,
 )
 from molecular_qm_psi4.nodes.pyscf_calculator import (
     _FREQ_KEY,
@@ -58,6 +59,8 @@ from molecular_qm_psi4.util.pyscf_hessian_partial import (
     partial_response2_cross,
     partial_xc_and_e1,
     pending_aux_blocks,
+    prepare_full_range_density,
+    prepare_solved_ip1_span,
     stack_aux_response,
 )
 from molecular_qm_psi4.util.pyscf_result import PySCFResult
@@ -170,6 +173,21 @@ async def discard_successful_hessian_intermediates(hessian_task_id, integrals, n
         partials.append(_path_inside(path, row_dir))
     if not partials:
         raise ValueError(f"Hessian task {hessian_task_id} has no partial.npy files")
+    solved_rows = []
+    for path in row_dir.iterdir():
+        name = path.name
+        if not name.startswith("ip1_solved_"):
+            continue
+        body = name[len("ip1_solved_") :]
+        if not path.is_file() or not body.endswith(".h5"):
+            raise ValueError(f"Hessian ip1 file is not a solved span file: {path}")
+        stem = body[: -len(".h5")]
+        start, sep, end = stem.partition("_")
+        if sep != "_" or not start.isdigit() or not end.isdigit():
+            raise ValueError(
+                f"Hessian ip1 file name is not ip1_solved_<start>_<end>.h5: {path}"
+            )
+        solved_rows.append(_path_inside(path, row_dir))
     integral_path = stored_integral_path(integrals)
     integral_file = _path_inside(integral_path, root)
     if integral_file.name != "df_integrals.h5":
@@ -177,7 +195,7 @@ async def discard_successful_hessian_intermediates(hessian_task_id, integrals, n
             f"DF integral file must be named df_integrals.h5, got {integral_file.name}"
         )
     removed_bytes = 0
-    for path in partials:
+    for path in partials + solved_rows:
         removed_bytes += path.stat().st_size
         path.unlink()
         if path.exists():
@@ -193,8 +211,8 @@ async def discard_successful_hessian_intermediates(hessian_task_id, integrals, n
     for record in records:
         await db.delete(record)
     node_runner.info(
-        f"Removed {len(partials)} partial.npy files and {integral_file} "
-        f"({removed_bytes / 1e9:.1f} GB) after Hessian task {hessian_task_id}"
+        f"Removed {len(partials)} partial.npy files, {len(solved_rows)} solved ip1 files, "
+        f"and {integral_file} ({removed_bytes / 1e9:.1f} GB) after Hessian task {hessian_task_id}"
     )
 
 
@@ -911,6 +929,7 @@ async def pyscf_hessian_for_atoms_ext(
                 # Its dirty page cache is in the cgroup and not in
                 # lib.current_memory. Leaving every atom dirty until the
                 # 480-function int3c2e_ip1 block is SIGKILL -9.
+                coulomb_slices = {}
                 h1ao = make_df_rks_h1(
                     hessian,
                     mf.mo_coeff,
@@ -919,6 +938,7 @@ async def pyscf_hessian_for_atoms_ext(
                     budget_mb,
                     log=node_runner.info,
                     stored_integrals=integral_path,
+                    coulomb_slices=coulomb_slices,
                 )
             # make_h1's range_coulomb caches an RSH DF object that shares the
             # full-range auxmol, then restores auxmol.omega to 0. CPHF get_jk
@@ -957,13 +977,12 @@ async def pyscf_hessian_for_atoms_ext(
             node_runner.info(
                 f"Contracting Coulomb slices for atoms {pending} of task {hessian_task_id}"
             )
-            with ProcessHeartbeat(
-                "heartbeat.log",
-                f"Hessian Coulomb slices atoms {pending[0]}-{pending[-1]}",
-                interval_s=_HEARTBEAT_INTERVAL_S,
-                task_id=heartbeat_task_id,
-            ):
-                j_slices = coulomb_j_slices(mf, pending, integral_path)
+            j_slices = coulomb_slices
+            missing = [atom for atom in pending if atom not in j_slices]
+            if missing:
+                raise ValueError(
+                    f"stored int3c2e_ip1 did not return Coulomb slices for atoms {missing}"
+                )
             nao = int(mol.nao)
             nocc = int((mf.mo_occ > 0).sum())
             naux = int(j_slices[pending[0]][0].shape[0])
@@ -1200,92 +1219,121 @@ async def pyscf_hessian_partial_ext(
         if not pending_blocks:
             return node_runner.succeed()
         fit_cache = {}
-        node_runner.info(
-            f"JK partial of task {hessian_task_id} reads DF integrals from {integral_path}"
+        ni = mf._numint
+        hybrid = ni.libxc.is_hybrid_xc(mf.xc)
+        if not isinstance(hybrid, bool):
+            raise ValueError(f"hybrid flag for xc {mf.xc!r} must be bool, got {hybrid!r}")
+        fit_cache["density"] = prepare_full_range_density(
+            mol, auxmol, mf.mo_coeff, mf.mo_occ, integral_path, hybrid
         )
-        allocated_s = slurm_time_limit_seconds(kwargs.get("parent_parameters"))
-        progress_path = Path("heartbeat.progress.json")
-        completed_s = 0.0
-        first_start, first_end = pending_blocks[0]
-        block_started = time.time()
-        write_block_progress(
-            progress_path,
-            {
-                "block": 1,
-                "blocks": len(pending_blocks),
-                "shell_start": first_start,
-                "shell_end": first_end,
-                "block_started": block_started,
-                "completed_s": completed_s,
-                "allocated_s": allocated_s,
-                "job_started": job_started,
-            },
+        ip1_path = row_dir / f"ip1_solved_{int(shell_start)}_{int(shell_end)}.h5"
+        prepare_solved_ip1_span(
+            mol,
+            auxmol,
+            mf.mo_coeff,
+            mf.mo_occ,
+            integral_path,
+            shell_start,
+            shell_end,
+            ip1_path,
+            hybrid,
+            fit_cache["density"],
+            blk,
+            log=node_runner.info,
         )
-        with ProcessHeartbeat(
-            "heartbeat.log",
-            f"Hessian aux shells {shell_start}-{shell_end}",
-            interval_s=_HEARTBEAT_INTERVAL_S,
-            task_id=heartbeat_task_id,
-            progress_path=progress_path,
-        ):
-            for block_number, (block_start, block_end) in enumerate(pending_blocks, start=1):
-                if block_number > 1:
-                    block_started = time.time()
-                    write_block_progress(
-                        progress_path,
-                        {
-                            "block": block_number,
-                            "blocks": len(pending_blocks),
-                            "shell_start": block_start,
-                            "shell_end": block_end,
-                            "block_started": block_started,
-                            "completed_s": completed_s,
-                            "allocated_s": allocated_s,
-                            "job_started": job_started,
-                        },
+        import h5py
+
+        ip1_handle = h5py.File(ip1_path, "r")
+        try:
+            fit_cache["ip1"] = ip1_handle
+            node_runner.info(
+                f"JK partial of task {hessian_task_id} reads DF integrals from {integral_path}"
+            )
+            allocated_s = slurm_time_limit_seconds(kwargs.get("parent_parameters"))
+            progress_path = Path("heartbeat.progress.json")
+            completed_s = 0.0
+            first_start, first_end = pending_blocks[0]
+            block_started = time.time()
+            write_block_progress(
+                progress_path,
+                {
+                    "block": 1,
+                    "blocks": len(pending_blocks),
+                    "shell_start": first_start,
+                    "shell_end": first_end,
+                    "block_started": block_started,
+                    "completed_s": completed_s,
+                    "allocated_s": allocated_s,
+                    "job_started": job_started,
+                },
+            )
+            with ProcessHeartbeat(
+                "heartbeat.log",
+                f"Hessian aux shells {shell_start}-{shell_end}",
+                interval_s=_HEARTBEAT_INTERVAL_S,
+                task_id=heartbeat_task_id,
+                progress_path=progress_path,
+            ):
+                for block_number, (block_start, block_end) in enumerate(pending_blocks, start=1):
+                    if block_number > 1:
+                        block_started = time.time()
+                        write_block_progress(
+                            progress_path,
+                            {
+                                "block": block_number,
+                                "blocks": len(pending_blocks),
+                                "shell_start": block_start,
+                                "shell_end": block_end,
+                                "block_started": block_started,
+                                "completed_s": completed_s,
+                                "allocated_s": allocated_s,
+                                "job_started": job_started,
+                            },
+                        )
+                    node_runner.info(
+                        f"JK partial block {block_number}/{len(pending_blocks)} "
+                        f"aux shells {block_start}:{block_end} of task {hessian_task_id}"
                     )
-                node_runner.info(
-                    f"JK partial block {block_number}/{len(pending_blocks)} "
-                    f"aux shells {block_start}:{block_end} of task {hessian_task_id}"
-                )
-                array, wj_ip2, wk_ip2, wk_ip2_lr = partial_jk_span(
-                    hessian,
-                    mf.mo_energy,
-                    mf.mo_coeff,
-                    mf.mo_occ,
-                    block_start,
-                    block_end,
-                    rhoj1,
-                    wj1,
-                    blk,
-                    node_runner=node_runner,
-                    stored_integrals=integral_path,
-                    fit_cache=fit_cache,
-                )
-                response_arrays = {}
-                if wj_ip2 is not None:
-                    response_arrays["wj_ip2"] = wj_ip2
-                if wk_ip2 is not None:
-                    response_arrays["wk_ip2"] = wk_ip2
-                if wk_ip2_lr is not None:
-                    response_arrays["wk_ip2_lr"] = wk_ip2_lr
-                record = await store_partial_contribution(
-                    hessian_task_id,
-                    "aux",
-                    block_start,
-                    block_end,
-                    n_atoms,
-                    array,
-                    response_arrays,
-                    row_dir,
-                )
-                node_runner.record = record
-                completed_s += time.time() - block_started
-                node_runner.info(
-                    f"Stored JK partial block {block_number}/{len(pending_blocks)} "
-                    f"aux shells {block_start}:{block_end} of task {hessian_task_id}"
-                )
-        return node_runner.succeed()
+                    array, wj_ip2, wk_ip2, wk_ip2_lr = partial_jk_span(
+                        hessian,
+                        mf.mo_energy,
+                        mf.mo_coeff,
+                        mf.mo_occ,
+                        block_start,
+                        block_end,
+                        rhoj1,
+                        wj1,
+                        blk,
+                        node_runner=node_runner,
+                        stored_integrals=integral_path,
+                        fit_cache=fit_cache,
+                    )
+                    response_arrays = {}
+                    if wj_ip2 is not None:
+                        response_arrays["wj_ip2"] = wj_ip2
+                    if wk_ip2 is not None:
+                        response_arrays["wk_ip2"] = wk_ip2
+                    if wk_ip2_lr is not None:
+                        response_arrays["wk_ip2_lr"] = wk_ip2_lr
+                    record = await store_partial_contribution(
+                        hessian_task_id,
+                        "aux",
+                        block_start,
+                        block_end,
+                        n_atoms,
+                        array,
+                        response_arrays,
+                        row_dir,
+                    )
+                    node_runner.record = record
+                    completed_s += time.time() - block_started
+                    node_runner.info(
+                        f"Stored JK partial block {block_number}/{len(pending_blocks)} "
+                        f"aux shells {block_start}:{block_end} of task {hessian_task_id}"
+                    )
+                return node_runner.succeed()
+        finally:
+            ip1_handle.close()
     except Exception as exc:
         return node_runner.fail(hessian_failure_text(exc))
 
@@ -1481,12 +1529,16 @@ async def pyscf_hessian_orchestrator(
             raise ValueError(integral_error)
         if integrals is None or not hasattr(integrals, "get"):
             raise ValueError("pyscf_df_integrals did not return a file")
+        integral_path_now = None
         try:
-            stored_integral_path(integrals)
+            integral_path_now = stored_integral_path(integrals)
         except ValueError as exc:
             if not str(exc).startswith("stored DF integral file is missing:"):
                 raise
-            node_runner.info(f"{exc} Writing the integrals again.")
+        if integral_path_now is None or stored_integrals_need_rewrite(integral_path_now):
+            node_runner.info(
+                "Stored DF integrals have no int3c2e_ip1. Writing the integrals again."
+            )
             rewritten = dict(integral_kwargs)
             rewritten["parameters"] = Parameters(force_rerun=True)
             integrals = await pyscf_df_integrals(opts, **rewritten)
@@ -1495,7 +1547,9 @@ async def pyscf_hessian_orchestrator(
                 raise ValueError(integral_error)
             if integrals is None or not hasattr(integrals, "get"):
                 raise ValueError("pyscf_df_integrals did not return a file")
-            stored_integral_path(integrals)
+            rewritten_path = stored_integral_path(integrals)
+            if stored_integrals_need_rewrite(rewritten_path):
+                raise ValueError(f"rewritten DF integrals have no int3c2e_ip1: {rewritten_path}")
         stage = PySCFHessianStageInput(
             hessian_task_id=hessian_task_id,
             qm_input=opts.qm_input,

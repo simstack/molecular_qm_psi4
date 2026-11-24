@@ -33,7 +33,9 @@ def test_df_integrals_are_written_only_at_the_given_path(tmp_path):
         assert int(handle.attrs["natm"]) == int(mol.natm)
         int2c = handle["int2c2e"][()]
         block = handle["int3c2e/0000"][()]
+        ip1 = handle["int3c2e_ip1/0000"][()]
         assert "int3c2e/0001" in handle
+        assert "int3c2e_ip1/0001" in handle
     import numpy as np
 
     np.testing.assert_allclose(int2c, auxmol.intor("int2c2e", aosym="s1"))
@@ -42,6 +44,10 @@ def test_df_integrals_are_written_only_at_the_given_path(tmp_path):
         (shl0, shl1, 0, int(mol.nbas), 0, int(auxmol.nbas))
     )
     np.testing.assert_allclose(block, expected)
+    ip1_expected = _int3c_wrapper(mol, auxmol, "int3c2e_ip1", "s1")(
+        (shl0, shl1, 0, int(mol.nbas), 0, int(auxmol.nbas))
+    )
+    np.testing.assert_allclose(ip1, ip1_expected)
 
 
 def test_stored_df_integrals_match_the_live_blocks(tmp_path):

@@ -296,6 +296,100 @@ def _hstack_aux(group, start, stop, natm):
     return stacked
 
 
+def contract_stored_ip1(
+    integral_file,
+    mol,
+    auxmol,
+    aoslices,
+    indexes,
+    dm0,
+    rhoj0,
+    rhok0,
+    mocc_2,
+    rho0_pij,
+    solve_j2c,
+    exchange,
+    limit,
+):
+    """Apply one read of raw ``int3c2e_ip1`` to the ``make_h1`` contractions.
+
+    Returns ``(vj_ready, vk_ready, coulomb)`` for ``indexes``. ``vj_ready`` and
+    ``vk_ready`` are the Cartesian matrices before they are symmetrized.
+    ``coulomb`` maps each requested atom to ``(rhoj1, wj1)``.
+    """
+    from pyscf import lib
+
+    from molecular_qm_psi4.nodes.pyscf_df_integrals import iter_aux_function_chunks
+
+    if integral_file is None or "int3c2e_ip1" not in integral_file:
+        raise ValueError("stored DF integral file has no int3c2e_ip1")
+    if not isinstance(exchange, bool):
+        raise ValueError(f"with_k must be a bool, got {exchange!r}")
+    nao = int(mol.nao)
+    naux = int(auxmol.nao)
+    natm = int(mol.natm)
+    position = {atom: slot for slot, atom in enumerate(indexes)}
+    vj1_buf = np.zeros((len(indexes), 3, nao, nao))
+    vk1_buf = np.zeros((3, nao, nao))
+    extra_vj = {atom: np.zeros((3, nao, nao)) for atom in indexes}
+    extra_vk = {atom: np.zeros((3, nao, nao)) for atom in indexes}
+    wj_acc = {atom: np.zeros((naux, 3)) for atom in indexes}
+    for atom, row in enumerate(aoslices):
+        _shl0, _shl1, p0, p1 = (int(value) for value in row)
+        atom_nao = p1 - p0
+        if atom_nao < 1:
+            raise ValueError(f"atom {atom} has no AOs")
+        key = f"{atom:04d}"
+        if key not in integral_file["int3c2e_ip1"]:
+            raise ValueError(f"stored DF integral file is missing int3c2e_ip1/{key}")
+        dataset = integral_file["int3c2e_ip1"][key]
+        in_batch = atom in position
+        for _shell0, _shell1, left, right in iter_aux_function_chunks(auxmol.ao_loc, limit):
+            width = right - left
+            block = np.array(dataset[:, :, :, left:right], dtype=float, copy=True)
+            if tuple(int(dim) for dim in block.shape) != (3, atom_nao, nao, width):
+                raise ValueError(
+                    f"stored int3c2e_ip1/{key} aux {left}:{right} has shape {block.shape}, "
+                    f"expected {(3, atom_nao, nao, width)}"
+                )
+            if in_batch:
+                wj1 = np.einsum("xijp,ji->xp", block, dm0[:, p0:p1])
+                coef3c = _hstack_aux(rho0_pij, left, right, natm)
+                vj1_buf[position[atom]] += np.einsum("xp,pij->xij", wj1, coef3c)
+                extra_vj[atom][:, p0:p1] -= np.einsum("xijp,p->xij", block, rhoj0[left:right])
+                wj_acc[atom][left:right] = np.einsum("xijp,ji->px", block, dm0[:, p0:p1])
+                if exchange:
+                    rhok_atom = lib.einsum("plj,Jj->plJ", rhok0[left:right], mocc_2[p0:p1])
+                    extra_vk[atom] -= lib.einsum("xijp,pki->xkj", block, rhok_atom)
+                    del rhok_atom
+            if exchange:
+                rhok_block = lib.einsum("plj,Jj->plJ", rhok0[left:right], mocc_2)
+                vk1_buf[:, p0:p1] += lib.einsum("xijp,plj->xil", block, rhok_block)
+                del rhok_block
+            del block
+    vj_ready = {}
+    vk_ready = {}
+    coulomb = {}
+    for atom in indexes:
+        _shl0, _shl1, p0, p1 = (int(value) for value in aoslices[atom])
+        vj1 = -vj1_buf[position[atom]] + extra_vj[atom]
+        vk1 = extra_vk[atom]
+        if exchange:
+            vk1[:, p0:p1] -= vk1_buf[:, p0:p1]
+        vj_ready[atom] = vj1
+        vk_ready[atom] = vk1
+        wj = wj_acc[atom]
+        rhoj1 = np.asarray(solve_j2c(wj), dtype=float)
+        if tuple(int(dim) for dim in rhoj1.shape) != (naux, 3):
+            raise ValueError(
+                f"solved rhoj1 atom {atom} has shape {rhoj1.shape}, expected {(naux, 3)}"
+            )
+        if tuple(int(dim) for dim in wj.shape) != (naux, 3):
+            raise ValueError(f"wj1 atom {atom} has shape {wj.shape}, expected {(naux, 3)}")
+        coulomb[atom] = (rhoj1, wj)
+    return vj_ready, vk_ready, coulomb
+
+
 def gen_df_jk(
     hessobj,
     mo_coeff,
@@ -305,6 +399,7 @@ def gen_df_jk(
     with_k,
     log=None,
     stored_integrals=None,
+    coulomb_slices=None,
 ):
     """Yield ``(atom, hcore, vj, vk)`` for ``atom_indexes`` without a 480-block.
 
@@ -434,16 +529,7 @@ def gen_df_jk(
                     stored[a0:a1] = lib.einsum("xqp,pij->qixj", int2c_ip1[:, a0:a1], coef3c)
                     _release_h5_cache(ftmp, True)
         del coef3c
-    if integral_file is not None:
-        integral_file.close()
-        if stored_read_s is None:
-            raise ValueError("stored DF integral read has no start time")
-        if log is not None:
-            log(f"Read stored DF integrals from {stored_integrals} in {stored_read_s:.1f} s")
-
-    get_int3c_ip1 = _int3c_wrapper(mol, auxmol, "int3c2e_ip1", "s1")
     get_int3c_ip2 = _int3c_wrapper(mol, auxmol, "int3c2e_ip2", "s1")
-    vk1_buf = np.zeros((3, nao, nao))
     h5_name = _release_h5_cache(ftmp, True)
     h5_mb = os.path.getsize(h5_name) / 1e6
     current_mb = float(lib.current_memory()[0])
@@ -455,47 +541,91 @@ def gen_df_jk(
             f"at max_memory={budget} MB (reserved {current_mb + vj1_mb + _H1_OVERHEAD_MB:.0f} MB, "
             f"h5 file {h5_mb:.0f} MB, page cache released)"
         )
-    blocks = shell_blocks(aux_loc, 0, nbas_aux, blk)
-    position = {atom: slot for slot, atom in enumerate(indexes)}
-    vj1_buf = np.zeros((len(indexes), 3, nao, nao))
-    for shell0, shell1 in blocks:
-        a0 = int(aux_loc[shell0])
-        a1 = int(aux_loc[shell1])
-        _release_h5_cache(ftmp, False)
-        int3c_ip1 = get_int3c_ip1((0, nbas, 0, nbas, shell0, shell1))
-        coef3c = _hstack_aux(rho0_pij, a0, a1, int(mol.natm))
-        for atom, (_shl0, _shl1, q0, q1) in enumerate(aoslices):
-            slot = position.get(atom)
-            if slot is None:
-                continue
-            q0 = int(q0)
-            q1 = int(q1)
-            wj1 = np.einsum("xijp,ji->xp", int3c_ip1[:, q0:q1], dm0[:, q0:q1])
-            vj1_buf[slot] += np.einsum("xp,pij->xij", wj1, coef3c)
-        if exchange:
-            rhok_block = lib.einsum("plj,Jj->plJ", rhok0[a0:a1], mocc_2)
-            vk1_buf += lib.einsum("xijp,plj->xil", int3c_ip1, rhok_block)
-            del rhok_block
-        del int3c_ip1, coef3c
-
-    for atom in indexes:
-        shl0, shl1, p0, p1 = (int(value) for value in aoslices[atom])
-        vj1 = -vj1_buf[position[atom]]
-        vk1 = np.zeros((3, nao, nao))
+    if integral_file is not None:
+        if coulomb_slices is None:
+            raise ValueError("coulomb_slices are required when stored int3c2e_ip1 is read")
+        if log is not None:
+            log(
+                f"Reading stored int3c2e_ip1 once for atoms {indexes[0]}-{indexes[-1]}"
+            )
+        vj_ready, vk_ready, filled = contract_stored_ip1(
+            integral_file,
+            mol,
+            auxmol,
+            aoslices,
+            indexes,
+            dm0,
+            rhoj0,
+            rhok0,
+            mocc_2,
+            rho0_pij,
+            solve_j2c,
+            exchange,
+            blk,
+        )
+        if set(filled) != set(indexes):
+            raise ValueError(
+                f"stored int3c2e_ip1 covered atoms {sorted(filled)}, expected {list(indexes)}"
+            )
+        coulomb_slices.update(filled)
+        integral_file.close()
+        if stored_read_s is None:
+            raise ValueError("stored DF integral read has no start time")
+        if log is not None:
+            log(f"Read stored DF integrals from {stored_integrals} in {stored_read_s:.1f} s")
+    else:
+        if coulomb_slices is not None:
+            raise ValueError("coulomb_slices require stored int3c2e_ip1")
+        get_int3c_ip1 = _int3c_wrapper(mol, auxmol, "int3c2e_ip1", "s1")
+        blocks = shell_blocks(aux_loc, 0, nbas_aux, blk)
+        position = {atom: slot for slot, atom in enumerate(indexes)}
+        vj1_buf = np.zeros((len(indexes), 3, nao, nao))
+        vk1_buf = np.zeros((3, nao, nao))
         for shell0, shell1 in blocks:
             a0 = int(aux_loc[shell0])
             a1 = int(aux_loc[shell1])
             _release_h5_cache(ftmp, False)
-            int3c_ip1 = get_int3c_ip1((shl0, shl1, 0, nbas, shell0, shell1))
-            vj1[:, p0:p1] -= np.einsum("xijp,p->xij", int3c_ip1, rhoj0[a0:a1])
+            int3c_ip1 = get_int3c_ip1((0, nbas, 0, nbas, shell0, shell1))
+            coef3c = _hstack_aux(rho0_pij, a0, a1, int(mol.natm))
+            for atom, (_shl0, _shl1, q0, q1) in enumerate(aoslices):
+                slot = position.get(atom)
+                if slot is None:
+                    continue
+                q0 = int(q0)
+                q1 = int(q1)
+                wj1 = np.einsum("xijp,ji->xp", int3c_ip1[:, q0:q1], dm0[:, q0:q1])
+                vj1_buf[slot] += np.einsum("xp,pij->xij", wj1, coef3c)
             if exchange:
-                rhok_block = lib.einsum("plj,Jj->plJ", rhok0[a0:a1], mocc_2[p0:p1])
-                vk1 -= lib.einsum("xijp,pki->xkj", int3c_ip1, rhok_block)
+                rhok_block = lib.einsum("plj,Jj->plJ", rhok0[a0:a1], mocc_2)
+                vk1_buf += lib.einsum("xijp,plj->xil", int3c_ip1, rhok_block)
                 del rhok_block
-            del int3c_ip1
-        if exchange:
-            vk1[:, p0:p1] -= vk1_buf[:, p0:p1]
+            del int3c_ip1, coef3c
+        vj_ready = {}
+        vk_ready = {}
+        for atom in indexes:
+            _shl0, _shl1, p0, p1 = (int(value) for value in aoslices[atom])
+            vj1 = -vj1_buf[position[atom]]
+            vk1 = np.zeros((3, nao, nao))
+            for shell0, shell1 in blocks:
+                a0 = int(aux_loc[shell0])
+                a1 = int(aux_loc[shell1])
+                _release_h5_cache(ftmp, False)
+                int3c_ip1 = get_int3c_ip1((int(_shl0), int(_shl1), 0, nbas, shell0, shell1))
+                vj1[:, p0:p1] -= np.einsum("xijp,p->xij", int3c_ip1, rhoj0[a0:a1])
+                if exchange:
+                    rhok_block = lib.einsum("plj,Jj->plJ", rhok0[a0:a1], mocc_2[p0:p1])
+                    vk1 -= lib.einsum("xijp,pki->xkj", int3c_ip1, rhok_block)
+                    del rhok_block
+                del int3c_ip1
+            if exchange:
+                vk1[:, p0:p1] -= vk1_buf[:, p0:p1]
+            vj_ready[atom] = vj1
+            vk_ready[atom] = vk1
 
+    for atom in indexes:
+        _shl0, _shl1, p0, p1 = (int(value) for value in aoslices[atom])
+        vj1 = vj_ready[atom]
+        vk1 = vk_ready[atom]
         if response:
             ashl0, ashl1, _q0, _q1 = (int(value) for value in auxslices[atom])
             if ashl1 > ashl0:
@@ -525,7 +655,14 @@ def gen_df_jk(
 
 
 def make_df_rks_h1(
-    hessobj, mo_coeff, mo_occ, atom_indexes, max_memory_mb, log=None, stored_integrals=None
+    hessobj,
+    mo_coeff,
+    mo_occ,
+    atom_indexes,
+    max_memory_mb,
+    log=None,
+    stored_integrals=None,
+    coulomb_slices=None,
 ):
     """``make_h1`` for ``atom_indexes`` with an aux block that fits in memory.
 
@@ -574,6 +711,7 @@ def make_df_rks_h1(
         hybrid,
         log=log,
         stored_integrals=stored_integrals,
+        coulomb_slices=coulomb_slices,
     ):
         kept[atom] += h1 + vj1
         if hybrid:

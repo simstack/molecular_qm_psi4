@@ -12,11 +12,46 @@ from simstack.core.node import node
 from simstack.models import FileStack
 
 
+# One aux chunk of ``int3c2e_ip1`` stays under this size while it is written.
+_IP1_CHUNK_BYTES = 256 * 1024 * 1024
+
+
+def iter_aux_function_chunks(aux_loc, limit):
+    """Yield ``(shell0, shell1, ao0, ao1)`` covering the aux basis.
+
+    ``limit`` is the maximum number of aux functions in one chunk. A shell
+    wider than ``limit`` raises ``ValueError``.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int) or int(limit) < 1:
+        raise ValueError(f"aux chunk limit must be a positive int, got {limit!r}")
+    loc = [int(value) for value in aux_loc]
+    nbas = len(loc) - 1
+    if nbas < 1:
+        raise ValueError("aux basis has no shells")
+    shell = 0
+    while shell < nbas:
+        end = shell + 1
+        funcs = loc[end] - loc[shell]
+        if funcs < 1:
+            raise ValueError(f"aux shell {shell} is empty")
+        if funcs > limit:
+            raise ValueError(
+                f"aux shell {shell} has {funcs} functions, above the chunk size {limit}"
+            )
+        while end < nbas and funcs + (loc[end + 1] - loc[end]) <= limit:
+            funcs += loc[end + 1] - loc[end]
+            end += 1
+        yield shell, end, loc[shell], loc[end]
+        shell = end
+
+
 def write_df_integrals(mol, auxbasis, destination: Path) -> Path:
-    """Write ``int2c2e`` and per-atom ``int3c2e`` into ``destination``.
+    """Write ``int2c2e``, per-atom ``int3c2e`` and raw ``int3c2e_ip1``.
 
     ``destination`` is the file the caller already placed under the simstack
-    work directory. This does not choose a scratch directory.
+    work directory. This does not choose a scratch directory. ``int3c2e_ip1``
+    is written one aux chunk at a time so the full Cartesian tensor is not
+    held in memory.
     """
     from pyscf.df.addons import make_auxmol
     from pyscf.df.hessian.rhf import _int3c_wrapper
@@ -31,6 +66,7 @@ def write_df_integrals(mol, auxbasis, destination: Path) -> Path:
         raise ValueError("density-fitting aux basis is required")
     int2c = auxmol.intor("int2c2e", aosym="s1")
     get_int3c = _int3c_wrapper(mol, auxmol, "int3c2e", "s1")
+    get_int3c_ip1 = _int3c_wrapper(mol, auxmol, "int3c2e_ip1", "s1")
     aoslices = mol.aoslice_by_atom()
     if len(aoslices) != int(mol.natm):
         raise ValueError(
@@ -39,18 +75,44 @@ def write_df_integrals(mol, auxbasis, destination: Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     import h5py
 
+    nao = int(mol.nao)
+    nbas = int(mol.nbas)
+    nbas_aux = int(auxmol.nbas)
     with h5py.File(destination, "w") as handle:
-        handle.attrs["nao"] = int(mol.nao)
+        handle.attrs["nao"] = nao
         handle.attrs["naux"] = int(auxmol.nao)
         handle.attrs["natm"] = int(mol.natm)
         handle.create_dataset("int2c2e", data=int2c)
         group = handle.create_group("int3c2e")
-        nbas = int(mol.nbas)
-        nbas_aux = int(auxmol.nbas)
+        ip1 = handle.create_group("int3c2e_ip1")
         for atom, row in enumerate(aoslices):
-            shl0, shl1, _p0, _p1 = (int(value) for value in row)
+            shl0, shl1, p0, p1 = (int(value) for value in row)
+            atom_nao = p1 - p0
+            if atom_nao < 1:
+                raise ValueError(f"atom {atom} has no AOs")
             block = get_int3c((shl0, shl1, 0, nbas, 0, nbas_aux))
             group.create_dataset(f"{atom:04d}", data=block)
+            del block
+            per_aux = 3 * atom_nao * nao * 8
+            if per_aux > _IP1_CHUNK_BYTES:
+                raise ValueError(
+                    f"int3c2e_ip1 atom {atom} needs {per_aux} bytes per aux function, "
+                    f"above the {_IP1_CHUNK_BYTES} byte chunk"
+                )
+            limit = _IP1_CHUNK_BYTES // per_aux
+            dataset = ip1.create_dataset(
+                f"{atom:04d}", shape=(3, atom_nao, nao, int(auxmol.nao)), dtype="f8"
+            )
+            for _shell0, _shell1, left, right in iter_aux_function_chunks(auxmol.ao_loc, limit):
+                chunk = get_int3c_ip1((shl0, shl1, 0, nbas, _shell0, _shell1))
+                expected = (3, atom_nao, nao, right - left)
+                if tuple(int(dim) for dim in chunk.shape) != expected:
+                    raise ValueError(
+                        f"int3c2e_ip1 atom {atom} aux {left}:{right} has shape {chunk.shape}, "
+                        f"expected {expected}"
+                    )
+                dataset[:, :, :, left:right] = chunk
+                del chunk
     return destination
 
 
@@ -108,6 +170,29 @@ def open_stored_df_integrals(path, mol, auxmol):
             raise ValueError(
                 f"stored int3c2e has {len(group)} atoms, molecule has {natm}"
             )
+        if "int3c2e_ip1" not in handle:
+            raise ValueError("stored DF integral file has no int3c2e_ip1")
+        ip1 = handle["int3c2e_ip1"]
+        if len(ip1) != natm:
+            raise ValueError(
+                f"stored int3c2e_ip1 has {len(ip1)} atoms, molecule has {natm}"
+            )
+        aoslices = mol.aoslice_by_atom()
+        if len(aoslices) != natm:
+            raise ValueError(
+                f"aoslice_by_atom has {len(aoslices)} rows, molecule has {natm} atoms"
+            )
+        for atom, row in enumerate(aoslices):
+            key = f"{atom:04d}"
+            if key not in ip1:
+                raise ValueError(f"stored DF integral file is missing int3c2e_ip1/{key}")
+            _shl0, _shl1, p0, p1 = (int(value) for value in row)
+            expected = (3, p1 - p0, nao, naux)
+            if tuple(int(dim) for dim in ip1[key].shape) != expected:
+                raise ValueError(
+                    f"stored int3c2e_ip1/{key} has shape {tuple(ip1[key].shape)}, "
+                    f"expected {expected}"
+                )
     except Exception:
         handle.close()
         raise
@@ -150,10 +235,33 @@ def load_stored_int3c(handle, atom, atom_nao, nao):
     return block
 
 
+def stored_integrals_need_rewrite(path) -> bool:
+    """True when the file is missing or has no raw ``int3c2e_ip1`` group."""
+    import h5py
+
+    if path is None:
+        raise ValueError("stored DF integral file is required")
+    path = Path(path)
+    if not path.is_file():
+        return True
+    with h5py.File(path, "r") as handle:
+        if "int3c2e_ip1" not in handle:
+            return True
+        if "natm" not in handle.attrs:
+            raise ValueError("stored DF integral file is missing attribute natm")
+        natm = int(handle.attrs["natm"])
+        if len(handle["int3c2e_ip1"]) != natm:
+            raise ValueError(
+                f"stored int3c2e_ip1 has {len(handle['int3c2e_ip1'])} atoms, "
+                f"file attribute natm is {natm}"
+            )
+    return False
+
+
 @node
 async def pyscf_df_integrals(opts: PySCFHessianInput, **kwargs) -> FileStack:
     """
-    Build the DF ``int2c2e`` and ``int3c2e`` integrals in the simstack work directory.
+    Build the DF ``int2c2e``, ``int3c2e`` and raw ``int3c2e_ip1`` integrals.
 
     The file is not written to local scratch. Another node on the same resource
     receives this ``FileStack`` and ``get()`` returns the work-directory path
