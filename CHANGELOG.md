@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.39.0 (2026-11-24)
+
+### Features
+
+- Read raw int3c2e_ip1 once instead of recomputing it in every Hessian block
+  ([`46272fa`](https://github.com/simstack/molecular_qm_psi4/commit/46272fafdb114de82505ec03bc7921570e5c6614))
+
+Store the derivative in df_integrals.h5. Each partial VM solves its aux span from one read, and each
+  atom VM contracts that file once. A stored file without the derivative is rewritten.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.38.1 (2026-11-24)
 
 ### Bug Fixes
