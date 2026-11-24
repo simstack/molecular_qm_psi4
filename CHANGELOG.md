@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v0.38.1 (2026-11-24)
+
+### Bug Fixes
+
+- Keep the partial Hessian inside the VM and drop its files
+  ([`c6118ff`](https://github.com/simstack/molecular_qm_psi4/commit/c6118ff334db276d5900e50821c37fcfa8c27dfa))
+
+Stream the repeated ip1 solve so the first aux block fits in memory, fold the atom batch into
+  pyscf_hessian_for_atoms_ext, and delete partial.npy and df_integrals.h5 after a successful
+  assembly.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.38.0 (2026-11-23)
 
 ### Features
