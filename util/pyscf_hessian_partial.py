@@ -464,17 +464,72 @@ def _partial_ejk_window(
         else:
             rhok0 = None
         for atom_index, (shl0, shl1, p0, p1) in enumerate(aoslices):
-            note("allocating", f"int3c2e atom {atom_index}", (p1 - p0, nao, naux))
-            int3c = get_int3c((shl0, shl1, 0, nbas, 0, auxmol.nbas))
-            note("allocated", f"int3c2e atom {atom_index}", int3c.shape)
-            rhoj0 += lib.einsum("klp,kl->p", int3c, dm0[p0:p1])
+            atom_nao = p1 - p0
+            rhs = None
             if with_k:
-                solved_shape = (naux, p1 - p0, nocc)
+                solved_shape = (naux, atom_nao * nocc)
                 note("allocating", f"rhok0 solve atom {atom_index}", solved_shape)
-                solved = solve_j2c(lib.einsum("ijp,jk->pik", int3c, mocc_2).reshape(naux, -1))
-                note("allocated", f"rhok0 solve atom {atom_index}", solved.shape)
-                rhok0[:, p0:p1] = solved.reshape(naux, p1 - p0, nocc)
-            int3c = None
+                rhs = np.empty(solved_shape)
+            aux_shell = 0
+            while aux_shell < nbas_aux:
+                aux_end = aux_shell + 1
+                funcs = loc[aux_end] - loc[aux_shell]
+                if funcs < 1:
+                    raise ValueError(f"aux shell {aux_shell} is empty")
+                while (
+                    aux_end < nbas_aux
+                    and funcs + (loc[aux_end + 1] - loc[aux_end]) <= limit
+                ):
+                    funcs += loc[aux_end + 1] - loc[aux_end]
+                    aux_end += 1
+                if funcs > limit:
+                    raise ValueError(
+                        f"aux shell {aux_shell} has {funcs} functions, above the block size "
+                        f"{limit} that fits in this task's memory"
+                    )
+                left = loc[aux_shell]
+                right = loc[aux_end]
+                width = right - left
+                chunk_shape = (atom_nao, nao, width)
+                note(
+                    "allocating",
+                    f"int3c2e atom {atom_index} aux {aux_shell}:{aux_end}",
+                    chunk_shape,
+                )
+                int3c = get_int3c((shl0, shl1, 0, nbas, aux_shell, aux_end))
+                note(
+                    "allocated",
+                    f"int3c2e atom {atom_index} aux {aux_shell}:{aux_end}",
+                    int3c.shape,
+                )
+                if tuple(int(dim) for dim in int3c.shape) != chunk_shape:
+                    raise ValueError(
+                        f"int3c2e atom {atom_index} aux {aux_shell}:{aux_end} has shape "
+                        f"{int3c.shape}, expected {chunk_shape}"
+                    )
+                rhoj0[left:right] += lib.einsum("klp,kl->p", int3c, dm0[p0:p1])
+                if with_k:
+                    piece = lib.einsum("ijp,jk->pik", int3c, mocc_2)
+                    piece_shape = (width, atom_nao, nocc)
+                    if tuple(int(dim) for dim in piece.shape) != piece_shape:
+                        raise ValueError(
+                            f"rhok0 piece atom {atom_index} has shape {piece.shape}, "
+                            f"expected {piece_shape}"
+                        )
+                    rhs[left:right] = np.ascontiguousarray(piece.reshape(width, atom_nao * nocc))
+                    del piece
+                int3c = None
+                aux_shell = aux_end
+            if with_k:
+                solved = solve_j2c(rhs)
+                del rhs
+                if tuple(int(dim) for dim in solved.shape) != solved_shape:
+                    raise ValueError(
+                        f"rhok0 solve atom {atom_index} has shape {solved.shape}, "
+                        f"expected {solved_shape}"
+                    )
+                rhok0[:, p0:p1] = solved.reshape(naux, atom_nao, nocc)
+                del solved
         note("allocating", "rhoj0 solve", (naux,))
         rhoj0 = solve_j2c(rhoj0)
         note("allocated", "rhoj0 solve", rhoj0.shape)
@@ -503,6 +558,15 @@ def _partial_ejk_window(
             raise ValueError("prepared rhok0 was passed without exchange")
         solve_j2c = _gen_metric_solver(int2c)
         note("allocated", "stored int2c2e", int2c.shape)
+    # Rows of J^{-1} are applied to each aux chunk. The full shell right-hand
+    # side (naux, 3, shell, nao) is what crossed 32 GB next to rhok0.
+    note("allocating", "j2c inverse", (naux, naux))
+    metric_inv = np.ascontiguousarray(solve_j2c(np.eye(naux, dtype=float)))
+    note("allocated", "j2c inverse", metric_inv.shape)
+    if tuple(int(dim) for dim in metric_inv.shape) != (naux, naux):
+        raise ValueError(
+            f"j2c inverse has shape {metric_inv.shape}, expected {(naux, naux)}"
+        )
     note("allocating", "int2c2e_ip1", (3, naux, naux))
     int2c_ip1 = auxmol.intor("int2c2e_ip1", aosym="s1")
     note("allocated", "int2c2e_ip1", int2c_ip1.shape)
@@ -526,12 +590,11 @@ def _partial_ejk_window(
 
     ao_loc_orb = _ao_loc_list(mol.ao_loc)
 
-    def solved_ip1(shl0, shl1, p0, p1, atom_index, label, rhoj1_p=None, rhok_pji=None, rho2c=None):
-        # The callers use aux functions inside this block, plus two reductions
-        # over the whole aux basis. Keeping (naux, 3, nao_atom, nao) for the
-        # atom, and the full-aux integral beside it, is what SIGKILLs a 32 GB
-        # VM on the first block. Each AO shell is solved from aux chunks of
-        # ``block_limit`` functions, and only the window is retained.
+    def solved_ip1(shl0, shl1, p0, p1, atom_index, label, rhoj1_p=None, rho2c=None):
+        # x = J^{-1} v. The window rows, the density contraction, and the
+        # occupied-orbital contraction are linear in v, so each aux chunk of
+        # the raw integral is applied to J^{-1} and discarded. The full shell
+        # tensor (naux, 3, shell, nao) is never allocated.
         if ao_loc_orb[shl0] != p0 or ao_loc_orb[shl1] != p1:
             raise ValueError(
                 f"AO shells {shl0}:{shl1} span {ao_loc_orb[shl0]}:{ao_loc_orb[shl1]}, "
@@ -540,8 +603,8 @@ def _partial_ejk_window(
         atom_nao = p1 - p0
         if atom_nao < 1:
             raise ValueError(f"atom {atom_index} has no AOs")
-        if rho2c is not None and rhok_pji is None:
-            raise ValueError("rhok_pji is required to accumulate the aux response")
+        if rho2c is not None and rhok0 is None:
+            raise ValueError("rhok0 is required to accumulate the aux response")
         if rhoj1_p is not None and tuple(rhoj1_p.shape) != (naux, 3):
             raise ValueError(
                 f"rhoj1_p has shape {rhoj1_p.shape}, expected {(naux, 3)}"
@@ -550,9 +613,9 @@ def _partial_ejk_window(
             raise ValueError(
                 f"rho2c has shape {rho2c.shape}, expected {(3, naux, naux)}"
             )
-        if rhok_pji is not None and tuple(rhok_pji.shape) != (naux, nao, atom_nao):
+        if rho2c is not None and tuple(rhok0.shape) != (naux, nao, nocc):
             raise ValueError(
-                f"rhok_pji has shape {rhok_pji.shape}, expected {(naux, nao, atom_nao)}"
+                f"rhok0 has shape {rhok0.shape}, expected {(naux, nao, nocc)}"
             )
         window = np.empty((nwin, 3, atom_nao, nao))
         for shell in range(shl0, shl1):
@@ -561,22 +624,58 @@ def _partial_ejk_window(
             count = sp1 - sp0
             if count < 1:
                 raise ValueError(f"AO shell {shell} is empty")
-            rhs_shape = (naux, 3, count, nao)
             resident = float(lib.current_memory()[0])
             if resident < 0:
                 raise ValueError(f"current memory must be >= 0, got {resident}")
-            rhs_mb = naux * 3 * count * nao * 8 / 1e6
-            if resident + 2.0 * rhs_mb > float(budget):
+            chunk_mb = 3 * count * nao * limit * 8 / 1e6
+            product_mb = nwin * 3 * count * nao * 8 / 1e6
+            hold_mb = chunk_mb + product_mb
+            if rho2c is not None:
+                hold_mb += (naux * count * nao + naux * naux) * 8 / 1e6
+            if resident + hold_mb > float(budget):
                 raise ValueError(
-                    f"int3c2e_ip1 shell {shell} needs {rhs_mb:.0f} MB twice on top of "
+                    f"int3c2e_ip1 shell {shell} needs {hold_mb:.0f} MB on top of "
                     f"{resident:.0f} MB, above max_memory={budget} MB"
                 )
+            vec = None
+            if rhoj1_p is not None:
+                dm_shell = dm0[:, sp0:sp1]
+                if tuple(dm_shell.shape) != (nao, count):
+                    raise ValueError(
+                        f"dm0 shell {shell} has shape {dm_shell.shape}, expected {(nao, count)}"
+                    )
+                vec = np.ascontiguousarray(dm_shell.T).reshape(-1)
+            flat_basis = None
+            if rho2c is not None:
+                dm_rows = np.ascontiguousarray(dm0[sp0:sp1])
+                if tuple(dm_rows.shape) != (count, nao):
+                    raise ValueError(
+                        f"dm0 rows shell {shell} have shape {dm_rows.shape}, "
+                        f"expected {(count, nao)}"
+                    )
+                basis_shape = (naux, count, nao)
+                note("allocating", f"ip1 response shell {shell}", basis_shape)
+                response_basis = np.empty(basis_shape)
+                row = 0
+                while row < naux:
+                    row1 = min(naux, row + limit)
+                    density = np.ascontiguousarray(rhok0[row:row1])
+                    half = lib.einsum("wlo,il->wio", density, dm_rows)
+                    response_basis[row:row1] = lib.einsum("wio,jo->wij", half, mocc_2)
+                    row = row1
+                if tuple(int(dim) for dim in response_basis.shape) != basis_shape:
+                    raise ValueError(
+                        f"ip1 response shell {shell} has shape {response_basis.shape}, "
+                        f"expected {basis_shape}"
+                    )
+                flat_basis = response_basis.reshape(naux, count * nao)
             note(
                 "allocating",
                 f"solve_j2c {label} atom {atom_index} shell {shell}",
-                rhs_shape,
+                (nwin, 3, count, nao),
             )
-            rhs = np.empty((naux, 3 * count * nao))
+            shell_window = np.zeros((nwin, 3, count, nao))
+            reduced = np.zeros((naux, 3)) if rhoj1_p is not None else None
             aux_shell = 0
             while aux_shell < nbas_aux:
                 aux_end = aux_shell + 1
@@ -585,16 +684,18 @@ def _partial_ejk_window(
                     raise ValueError(f"aux shell {aux_shell} is empty")
                 while (
                     aux_end < nbas_aux
-                    and funcs + (loc[aux_end + 1] - loc[aux_end]) <= block_limit
+                    and funcs + (loc[aux_end + 1] - loc[aux_end]) <= limit
                 ):
                     funcs += loc[aux_end + 1] - loc[aux_end]
                     aux_end += 1
-                if funcs > block_limit:
+                if funcs > limit:
                     raise ValueError(
                         f"aux shell {aux_shell} has {funcs} functions, above the block size "
-                        f"{block_limit} that fits in this task's memory"
+                        f"{limit} that fits in this task's memory"
                     )
-                width = loc[aux_end] - loc[aux_shell]
+                left = loc[aux_shell]
+                right = loc[aux_end]
+                width = right - left
                 block = get_int3c_ip1((shell, shell + 1, 0, nbas, aux_shell, aux_end))
                 block_shape = (3, count, nao, width)
                 if tuple(int(dim) for dim in block.shape) != block_shape:
@@ -602,46 +703,31 @@ def _partial_ejk_window(
                         f"int3c2e_ip1 shell {shell} aux {aux_shell}:{aux_end} has shape "
                         f"{block.shape}, expected {block_shape}"
                     )
-                rhs[loc[aux_shell] : loc[aux_end]] = np.ascontiguousarray(
-                    block.reshape(3 * count * nao, width).T
-                )
+                values = np.ascontiguousarray(block.transpose(3, 0, 1, 2))
                 del block
+                flat = values.reshape(width, 3 * count * nao)
+                shell_window += (metric_inv[ao0:ao1, left:right] @ flat).reshape(
+                    nwin, 3, count, nao
+                )
+                if reduced is not None:
+                    reduced[left:right] += (
+                        values.reshape(width * 3, count * nao) @ vec
+                    ).reshape(width, 3)
+                if flat_basis is not None:
+                    inv_rows = metric_inv[:, left:right].T
+                    for ix in range(3):
+                        moment = values[:, ix].reshape(width, count * nao) @ flat_basis.T
+                        rho2c[ix] += moment.T @ inv_rows
+                del values
                 aux_shell = aux_end
-            column = np.ascontiguousarray(solve_j2c(rhs).reshape(naux, 3, count, nao))
-            del rhs
-            if tuple(int(dim) for dim in column.shape) != rhs_shape:
-                raise ValueError(
-                    f"solve_j2c shell {shell} has shape {column.shape}, expected {rhs_shape}"
-                )
             local = sp0 - p0
-            window[:, :, local : local + count, :] = column[ao0:ao1]
-            if rhoj1_p is not None:
-                dm_shell = dm0[:, sp0:sp1]
-                if tuple(dm_shell.shape) != (nao, count):
-                    raise ValueError(
-                        f"dm0 shell {shell} has shape {dm_shell.shape}, expected {(nao, count)}"
-                    )
-                vec = np.ascontiguousarray(dm_shell.T).reshape(-1)
-                rhoj1_p += (column.reshape(naux * 3, count * nao) @ vec).reshape(naux, 3)
-            if rho2c is not None:
-                rhok_shell = np.ascontiguousarray(rhok_pji[:, :, local : local + count])
-                if rhok_shell.shape != (naux, nao, count):
-                    raise ValueError(
-                        f"rhok shell {shell} has shape {rhok_shell.shape}, "
-                        f"expected {(naux, nao, count)}"
-                    )
-                packed = np.ascontiguousarray(column.transpose(0, 1, 3, 2)).reshape(
-                    naux, 3, nao * count
-                )
-                metric = rhok_shell.reshape(naux, nao * count)
-                for ix in range(3):
-                    rho2c[ix] += metric @ packed[:, ix].T
-                del packed
-            del column
+            window[:, :, local : local + count, :] = shell_window
+            if reduced is not None:
+                rhoj1_p += metric_inv @ reduced
             note(
                 "allocated",
                 f"solve_j2c {label} atom {atom_index} shell {shell}",
-                rhs_shape,
+                shell_window.shape,
             )
         return window
 
@@ -807,20 +893,8 @@ def _partial_ejk_window(
         if not hessobj.auxbasis_response:
             continue
         rhoj1_p = np.zeros((naux, 3))
-        rhok_pji = None
-        rho2c = None
-        if with_k:
-            rhok_p_i = lib.einsum("plj,il->pji", rhok0, dm0[p0:p1])
-            rhok_pji = lib.einsum("pji,Jj->pJi", rhok_p_i, mocc_2)
-            del rhok_p_i
-            if tuple(rhok_pji.shape) != (naux, nao, p1 - p0):
-                raise ValueError(
-                    f"rhok_pji has shape {rhok_pji.shape}, expected {(naux, nao, p1 - p0)}"
-                )
-            rho2c = np.zeros((3, naux, naux))
-        wk1_pij = solved_ip1(
-            shl0, shl1, p0, p1, i0, "response", rhoj1_p, rhok_pji, rho2c
-        )
+        rho2c = np.zeros((3, naux, naux)) if with_k else None
+        wk1_pij = solved_ip1(shl0, shl1, p0, p1, i0, "response", rhoj1_p, rho2c)
         if with_j or with_k:
             note(
                 "allocating",
@@ -837,7 +911,8 @@ def _partial_ejk_window(
             wj11 = np.zeros((contracted.shape[0], naux))
             wj11[:, ao0:ao1] = contracted
         wj0_01 = lib.einsum("ypq,q->yp", int2c_ip1, rhoj0) if with_j else None
-        wk1_pji = None
+        rhok_win = None
+        wk1_win = None
         wk1_ipj = None
         window_shape = (nwin, 3, p1 - p0, nao)
         if tuple(int(dim) for dim in wk1_pij.shape) != window_shape:
@@ -845,7 +920,38 @@ def _partial_ejk_window(
                 f"response ip1 window has shape {wk1_pij.shape}, expected {window_shape}"
             )
         if with_k:
-            wk1_pji = lib.einsum("ypq,qji->ypji", int2c_ip1, rhok_pji)
+            atom_nao = p1 - p0
+            dm_atom = np.ascontiguousarray(dm0[p0:p1])
+            if tuple(dm_atom.shape) != (atom_nao, nao):
+                raise ValueError(
+                    f"dm0 atom {i0} has shape {dm_atom.shape}, expected {(atom_nao, nao)}"
+                )
+            # Only aux rows inside this block are contracted below. The full
+            # (naux, nao, atom_nao) response density is several GB on top of rhok0.
+            rows = np.ascontiguousarray(rhok0[ao0:ao1])
+            occupied = lib.einsum("plo,il->pio", rows, dm_atom)
+            rhok_win = lib.einsum("pio,jo->pji", occupied, mocc_2)
+            if tuple(rhok_win.shape) != (nwin, nao, atom_nao):
+                raise ValueError(
+                    f"rhok window atom {i0} has shape {rhok_win.shape}, "
+                    f"expected {(nwin, nao, atom_nao)}"
+                )
+            del rows, occupied
+            wk1_shape = (3, nwin, nao, atom_nao)
+            note("allocating", f"wk1 window atom {i0}", wk1_shape)
+            wk1_win = np.zeros(wk1_shape)
+            row = 0
+            while row < naux:
+                row1 = min(naux, row + limit)
+                density = np.ascontiguousarray(rhok0[row:row1])
+                half = lib.einsum("plo,il->pio", density, dm_atom)
+                reduced = lib.einsum("pio,jo->pji", half, mocc_2)
+                flat = np.ascontiguousarray(reduced.reshape(row1 - row, nao * atom_nao))
+                for iy in range(3):
+                    slab = np.ascontiguousarray(int2c_ip1[iy, ao0:ao1, row:row1])
+                    wk1_win[iy] += (slab @ flat).reshape(nwin, nao, atom_nao)
+                row = row1
+            note("allocated", f"wk1 window atom {i0}", wk1_win.shape)
             wk1_ipj = lib.einsum("ipyk,kj->ipyj", wk_ip2[p0:p1], dm0)
         for j_atom in range(auxslices.shape[0]):
             q0 = int(auxslices[j_atom, 2])
@@ -866,10 +972,10 @@ def _partial_ejk_window(
                 ej[j_atom, i0] += piece_j.T * j_factor
             if with_k:
                 piece_k = lib.einsum(
-                    "xijp,pji->x", int3c_ip1ip2[:, :, :, loc0:loc1], rhok_pji[left:right]
+                    "xijp,pji->x", int3c_ip1ip2[:, :, :, loc0:loc1], rhok_win[loc0:loc1]
                 ).reshape(3, 3)
                 piece_k -= lib.einsum(
-                    "pxij,ypji->xy", wk1_pij[loc0:loc1], wk1_pji[:, left:right]
+                    "pxij,ypji->xy", wk1_pij[loc0:loc1], wk1_win[:, loc0:loc1]
                 )
                 piece_k -= lib.einsum("xqp,yqp->xy", rho2c[:, left:right], int2c_ip1[:, left:right])
                 piece_k += lib.einsum(
@@ -878,7 +984,26 @@ def _partial_ejk_window(
                 k_factor = 1.0 if response > 1 else 0.5
                 ek[i0, j_atom] += piece_k * k_factor
                 ek[j_atom, i0] += piece_k.T * k_factor
+    del metric_inv
+    del ikp_atoms
+    wk_ip2 = None
     if response > 1:
+        rhok0_pp = None
+        if with_k:
+            if rhok0 is None or tuple(rhok0.shape) != (naux, nao, nocc):
+                raise ValueError(
+                    f"rhok0 has shape {None if rhok0 is None else rhok0.shape}, "
+                    f"expected {(naux, nao, nocc)}"
+                )
+            # One occupied column at a time. Transposing the whole (naux, nao, nocc)
+            # tensor copies another 6 GB while the original is still live.
+            note("allocating", "rhok0_pp", (naux, nocc, nocc))
+            rhok0_pp = np.empty((naux, nocc, nocc))
+            for occ in range(nocc):
+                rhok0_pp[:, :, occ] = np.ascontiguousarray(rhok0[:, :, occ]) @ mocc_2
+            note("allocated", "rhok0_pp", rhok0_pp.shape)
+            del rhok0
+            rhok0 = None
         int2c_inv = _aux_metric_pinv(int2c)
         note("allocating", "int2c2e_ipip1", (9, naux, naux))
         int2c_ipip1 = auxmol.intor("int2c2e_ipip1", aosym="s1")
@@ -910,16 +1035,13 @@ def _partial_ejk_window(
             )
         int2c_ip_ip = int2c_ip_ip - np.asarray(ip1ip2).reshape(3, 3, naux, naux)
         wj0_01 = lib.einsum("ypq,q->yp", int2c_ip1, rhoj0) if with_j else None
-        rhok0_pp = None
         rho2c_0 = None
         if with_k:
-            if tuple(rhok0.shape) != (naux, nao, nocc):
-                raise ValueError(f"rhok0 has shape {rhok0.shape}, expected {(naux, nao, nocc)}")
-            # sum_l rhok0[p,l,j] * mocc[l,i] -> [p,i,j]. The einsum keeps (p,l,j,i).
-            note("allocating", "rhok0_pp", (naux, nocc, nocc))
-            packed = np.ascontiguousarray(rhok0.transpose(0, 2, 1)).reshape(naux * nocc, nao)
-            rhok0_pp = (packed @ mocc_2).reshape(naux, nocc, nocc).transpose(0, 2, 1)
-            note("allocated", "rhok0_pp", rhok0_pp.shape)
+            if rhok0_pp is None or tuple(rhok0_pp.shape) != (naux, nocc, nocc):
+                raise ValueError(
+                    f"rhok0_pp has shape {None if rhok0_pp is None else rhok0_pp.shape}, "
+                    f"expected {(naux, nocc, nocc)}"
+                )
             # sum_{i,j} rhok0_pp[p,i,j] * rhok0_pp[q,j,i] -> [p,q].
             note("allocating", "rho2c_0", (naux, naux))
             flat = rhok0_pp.reshape(naux, nocc * nocc)

@@ -123,8 +123,7 @@ class PySCFHessianMemoryRecord(Model):
     """Allocated PySCF budget and the DF Hessian peak for one Hessian task.
 
     Written by ``pyscf_hessian_init`` and by each child that builds the mean field
-    (``pyscf_hessian_for_atoms``, including the nested call on a
-    ``pyscf_hessian_for_atoms_ext`` VM, and ``pyscf_hessian_partial_ext``).
+    (``pyscf_hessian_for_atoms_ext`` and ``pyscf_hessian_partial_ext``).
     ``hessian_task_id`` is a hash of the QMInput. ``task_id`` is the task that
     recorded the row. ``scope`` is ``df_hessian``, an atom span such as
     ``atoms 20-39``, or a partial span such as ``aux 0:400``.

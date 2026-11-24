@@ -71,7 +71,7 @@ from simstack.core.context import context
 from simstack.core.hash import complex_hash_function
 from simstack.core.node import node
 from simstack.core.simstack_result import SimstackResult
-from simstack.models import FileStack
+from simstack.models import FileStack, Parameters
 
 # At most three cloud VMs. The orchestrator does not run an atom batch itself.
 _MAX_HESSIAN_VMS = 3
@@ -133,6 +133,69 @@ def hessian_contribution_directory(hessian_task_id: str) -> Path:
     if workdir is None:
         raise ValueError("context.config.workdir is required to store Hessian contributions")
     return Path(workdir) / "pyscf_hessian" / str(hessian_task_id)
+
+
+def _path_inside(path: Path, root: Path) -> Path:
+    resolved = Path(path).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise ValueError(f"{resolved} is outside {root}") from None
+    return resolved
+
+
+async def discard_successful_hessian_intermediates(hessian_task_id, integrals, node_runner):
+    """Delete this run's ``partial.npy`` files and ``df_integrals.h5``.
+
+    Called only after assembly has copied the frequencies onto the orchestrator
+    result. The partial contribution rows are removed with the files, because
+    a later run treats those rows as finished work.
+    """
+    if node_runner is None or not hasattr(node_runner, "info"):
+        raise ValueError("node_runner is required")
+    config = getattr(context, "config", None)
+    workdir = getattr(config, "workdir", None)
+    if workdir is None:
+        raise ValueError("context.config.workdir is required to store Hessian contributions")
+    root = Path(workdir).resolve()
+    if not root.is_dir():
+        raise ValueError(f"simstack work directory is not a directory: {root}")
+    row_dir = _path_inside(hessian_contribution_directory(hessian_task_id), root)
+    if not row_dir.is_dir():
+        raise ValueError(f"Hessian contribution directory is missing: {row_dir}")
+    partials = []
+    for path in row_dir.rglob("partial.npy"):
+        if path.name != "partial.npy" or not path.is_file():
+            raise ValueError(f"Hessian partial path is not a partial.npy file: {path}")
+        partials.append(_path_inside(path, row_dir))
+    if not partials:
+        raise ValueError(f"Hessian task {hessian_task_id} has no partial.npy files")
+    integral_path = stored_integral_path(integrals)
+    integral_file = _path_inside(integral_path, root)
+    if integral_file.name != "df_integrals.h5":
+        raise ValueError(
+            f"DF integral file must be named df_integrals.h5, got {integral_file.name}"
+        )
+    removed_bytes = 0
+    for path in partials:
+        removed_bytes += path.stat().st_size
+        path.unlink()
+        if path.exists():
+            raise ValueError(f"Hessian partial file was not deleted: {path}")
+    removed_bytes += integral_file.stat().st_size
+    integral_file.unlink()
+    if integral_file.exists():
+        raise ValueError(f"DF integral file was not deleted: {integral_file}")
+    records = await find_partial_contributions(hessian_task_id)
+    db = context.db
+    if db is None:
+        raise ValueError("database is required to store Hessian contributions")
+    for record in records:
+        await db.delete(record)
+    node_runner.info(
+        f"Removed {len(partials)} partial.npy files and {integral_file} "
+        f"({removed_bytes / 1e9:.1f} GB) after Hessian task {hessian_task_id}"
+    )
 
 
 def _checked_array(path: Path, expected):
@@ -330,7 +393,6 @@ async def store_partial_contribution(
 _HESSIAN_MEMORY_NODES = {
     "pyscf_hessian",
     "pyscf_hessian_init",
-    "pyscf_hessian_for_atoms",
     "pyscf_hessian_for_atoms_ext",
     "pyscf_hessian_partial_ext",
 }
@@ -744,22 +806,21 @@ def _atom_indexes(atoms, n_atoms):
 
 
 @node
-async def pyscf_hessian_for_atoms(
+async def pyscf_hessian_for_atoms_ext(
     atoms: IntList, opts: PySCFHessianAtomsInput, **kwargs
 ) -> SimstackResult:
     """
-    Analytical CPHF responses and Coulomb slices for ``atoms``.
+    One cloud Hessian atom batch.
 
     Each atom stores ``mo1``, ``mo_e1``, ``h1ao``, ``rhoj1`` and ``wj1`` under
     ``opts.hessian_task_id``. A restarted call keeps an atom that is already
     stored. ``Hessian.kernel(atmlst=...)`` is not used: it returns only the
     sub-block among the listed atoms.
 
-    A resource assignment rule places this node on resource self, so it inherits
-    the caller's ``SlurmParameters``. PySCF threads are ``cpus_per_task`` times
-    that task count (``tasks``, or ``tasks_per_node`` when ``tasks`` is the
-    default 1). The count is applied before the molecule is built. Further
-    batches are ``pyscf_hessian_for_atoms_ext``, placed on cloud by its rule.
+    The resource assignment rule for this node is cloud. It uses that VM's
+    ``SlurmParameters``. PySCF threads are ``cpus_per_task`` times that task
+    count (``tasks``, or ``tasks_per_node`` when ``tasks`` is the default 1).
+    The count is applied before the molecule is built.
 
     SimstackResult:
         record (PySCFHessianAtomContribution): the computed contribution
@@ -934,26 +995,6 @@ async def pyscf_hessian_for_atoms(
         return node_runner.succeed()
     except Exception as exc:
         return node_runner.fail(hessian_failure_text(exc))
-
-
-@node
-async def pyscf_hessian_for_atoms_ext(
-    atoms: IntList, opts: PySCFHessianAtomsInput, **kwargs
-) -> SimstackResult:
-    """
-    One Hessian atom batch whose resource assignment rule is cloud.
-
-    The body calls ``pyscf_hessian_for_atoms``. That inner call matches the
-    self rule and runs on the VM this node was given. It inherits this node's
-    ``SlurmParameters`` and uses the full task count as the PySCF thread count.
-
-    Called Nodes:
-        pyscf_hessian_for_atoms
-
-    SimstackResult:
-        record (PySCFHessianAtomContribution): the computed contribution
-    """
-    return await pyscf_hessian_for_atoms(atoms, opts, **kwargs)
 
 
 @node
@@ -1389,7 +1430,9 @@ async def pyscf_hessian_orchestrator(
 
     Contributions are stored under a hash of ``opts.qm_input``, written into
     ``hessian_task_id``. A later call for the same input finds those rows after
-    the parent task is gone. The field name is unchanged.
+    the parent task is gone. The field name is unchanged. After assembly
+    succeeds, this task deletes that run's ``partial.npy`` files and
+    ``df_integrals.h5``. A failed run leaves both in place.
 
     SimstackResult:
         vibrational_frequencies (SimpleTable): Harmonic frequencies (cm^-1).
@@ -1438,6 +1481,21 @@ async def pyscf_hessian_orchestrator(
             raise ValueError(integral_error)
         if integrals is None or not hasattr(integrals, "get"):
             raise ValueError("pyscf_df_integrals did not return a file")
+        try:
+            stored_integral_path(integrals)
+        except ValueError as exc:
+            if not str(exc).startswith("stored DF integral file is missing:"):
+                raise
+            node_runner.info(f"{exc} Writing the integrals again.")
+            rewritten = dict(integral_kwargs)
+            rewritten["parameters"] = Parameters(force_rerun=True)
+            integrals = await pyscf_df_integrals(opts, **rewritten)
+            integral_error = getattr(integrals, "error_message", None)
+            if integral_error:
+                raise ValueError(integral_error)
+            if integrals is None or not hasattr(integrals, "get"):
+                raise ValueError("pyscf_df_integrals did not return a file")
+            stored_integral_path(integrals)
         stage = PySCFHessianStageInput(
             hessian_task_id=hessian_task_id,
             qm_input=opts.qm_input,
@@ -1663,6 +1721,9 @@ async def pyscf_hessian_orchestrator(
             setattr(node_runner, name, value)
         attach_vibration_molden(node_runner, node_runner.vibration_molden)
         node_runner.info(f"Assembled analytical Hessian for task {hessian_task_id}")
+        await discard_successful_hessian_intermediates(
+            hessian_task_id, integrals, node_runner
+        )
         return node_runner.succeed()
     except Exception as exc:
         if node_runner is not None:

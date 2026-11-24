@@ -110,7 +110,7 @@ def test_child_records_its_own_task_and_atom_span(monkeypatch):
             {
                 "task_id": "atom-task",
                 "call_path": (
-                    ".pyscf_hessian_orchestrator.pyscf_hessian_for_atoms_ext.pyscf_hessian_for_atoms"
+                    ".pyscf_hessian_orchestrator.pyscf_hessian_for_atoms_ext"
                 ),
             },
             "parent-task",
@@ -125,7 +125,7 @@ def test_child_records_its_own_task_and_atom_span(monkeypatch):
     assert database.saved == [record]
     assert record.hessian_task_id == "parent-task"
     assert record.task_id == "atom-task"
-    assert record.node_name == "pyscf_hessian_for_atoms"
+    assert record.node_name == "pyscf_hessian_for_atoms_ext"
     assert record.scope == "atoms 20-39"
     assert record.n_atoms == 42
     assert record.basis == "def2-tzvpp"

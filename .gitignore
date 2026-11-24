@@ -74,6 +74,7 @@ Thumbs.db
 *.tmp
 .output.txt
 timer.dat
+node_models.txt
 
 # hatch-vcs (generated; do not commit)
 _version.py

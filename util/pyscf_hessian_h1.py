@@ -21,6 +21,7 @@ leaves the whole coefficient file (rho plus the aux response, about
 """
 
 import os
+import time
 
 try:
     import numpy as np
@@ -345,14 +346,24 @@ def gen_df_jk(
     rho0_pij = ftmp.create_group("rho0_Pij")
     wj_ip1_pij = ftmp.create_group("wj_ip1_pij")
     integral_file = None
+    stored_read_s = None
     if stored_integrals is not None:
         from molecular_qm_psi4.nodes.pyscf_df_integrals import (
             load_stored_int2c,
+            load_stored_int3c,
             open_stored_df_integrals,
         )
 
+        if log is not None:
+            log(f"Reading stored DF integrals from {stored_integrals}")
+        read_mark = time.perf_counter()
         integral_file = open_stored_df_integrals(stored_integrals, mol, auxmol)
-        int2c = load_stored_int2c(integral_file)
+        try:
+            int2c = load_stored_int2c(integral_file)
+        except Exception:
+            integral_file.close()
+            raise
+        stored_read_s = time.perf_counter() - read_mark
     else:
         int2c = auxmol.intor("int2c2e", aosym="s1")
     solve_j2c = _gen_metric_solver(int2c)
@@ -384,9 +395,11 @@ def gen_df_jk(
         if integral_file is None:
             int3c = get_int3c((int(shl0), int(shl1), 0, nbas, 0, auxmol.nbas))
         else:
-            from molecular_qm_psi4.nodes.pyscf_df_integrals import load_stored_int3c
-
+            if stored_read_s is None:
+                raise ValueError("stored DF integral read has no start time")
+            read_mark = time.perf_counter()
             int3c = load_stored_int3c(integral_file, atom, p1 - p0, nao)
+            stored_read_s += time.perf_counter() - read_mark
         coef3c = solve_j2c(int3c.reshape(-1, naux).T).reshape(naux, p1 - p0, nao)
         del int3c
         rho0_pij[f"{atom:04d}"] = coef3c
@@ -423,6 +436,10 @@ def gen_df_jk(
         del coef3c
     if integral_file is not None:
         integral_file.close()
+        if stored_read_s is None:
+            raise ValueError("stored DF integral read has no start time")
+        if log is not None:
+            log(f"Read stored DF integrals from {stored_integrals} in {stored_read_s:.1f} s")
 
     get_int3c_ip1 = _int3c_wrapper(mol, auxmol, "int3c2e_ip1", "s1")
     get_int3c_ip2 = _int3c_wrapper(mol, auxmol, "int3c2e_ip2", "s1")

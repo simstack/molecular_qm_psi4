@@ -20,7 +20,6 @@ from molecular_qm_psi4.nodes.pyscf_nmr import pyscf_nmr
 from molecular_qm_psi4.nodes.pyscf_df_integrals import pyscf_df_integrals
 from molecular_qm_psi4.nodes.pyscf_hessian import (
     pyscf_hessian,
-    pyscf_hessian_for_atoms,
     pyscf_hessian_for_atoms_ext,
     pyscf_hessian_init,
     pyscf_hessian_orchestrator,
@@ -119,7 +118,6 @@ __all__ = [
     "pyscf_thermochemistry",
     "pyscf_df_integrals",
     "pyscf_hessian",
-    "pyscf_hessian_for_atoms",
     "pyscf_hessian_for_atoms_ext",
     "pyscf_hessian_init",
     "pyscf_hessian_orchestrator",
