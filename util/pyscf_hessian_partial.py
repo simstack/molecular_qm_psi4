@@ -881,9 +881,19 @@ def _partial_ejk_window(
             if rho2c is not None:
                 if "rho2c" not in solved_span or key not in solved_span["rho2c"]:
                     raise ValueError(f"solved int3c2e_ip1 is missing rho2c for atom {key}")
-                loaded = np.array(
-                    solved_span["rho2c"][key][:, ao0:ao1, :], dtype=float, copy=True
-                )
+                rho2c_set = solved_span["rho2c"][key]
+                rho2c_shape = tuple(int(dim) for dim in rho2c_set.shape)
+                span_width = vm_ao1 - vm_ao0
+                if rho2c_shape == (3, naux, naux):
+                    rho2c_rows = rho2c_set[:, ao0:ao1, :]
+                elif rho2c_shape == (3, span_width, naux):
+                    rho2c_rows = rho2c_set[:, ao0 - vm_ao0 : ao1 - vm_ao0, :]
+                else:
+                    raise ValueError(
+                        f"solved rho2c atom {atom_index} has shape {rho2c_shape}, "
+                        f"expected {(3, naux, naux)} or {(3, span_width, naux)}"
+                    )
+                loaded = np.array(rho2c_rows, dtype=float, copy=True)
                 if tuple(int(dim) for dim in loaded.shape) != (3, nwin, naux):
                     raise ValueError(
                         f"solved rho2c atom {atom_index} has shape {loaded.shape}, "
