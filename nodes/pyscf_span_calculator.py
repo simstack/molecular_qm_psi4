@@ -61,6 +61,7 @@ from molecular_qm_psi4.util.pyscf_hessian_partial import (
 from molecular_qm_psi4.util.pyscf_hessian_span import (
     SPAN_COUNT,
     live_full_range_density,
+    program_max_vm,
     span_scratch_directory,
     write_solved_span,
 )
@@ -197,6 +198,8 @@ async def _span_hessian(mf, mol, qm_input, budget_mb, node_runner):
         float(lib.current_memory()[0]),
     )
     node_runner.info(f"JK aux block size {blk} functions at max_memory={float(budget_mb)} MB")
+    wave_width = program_max_vm()
+    node_runner.info(f"Hessian aux wave width is {wave_width} VMs")
     spans = aux_shell_groups(auxmol.ao_loc, SPAN_COUNT)
     existing = await find_partial_contributions(hessian_task_id)
     partial = np.zeros((n_atoms, n_atoms, 3, 3))
@@ -229,7 +232,11 @@ async def _span_hessian(mf, mol, qm_input, budget_mb, node_runner):
             raise ValueError(f"unknown Hessian partial piece {record.piece!r}")
     rhoj1 = np.stack([item["rhoj1"] for item in atoms], axis=0)
     wj1 = np.stack([item["wj1"] for item in atoms], axis=0)
-    for shell0, shell1 in spans:
+    for wave_index, (shell0, shell1) in enumerate(spans):
+        if wave_index % wave_width == 0:
+            node_runner.info(
+                f"Starting aux span wave {wave_index // wave_width + 1}"
+            )
         stored = [
             (left, right)
             for left, right in aux_blocks

@@ -17,6 +17,30 @@ from molecular_qm_psi4.util.pyscf_hessian_partial import _solved_ip1_file_matche
 
 _IP1_CHUNK_BYTES = 256 * 1024 * 1024
 SPAN_COUNT = 3
+_PROGRAM_NAME = "pyscf_span_calculator"
+
+
+def program_max_vm():
+    """Concurrent segment VMs from ``pyscf_span_calculator.max_vm`` in config.toml.
+
+    The value is the wave width. It is not the aux-row count of one segment.
+    A missing program block or a ``max_vm`` that is not a positive int raises
+    ``ValueError``.
+    """
+    from simstack.core.context import context
+
+    resource_config = getattr(context, "resource_config", None)
+    if resource_config is None:
+        raise ValueError("resource config is required to read max_vm")
+    program = resource_config.get_program(_PROGRAM_NAME)
+    if "max_vm" not in program:
+        raise ValueError(
+            f"config.toml [{_PROGRAM_NAME}] max_vm is required"
+        )
+    value = program["max_vm"]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"max_vm must be a positive int, got {value!r}")
+    return value
 
 
 def span_scratch_directory(hessian_task_id):

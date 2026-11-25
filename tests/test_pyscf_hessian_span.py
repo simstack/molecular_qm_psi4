@@ -186,3 +186,46 @@ def test_compact_span_matches_the_live_partial_block(tmp_path):
         raise AssertionError(
             f"compact span partial differs by {np.max(np.abs(cached_partial - live_partial))}"
         )
+
+
+def test_program_max_vm_comes_from_the_program_block(tmp_path):
+    from simstack.util.resource_config import ResourceConfig
+
+    from molecular_qm_psi4.util.pyscf_hessian_span import program_max_vm
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[cloud.program]",
+                "pyscf_span_calculator.max_vm = 4",
+                "[local.program]",
+                "pyscf_span_calculator.docker_image = \"local\"",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    previous = _bind(tmp_path / "work", tmp_path / "scratch")
+    context._resource_config = ResourceConfig(config_path, "cloud")
+    try:
+        if program_max_vm() != 4:
+            raise AssertionError(f"max_vm read as {program_max_vm()}")
+        context._resource_config = ResourceConfig(config_path, "local")
+        with pytest.raises(ValueError, match="max_vm is required"):
+            program_max_vm()
+        config_path.write_text(
+            "[cloud.program]\npyscf_span_calculator.max_vm = true\n",
+            encoding="utf-8",
+        )
+        context._resource_config = ResourceConfig(config_path, "cloud")
+        with pytest.raises(ValueError, match="positive int"):
+            program_max_vm()
+        config_path.write_text(
+            "[cloud.program]\npyscf_span_calculator.max_vm = 0\n",
+            encoding="utf-8",
+        )
+        context._resource_config = ResourceConfig(config_path, "cloud")
+        with pytest.raises(ValueError, match="positive int"):
+            program_max_vm()
+    finally:
+        _restore(previous)
