@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.40.0 (2026-11-25)
+
+### Features
+
+- Evaluate the analytical Hessian one aux span at a time
+  ([`5962f73`](https://github.com/simstack/molecular_qm_psi4/commit/5962f73dbb2052378da5370a8a5dc4ae796e3a07))
+
+A full int3c2e_ip1 file does not fit on VM scratch, so pyscf_span_calculator streams one span,
+  stores its partials, and deletes the span before the next one.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.39.0 (2026-11-24)
 
 ### Features
