@@ -1,37 +1,40 @@
-"""PySCF calculator whose analytical Hessian keeps one aux span on VM scratch.
+"""PySCF calculator whose analytical Hessian runs one aux span per child VM.
 
 Frequencies do not call ``pyscf_hessian_orchestrator`` and do not write the full
-``df_integrals.h5``. Each aux span is streamed from libcint, its partial blocks
-are stored, and the span file is deleted before the next span.
+``df_integrals.h5``. Each aux span is a ``pyscf_span_segment`` VM. Optimization
+is a separate ``pyscf_optimization`` node.
 """
 
+import asyncio
 import sys
 from pathlib import Path
 
 import h5py
 
 from molecular_qm_models import QMInput
+from molecular_qm_psi4.models.pyscf_hessian import PySCFSpanSegmentInput
 from molecular_qm_psi4.nodes.pyscf_calculator import (
-    OptimizationSnapshotter,
     PySCFOptCycleReporter,
     _TeeStdout,
     _is_wavefunction_artifact,
     _load_payload,
-    _optimize,
     _payload_from_mf,
     _report_pyscf_failure,
     _write_payload,
     imaginary_frequencies_cm1,
+    pyscf_optimization,
     redirect_pyscf_logs,
 )
 from molecular_qm_psi4.nodes.pyscf_hessian import (
     add_overlap_response,
     coulomb_j_slices,
+    equilibrium_mean_field,
     find_hessian_atom_contribution,
     find_partial_contributions,
     hessian_contribution_directory,
     load_partial_contribution,
     materialize_hessian_contribution,
+    molecule_from_payload,
     require_df_rks_hessian,
     store_hessian_contribution,
     store_partial_contribution,
@@ -67,10 +70,7 @@ from molecular_qm_psi4.util.pyscf_hessian_span import (
 )
 from molecular_qm_psi4.util.pyscf_result import PySCFResult
 from molecular_qm_psi4.util.pyscf_thermo import run_pyscf_thermo
-from molecular_qm_psi4.util.qm_engine import (
-    attach_optimizer_timings,
-    pyscf_resources_from_slurm,
-)
+from molecular_qm_psi4.util.qm_engine import pyscf_resources_from_slurm
 from molecular_qm_psi4.util.vibration_molden import (
     attach_vibration_molden,
     vibration_molden_filestack,
@@ -79,7 +79,7 @@ from simstack.core.context import context
 from simstack.core.hash import complex_hash_function
 from simstack.core.node import node
 from simstack.core.simstack_result import SimstackResult
-from simstack.models import FileStack
+from simstack.models import FileStack, Parameters
 
 _WFN_NPY_NAME = "result.wfn.npy"
 _CHK_NAME = "result.chk"
@@ -98,12 +98,42 @@ def _discard_span_file(path: Path):
         raise ValueError(f"span file was not deleted: {leftover}")
 
 
+def separate_vm_kwargs(kwargs, custom_name):
+    """Child kwargs that hand the node to its own VM.
+
+    The parent's resource and Slurm settings are kept. ``separate_cloud_vm``
+    forces a new VM when the image matches. The parent ``node_runner`` is not
+    forwarded.
+    """
+    if not isinstance(custom_name, str) or not custom_name.strip():
+        raise ValueError(f"child name must be a non-empty string, got {custom_name!r}")
+    if not isinstance(kwargs, dict):
+        raise ValueError(f"node kwargs must be a dict, got {type(kwargs).__name__}")
+    child = dict(kwargs)
+    child.pop("node_runner", None)
+    parent_parameters = kwargs.get("parameters")
+    if parent_parameters is None:
+        if "separate_cloud_vm" in Parameters.model_fields:
+            child["parameters"] = Parameters(separate_cloud_vm=True)
+        else:
+            child["parameters"] = Parameters()
+    elif not isinstance(parent_parameters, Parameters):
+        raise ValueError(
+            f"parameters must be Parameters, got {type(parent_parameters).__name__}"
+        )
+    elif "separate_cloud_vm" in Parameters.model_fields:
+        child["parameters"] = parent_parameters.model_copy(
+            update={"separate_cloud_vm": True}
+        )
+    else:
+        child["parameters"] = parent_parameters.model_copy()
+    child["custom_name"] = custom_name
+    return child
+
+
 async def _span_hessian(mf, mol, qm_input, budget_mb, node_runner):
-    """Analytical Hessian, one aux span at a time, on this process."""
-    import numpy as np
+    """Store atom contributions and list aux spans that still need a VM."""
     from pyscf import lib
-    from pyscf.hessian import thermo as pyscf_thermo
-    from pyscf.hessian.rhf import hess_nuc
 
     hessian_task_id = complex_hash_function(qm_input)
     if not isinstance(hessian_task_id, str) or not hessian_task_id.strip():
@@ -114,11 +144,6 @@ async def _span_hessian(mf, mol, qm_input, budget_mb, node_runner):
     n_atoms = int(mol.natm)
     row_dir = hessian_contribution_directory(hessian_task_id)
     row_dir.mkdir(parents=True, exist_ok=True)
-    scratch = span_scratch_directory(hessian_task_id)
-    ni = mf._numint
-    hybrid = ni.libxc.is_hybrid_xc(mf.xc)
-    if not isinstance(hybrid, bool):
-        raise ValueError(f"hybrid flag for xc {mf.xc!r} must be bool, got {hybrid!r}")
     atoms = [None] * n_atoms
     for atom_index in range(n_atoms):
         record = await find_hessian_atom_contribution(hessian_task_id, atom_index)
@@ -186,9 +211,6 @@ async def _span_hessian(mf, mol, qm_input, budget_mb, node_runner):
             atoms[atom_index] = arrays
     if any(item is None for item in atoms):
         raise ValueError("a Hessian atom contribution is missing")
-    density = live_full_range_density(
-        mol, auxmol, mf.mo_coeff, mf.mo_occ, hybrid
-    )
     nocc = int((mf.mo_occ > 0).sum())
     blk = largest_aux_blk(
         int(mol.nao),
@@ -201,6 +223,50 @@ async def _span_hessian(mf, mol, qm_input, budget_mb, node_runner):
     wave_width = program_max_vm()
     node_runner.info(f"Hessian aux wave width is {wave_width} VMs")
     spans = aux_shell_groups(auxmol.ao_loc, SPAN_COUNT)
+    existing = await find_partial_contributions(hessian_task_id)
+    aux_blocks = []
+    for record in existing:
+        if record.piece == "aux":
+            aux_blocks.append((int(record.shell_start), int(record.shell_end)))
+        elif record.piece not in ("xc", "nlc"):
+            raise ValueError(f"unknown Hessian partial piece {record.piece!r}")
+    pending_spans = []
+    for shell0, shell1 in spans:
+        stored = [
+            (left, right)
+            for left, right in aux_blocks
+            if not (right <= shell0 or left >= shell1)
+        ]
+        if pending_aux_blocks(stored, shell0, shell1, auxmol.ao_loc, blk):
+            pending_spans.append((int(shell0), int(shell1)))
+        else:
+            node_runner.info(f"Aux span {shell0}:{shell1} is already stored")
+    return {
+        "hessian": hessian,
+        "auxmol": auxmol,
+        "atoms": atoms,
+        "hessian_task_id": hessian_task_id,
+        "row_dir": row_dir,
+        "n_atoms": n_atoms,
+        "pending_spans": pending_spans,
+        "wave_width": wave_width,
+        "budget_mb": float(budget_mb),
+    }
+
+
+async def _assemble_span_hessian(mf, mol, prepared, node_runner):
+    """Sum stored span partials after the segment VMs have finished."""
+    import numpy as np
+    from pyscf.hessian import thermo as pyscf_thermo
+    from pyscf.hessian.rhf import hess_nuc
+
+    hessian = prepared["hessian"]
+    auxmol = prepared["auxmol"]
+    atoms = prepared["atoms"]
+    hessian_task_id = prepared["hessian_task_id"]
+    row_dir = prepared["row_dir"]
+    n_atoms = prepared["n_atoms"]
+    budget_mb = prepared["budget_mb"]
     existing = await find_partial_contributions(hessian_task_id)
     partial = np.zeros((n_atoms, n_atoms, 3, 3))
     aux_blocks = []
@@ -230,82 +296,6 @@ async def _span_hessian(mf, mol, qm_input, budget_mb, node_runner):
             saw_nlc = True
         else:
             raise ValueError(f"unknown Hessian partial piece {record.piece!r}")
-    rhoj1 = np.stack([item["rhoj1"] for item in atoms], axis=0)
-    wj1 = np.stack([item["wj1"] for item in atoms], axis=0)
-    for wave_index, (shell0, shell1) in enumerate(spans):
-        if wave_index % wave_width == 0:
-            node_runner.info(
-                f"Starting aux span wave {wave_index // wave_width + 1}"
-            )
-        stored = [
-            (left, right)
-            for left, right in aux_blocks
-            if not (right <= shell0 or left >= shell1)
-        ]
-        pending_blocks = pending_aux_blocks(stored, shell0, shell1, auxmol.ao_loc, blk)
-        solved_path = scratch / f"ip1_solved_{shell0}_{shell1}.h5"
-        if not pending_blocks:
-            node_runner.info(f"Aux span {shell0}:{shell1} is already stored")
-            _discard_span_file(solved_path)
-            continue
-        write_solved_span(
-            mol,
-            auxmol,
-            mf.mo_coeff,
-            mf.mo_occ,
-            shell0,
-            shell1,
-            solved_path,
-            hybrid,
-            density,
-            blk,
-            log=node_runner.info,
-        )
-        ip1_handle = h5py.File(solved_path, "r")
-        try:
-            fit_cache = {"density": density, "ip1": ip1_handle}
-            for block_start, block_end in pending_blocks:
-                node_runner.info(
-                    f"JK partial aux shells {block_start}:{block_end} of span {shell0}:{shell1}"
-                )
-                array, wj_ip2, wk_ip2, wk_ip2_lr = partial_jk_span(
-                    hessian,
-                    mf.mo_energy,
-                    mf.mo_coeff,
-                    mf.mo_occ,
-                    block_start,
-                    block_end,
-                    rhoj1,
-                    wj1,
-                    blk,
-                    node_runner=node_runner,
-                    stored_integrals=solved_path,
-                    fit_cache=fit_cache,
-                )
-                response_arrays = {}
-                if wj_ip2 is not None:
-                    response_arrays["wj_ip2"] = wj_ip2
-                if wk_ip2 is not None:
-                    response_arrays["wk_ip2"] = wk_ip2
-                if wk_ip2_lr is not None:
-                    response_arrays["wk_ip2_lr"] = wk_ip2_lr
-                await store_partial_contribution(
-                    hessian_task_id,
-                    "aux",
-                    block_start,
-                    block_end,
-                    n_atoms,
-                    array,
-                    response_arrays,
-                    row_dir,
-                )
-                partial += array
-                aux_blocks.append((block_start, block_end))
-                if response_arrays:
-                    aux_response_blocks.append((block_start, block_end, response_arrays))
-        finally:
-            ip1_handle.close()
-        _discard_span_file(solved_path)
     if not saw_xc:
         array = partial_xc_and_e1(
             hessian,
@@ -392,21 +382,160 @@ async def _span_hessian(mf, mol, qm_input, budget_mb, node_runner):
     de2 = de2 + hess_nuc(mol)
     if hessian.base.do_disp():
         de2 = de2 + hessian.get_dispersion()
-    if scratch.exists():
-        leftover = [path for path in scratch.iterdir()]
-        if leftover:
-            raise ValueError(f"span scratch was not empty: {leftover}")
-        scratch.rmdir()
     return de2, pyscf_thermo.harmonic_analysis(mol, de2)
+
+
+@node
+async def pyscf_span_segment(opts: PySCFSpanSegmentInput, **kwargs) -> SimstackResult:
+    """
+    One aux span of the analytical Hessian, on its own VM.
+
+    The parent stores the atom contributions first. This VM streams
+    ``int3c2e_ip1`` for shells ``[shell_start, shell_end)``, contracts that
+    span, and stores the partial. The solved span file is deleted before the
+    VM exits.
+    """
+    node_runner = kwargs.get("node_runner")
+    if node_runner is None:
+        raise ValueError("node_runner is required")
+    if opts is None or opts.qm_input is None or opts.wavefunction is None:
+        raise ValueError("qm_input and wavefunction are required")
+    try:
+        budget_mb, num_threads, resource_log = pyscf_resources_from_slurm(kwargs)
+    except ValueError as exc:
+        return node_runner.fail(str(exc))
+    node_runner.info(resource_log)
+    shell0 = int(opts.shell_start)
+    shell1 = int(opts.shell_end)
+    if shell1 <= shell0:
+        return node_runner.fail(
+            f"aux shell range {shell0}:{shell1} is empty"
+        )
+    try:
+        import numpy as np
+        from pyscf import lib
+
+        payload = _load_payload(Path(opts.wavefunction.get(local_dir=Path("."))))
+        if not isinstance(payload, dict):
+            raise ValueError("wavefunction payload must be a dict")
+        mol = molecule_from_payload(opts.qm_input, payload)
+        mf = equilibrium_mean_field(
+            opts.qm_input, mol, payload, node_runner, budget_mb, num_threads
+        )
+        hessian = require_df_rks_hessian(mf)
+        hessian.max_memory = float(budget_mb)
+        auxmol = attach_df_auxmol(mf, mol)
+        n_atoms = int(mol.natm)
+        row_dir = hessian_contribution_directory(opts.hessian_task_id)
+        atoms = []
+        for atom_index in range(n_atoms):
+            record = await find_hessian_atom_contribution(opts.hessian_task_id, atom_index)
+            if record is None:
+                raise ValueError(
+                    f"Hessian contribution for atom {atom_index} is not stored"
+                )
+            atoms.append(await materialize_hessian_contribution(record, row_dir))
+        rhoj1 = np.stack([item["rhoj1"] for item in atoms], axis=0)
+        wj1 = np.stack([item["wj1"] for item in atoms], axis=0)
+        ni = mf._numint
+        hybrid = ni.libxc.is_hybrid_xc(mf.xc)
+        if not isinstance(hybrid, bool):
+            raise ValueError(f"hybrid flag for xc {mf.xc!r} must be bool, got {hybrid!r}")
+        density = live_full_range_density(
+            mol, auxmol, mf.mo_coeff, mf.mo_occ, hybrid
+        )
+        nocc = int((mf.mo_occ > 0).sum())
+        blk = largest_aux_blk(
+            int(mol.nao),
+            int(auxmol.nao),
+            nocc,
+            budget_mb,
+            float(lib.current_memory()[0]),
+        )
+        scratch = span_scratch_directory(opts.hessian_task_id)
+        solved_path = scratch / f"ip1_solved_{shell0}_{shell1}.h5"
+        existing = await find_partial_contributions(opts.hessian_task_id)
+        stored = []
+        for record in existing:
+            if record.piece != "aux":
+                continue
+            left = int(record.shell_start)
+            right = int(record.shell_end)
+            if right <= shell0 or left >= shell1:
+                continue
+            stored.append((left, right))
+        pending_blocks = pending_aux_blocks(stored, shell0, shell1, auxmol.ao_loc, blk)
+        if not pending_blocks:
+            node_runner.info(f"Aux span {shell0}:{shell1} is already stored")
+            _discard_span_file(solved_path)
+            return node_runner.succeed()
+        write_solved_span(
+            mol,
+            auxmol,
+            mf.mo_coeff,
+            mf.mo_occ,
+            shell0,
+            shell1,
+            solved_path,
+            hybrid,
+            density,
+            blk,
+            log=node_runner.info,
+        )
+        ip1_handle = h5py.File(solved_path, "r")
+        try:
+            fit_cache = {"density": density, "ip1": ip1_handle}
+            for block_start, block_end in pending_blocks:
+                node_runner.info(
+                    f"JK partial aux shells {block_start}:{block_end} of span {shell0}:{shell1}"
+                )
+                array, wj_ip2, wk_ip2, wk_ip2_lr = partial_jk_span(
+                    hessian,
+                    mf.mo_energy,
+                    mf.mo_coeff,
+                    mf.mo_occ,
+                    block_start,
+                    block_end,
+                    rhoj1,
+                    wj1,
+                    blk,
+                    node_runner=node_runner,
+                    stored_integrals=solved_path,
+                    fit_cache=fit_cache,
+                )
+                response_arrays = {}
+                if wj_ip2 is not None:
+                    response_arrays["wj_ip2"] = wj_ip2
+                if wk_ip2 is not None:
+                    response_arrays["wk_ip2"] = wk_ip2
+                if wk_ip2_lr is not None:
+                    response_arrays["wk_ip2_lr"] = wk_ip2_lr
+                await store_partial_contribution(
+                    opts.hessian_task_id,
+                    "aux",
+                    block_start,
+                    block_end,
+                    n_atoms,
+                    array,
+                    response_arrays,
+                    row_dir,
+                )
+        finally:
+            ip1_handle.close()
+        _discard_span_file(solved_path)
+        return node_runner.succeed()
+    except Exception as exc:
+        return node_runner.fail(_report_pyscf_failure(node_runner, exc))
 
 
 @node
 async def pyscf_span_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     """
-    PySCF node that evaluates an analytical Hessian one aux span at a time.
+    PySCF node that evaluates an analytical Hessian one aux span per child VM.
 
-    The SCF, geometry optimization, and result files match ``pyscf_reference_calculator``.
-    A frequency job stays in this process. It does not call
+    A frequency job calls ``pyscf_span_segment`` for each aux span. Those
+    children run on their own VMs, up to ``max_vm`` at a time. Optimization
+    calls ``pyscf_optimization`` on its own VM. This node does not call
     ``pyscf_hessian_orchestrator`` and does not write ``df_integrals.h5``.
     Imaginary frequencies below -50 cm^-1 fail the node.
 
@@ -427,6 +556,10 @@ async def pyscf_span_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
         ZPE_tot (FloatData): Total zero-point energy (Hartree) when thermochemistry was computed.
         E_tot (FloatData): Total thermal internal energy (Hartree) when thermochemistry was computed.
         S_tot (FloatData): Total entropy (kcal/mol/K) when thermochemistry was computed.
+
+    Called Nodes:
+        pyscf_optimization
+        pyscf_span_segment
     """
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
@@ -466,7 +599,6 @@ async def pyscf_span_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
 
     pyscf_result = PySCFResult(qm_input)
     qm_result = pyscf_result.qm_result
-    snapshotter = None
     cycle_reporter = PySCFOptCycleReporter(node_runner)
     try:
         with redirect_pyscf_logs(
@@ -474,82 +606,141 @@ async def pyscf_span_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
             node_runner=node_runner,
             cycle_reporter=cycle_reporter,
         ):
-            calculator = PySCFCalculator(qm_input, node_runner=node_runner)
-            calculator.set_resources(budget_mb, num_threads)
-            mol = calculator.build_molecule(pyscf_result.output_path)
-            stdout_tee = None
-            if mol.stdout is not None and mol.stdout not in (sys.stdout, sys.stderr):
-                stdout_tee = _TeeStdout(mol.stdout, cycle_reporter)
-                mol.stdout = stdout_tee
-            mf = calculator.build_mean_field(mol)
-            if stdout_tee is not None:
-                mf.stdout = stdout_tee
-            if qm_input.restart_files:
-                for restart_file in qm_input.restart_files:
-                    restart_name = getattr(restart_file, "name", "")
-                    if not _is_wavefunction_artifact(restart_name):
-                        continue
-                    downloaded = Path(restart_file.get(local_dir=Path(".")))
-                    if str(downloaded).endswith(".npy") or downloaded.name.endswith(".wfn.npy"):
-                        payload = _load_payload(downloaded)
-                        if not isinstance(payload, dict):
-                            raise ValueError("wavefunction payload must be a dict")
-                        missing = [
-                            key
-                            for key in ("mo_coeff", "mo_occ", "mo_energy")
-                            if payload.get(key) is None
-                        ]
-                        if missing and len(missing) != 3:
-                            raise ValueError(f"wavefunction payload is missing {missing[0]}")
-                        if not missing:
-                            mf.mo_coeff = payload["mo_coeff"]
-                            mf.mo_occ = payload["mo_occ"]
-                            mf.mo_energy = payload["mo_energy"]
-                            node_runner.info("Applied restart orbitals as the SCF guess")
-                    else:
-                        calculator.apply_restart(mf, downloaded)
+            wavefunction_fs = None
             if qm_input.optimization:
-                snapshotter = OptimizationSnapshotter(
-                    molecule,
-                    kwargs,
-                    qm_input=qm_input,
-                    calculator=calculator,
-                    qm_result=qm_result,
+                parent_name = kwargs.get("custom_name") or ""
+                opt_name = f"{parent_name}-optimization" if parent_name else "optimization"
+                node_runner.info("Starting pyscf_optimization")
+                opt_result = await pyscf_optimization(
+                    qm_input, **separate_vm_kwargs(kwargs, opt_name)
                 )
-                cycle_reporter.snapshotter = snapshotter
-                snapshotter.stdout_tee = stdout_tee
-                try:
-                    mol = _optimize(mf, qm_input, snapshotter)
-                except Exception:
-                    snapshotter.finish(exc_type=Exception)
-                    attach_optimizer_timings(node_runner, snapshotter)
-                    raise
-                snapshotter.finish()
-                attach_optimizer_timings(node_runner, snapshotter)
-                calculator.apply_max_memory(mol)
-                mf.reset(mol)
-                calculator.apply_max_memory(mol, mf)
-            method = method_name_from_qm_input(qm_input)
-            node_runner.info(f"Starting span PySCF calculation with method {method}")
-            post = calculator.post_scf_method(mf)
-            if post is mf:
-                energy = mf.kernel()
+                opt_error = getattr(opt_result, "error_message", None)
+                if opt_error:
+                    raise ValueError(opt_error)
+                qm_result = getattr(opt_result, "qm_result", None)
+                if qm_result is None:
+                    raise ValueError("pyscf_optimization did not return qm_result")
+                timing = getattr(opt_result, "optimization_timing", None)
+                if timing is not None:
+                    node_runner.optimization_timing = timing
+                wavefunction_fs = getattr(opt_result, "wavefunction", None)
+                if wavefunction_fs is None:
+                    raise ValueError("pyscf_optimization did not return a wavefunction")
+                opt_payload = _load_payload(Path(wavefunction_fs.get(local_dir=Path("."))))
+                if not isinstance(opt_payload, dict):
+                    raise ValueError("wavefunction payload must be a dict")
+                mol = molecule_from_payload(qm_input, opt_payload)
+                mf = equilibrium_mean_field(
+                    qm_input, mol, opt_payload, node_runner, budget_mb, num_threads
+                )
+                energy = float(opt_payload["energy"])
             else:
-                energy = mf.kernel()
-                extra = post.kernel()
-                if method == "MP2":
-                    energy = mf.e_tot + extra[0]
-                elif method in {"CCSD", "CCSD(T)"}:
-                    energy = post.e_tot
-                    if method == "CCSD(T)":
-                        energy = post.ccsd_t()
+                calculator = PySCFCalculator(qm_input, node_runner=node_runner)
+                calculator.set_resources(budget_mb, num_threads)
+                mol = calculator.build_molecule(pyscf_result.output_path)
+                stdout_tee = None
+                if mol.stdout is not None and mol.stdout not in (sys.stdout, sys.stderr):
+                    stdout_tee = _TeeStdout(mol.stdout, cycle_reporter)
+                    mol.stdout = stdout_tee
+                mf = calculator.build_mean_field(mol)
+                if stdout_tee is not None:
+                    mf.stdout = stdout_tee
+                if qm_input.restart_files:
+                    for restart_file in qm_input.restart_files:
+                        restart_name = getattr(restart_file, "name", "")
+                        if not _is_wavefunction_artifact(restart_name):
+                            continue
+                        downloaded = Path(restart_file.get(local_dir=Path(".")))
+                        if str(downloaded).endswith(".npy") or downloaded.name.endswith(".wfn.npy"):
+                            restart_payload = _load_payload(downloaded)
+                            if not isinstance(restart_payload, dict):
+                                raise ValueError("wavefunction payload must be a dict")
+                            missing = [
+                                key
+                                for key in ("mo_coeff", "mo_occ", "mo_energy")
+                                if restart_payload.get(key) is None
+                            ]
+                            if missing and len(missing) != 3:
+                                raise ValueError(f"wavefunction payload is missing {missing[0]}")
+                            if not missing:
+                                mf.mo_coeff = restart_payload["mo_coeff"]
+                                mf.mo_occ = restart_payload["mo_occ"]
+                                mf.mo_energy = restart_payload["mo_energy"]
+                                node_runner.info("Applied restart orbitals as the SCF guess")
+                        else:
+                            calculator.apply_restart(mf, downloaded)
+                method = method_name_from_qm_input(qm_input)
+                node_runner.info(f"Starting span PySCF calculation with method {method}")
+                post = calculator.post_scf_method(mf)
+                if post is mf:
+                    energy = mf.kernel()
                 else:
-                    energy = mf.e_tot
+                    energy = mf.kernel()
+                    extra = post.kernel()
+                    if method == "MP2":
+                        energy = mf.e_tot + extra[0]
+                    elif method in {"CCSD", "CCSD(T)"}:
+                        energy = post.e_tot
+                        if method == "CCSD(T)":
+                            energy = post.ccsd_t()
+                    else:
+                        energy = mf.e_tot
             hessian = None
             freq_info = None
             if qm_input.frequencies:
-                hessian, freq_info = await _span_hessian(
+                if wavefunction_fs is None:
+                    scf_payload = _payload_from_mf(mf, mol, energy)
+                    saved_scf = _write_payload(scf_payload, Path(_WFN_NPY_NAME))
+                    wavefunction_fs = FileStack.from_local_file(
+                        saved_scf, in_memory=False, is_hashable=True, secure_source=True
+                    )
+                    await context.db.save(wavefunction_fs)
+                prepared = await _span_hessian(
                     mf, mol, qm_input, budget_mb, node_runner
+                )
+                pending_spans = prepared["pending_spans"]
+                wave_width = prepared["wave_width"]
+                segment_queue = asyncio.Queue()
+                for shell0, shell1 in pending_spans:
+                    segment_queue.put_nowait((shell0, shell1))
+
+                async def run_segment_vm():
+                    while True:
+                        try:
+                            shell0, shell1 = segment_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            return
+                        parent_name = kwargs.get("custom_name") or ""
+                        segment_name = f"span-{shell0}-{shell1}"
+                        if parent_name:
+                            segment_name = f"{parent_name}-{segment_name}"
+                        node_runner.info(
+                            f"Calling pyscf_span_segment shells {shell0}:{shell1}"
+                        )
+                        segment_result = await pyscf_span_segment(
+                            PySCFSpanSegmentInput(
+                                hessian_task_id=prepared["hessian_task_id"],
+                                qm_input=qm_input,
+                                wavefunction=wavefunction_fs,
+                                shell_start=shell0,
+                                shell_end=shell1,
+                            ),
+                            **separate_vm_kwargs(kwargs, segment_name),
+                        )
+                        segment_error = getattr(segment_result, "error_message", None)
+                        if segment_error:
+                            raise ValueError(segment_error)
+
+                if pending_spans:
+                    n_workers = wave_width if wave_width < len(pending_spans) else len(pending_spans)
+                    node_runner.info(
+                        f"Waiting on {len(pending_spans)} aux spans with {n_workers} VMs"
+                    )
+                    async with asyncio.TaskGroup() as tg:
+                        for _worker in range(n_workers):
+                            tg.create_task(run_segment_vm())
+                hessian, freq_info = await _assemble_span_hessian(
+                    mf, mol, prepared, node_runner
                 )
                 imaginary = imaginary_frequencies_cm1(freq_info)
                 if imaginary:

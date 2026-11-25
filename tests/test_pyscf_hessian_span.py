@@ -229,3 +229,34 @@ def test_program_max_vm_comes_from_the_program_block(tmp_path):
             program_max_vm()
     finally:
         _restore(previous)
+
+
+def test_separate_vm_kwargs_keeps_the_parent_resource_and_requests_a_vm():
+    from simstack.models import Parameters
+
+    from molecular_qm_psi4.nodes.pyscf_span_calculator import (
+        pyscf_span_calculator,
+        separate_vm_kwargs,
+    )
+
+    parent = Parameters()
+    child = separate_vm_kwargs(
+        {"parameters": parent, "node_runner": object(), "custom_name": "parent"},
+        "span-0-4",
+    )
+    if "node_runner" in child:
+        raise AssertionError("child kwargs forwarded the parent node_runner")
+    if child["custom_name"] != "span-0-4":
+        raise AssertionError(f"child name is {child['custom_name']!r}")
+    if child["parameters"] is parent:
+        raise AssertionError("child parameters are the parent object")
+    if (
+        "separate_cloud_vm" in type(parent).model_fields
+        and not child["parameters"].separate_cloud_vm
+    ):
+        raise AssertionError("child parameters were not marked as a separate VM")
+    if child["parameters"].resource != parent.resource:
+        raise AssertionError("child resource does not match the parent")
+    doc = pyscf_span_calculator.__doc__ or ""
+    if "pyscf_optimization" not in doc or "pyscf_span_segment" not in doc:
+        raise AssertionError("called nodes are missing from the span calculator docstring")

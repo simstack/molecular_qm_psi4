@@ -87,6 +87,22 @@ class PySCFHessianAtomContribution(Model):
 
 
 @simstack_model
+class PySCFSpanSegmentInput(Model):
+    """One aux-span VM of ``pyscf_span_calculator``.
+
+    ``hessian_task_id`` is a hash of the QMInput. Atom contributions are already
+    stored under that hash. This VM streams one aux span and stores its partial.
+    """
+
+    field_name: str = "PySCFSpanSegmentInput"
+    hessian_task_id: str
+    qm_input: QMInput = Reference()
+    wavefunction: FileStack = Reference()
+    shell_start: int
+    shell_end: int
+
+
+@simstack_model
 class PySCFHessianPartialInput(Model):
     """One cloud chunk of the density-fitted partial Hessian.
 

@@ -13,7 +13,10 @@ from molecular_qm_psi4.nodes.pyscf_calculator import (
     pyscf_thermochemistry,
 )
 from molecular_qm_psi4.nodes.pyscf_reference_calculator import pyscf_reference_calculator
-from molecular_qm_psi4.nodes.pyscf_span_calculator import pyscf_span_calculator
+from molecular_qm_psi4.nodes.pyscf_span_calculator import (
+    pyscf_span_calculator,
+    pyscf_span_segment,
+)
 from molecular_qm_psi4.nodes.recover_pyscf_reference_coordinator import (
     recover_pyscf_reference_coordinator,
 )
@@ -38,6 +41,7 @@ from molecular_qm_psi4.models.pyscf_hessian import (
     PySCFHessianMemoryRecord,
     PySCFHessianPartialContribution,
     PySCFHessianPartialInput,
+    PySCFSpanSegmentInput,
     PySCFHessianPlan,
     PySCFHessianStageInput,
 )
@@ -115,6 +119,7 @@ __all__ = [
     "pyscf_nmr",
     "pyscf_reference_calculator",
     "pyscf_span_calculator",
+    "pyscf_span_segment",
     "recover_pyscf_reference_coordinator",
     "pyscf_optimization",
     "pyscf_thermochemistry",
@@ -133,6 +138,7 @@ __all__ = [
     "PySCFHessianAtomsInput",
     "PySCFHessianAtomContribution",
     "PySCFHessianPartialInput",
+    "PySCFSpanSegmentInput",
     "PySCFHessianPartialContribution",
     "PySCFHessianMemoryRecord",
     "qm_calculator",
