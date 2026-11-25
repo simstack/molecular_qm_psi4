@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.41.0 (2026-11-25)
+
+### Features
+
+- Read the span Hessian wave width from config.toml
+  ([`07e5a72`](https://github.com/simstack/molecular_qm_psi4/commit/07e5a72349acf1be7f49040dee42705ffc5b0575))
+
+The number of concurrent aux-span VMs is pyscf_span_calculator.max_vm, and a missing or non-positive
+  value raises.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.40.0 (2026-11-25)
 
 ### Features
