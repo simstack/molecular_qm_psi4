@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.42.0 (2026-11-25)
+
+### Features
+
+- Run Hessian spans and optimization as child nodes
+  ([`afe3a8d`](https://github.com/simstack/molecular_qm_psi4/commit/afe3a8d004bf3fcc4135e2bf81181e7e266e9143))
+
+The span calculator had no called nodes, so frequencies and geometry optimization stayed on the
+  parent VM.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.41.0 (2026-11-25)
 
 ### Features
