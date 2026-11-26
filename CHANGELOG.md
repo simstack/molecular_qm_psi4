@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.44.0 (2026-11-26)
+
+### Features
+
+- Call pyscf_optimization directly from PySCF preoptimization
+  ([`073fce6`](https://github.com/simstack/molecular_qm_psi4/commit/073fce66fb282b374e96b35cb1a0fafa663b9163))
+
+Steps without frequencies skip the calculator wrapper and call pyscf_optimization.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.43.0 (2026-11-26)
 
 ### Features
