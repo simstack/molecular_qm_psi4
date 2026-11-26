@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.43.0 (2026-11-26)
+
+### Features
+
+- Run span VMs from prepared slices and add a span thermo benchmark
+  ([`9317fb7`](https://github.com/simstack/molecular_qm_psi4/commit/9317fb74a87c120d112d35862ed8be6a44af9e9d))
+
+Span children contract as soon as the Coulomb slices exist, and the thermo benchmark uses
+  pyscf_span_calculator.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.42.0 (2026-11-25)
 
 ### Features
