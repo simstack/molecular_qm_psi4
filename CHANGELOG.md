@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## v0.45.0 (2026-11-26)
+
+### Features
+
+- Compare span conformers through pyscf_span_calculator
+  ([`c484c9d`](https://github.com/simstack/molecular_qm_psi4/commit/c484c9df37f7fae6103c5b59218c9585b8149358))
+
+The span benchmark calls that node directly so the span calculator is a registered child.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+
+
 ## v0.44.0 (2026-11-26)
 
 ### Features
