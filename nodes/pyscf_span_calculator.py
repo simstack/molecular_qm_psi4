@@ -1,8 +1,9 @@
 """PySCF calculator whose analytical Hessian runs one aux span per child VM.
 
 Frequencies do not call ``pyscf_hessian_orchestrator`` and do not write the full
-``df_integrals.h5``. Each aux span is a ``pyscf_span_segment`` VM. Optimization
-is a separate ``pyscf_optimization`` node.
+``df_integrals.h5``. Coulomb slices are stored first. Each aux span is then a
+``pyscf_span_segment`` VM, and the parent builds AO derivatives while those VMs
+run. Optimization is a separate ``pyscf_optimization`` node.
 """
 
 import asyncio
@@ -131,8 +132,114 @@ def separate_vm_kwargs(kwargs, custom_name):
     return child
 
 
+def _coulomb_slice_directory(row_dir, atom_index):
+    return Path(row_dir) / "coulomb_slices" / f"atom_{int(atom_index)}"
+
+
+def _read_coulomb_slice(path, naux, label):
+    import numpy as np
+
+    if not Path(path).is_file():
+        raise ValueError(f"Coulomb slice {label} is missing: {path}")
+    array = np.load(path)
+    expected = (int(naux), 3)
+    if tuple(int(dim) for dim in array.shape) != expected:
+        raise ValueError(
+            f"Coulomb slice {label} has shape {array.shape}, expected {expected}"
+        )
+    return np.asarray(array, dtype=float)
+
+
+def _write_coulomb_slice(directory, name, array, naux):
+    import numpy as np
+
+    values = np.asarray(array, dtype=float)
+    expected = (int(naux), 3)
+    if tuple(int(dim) for dim in values.shape) != expected:
+        raise ValueError(
+            f"Coulomb slice {name} has shape {values.shape}, expected {expected}"
+        )
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{name}.npy"
+    np.save(path, values)
+    _read_coulomb_slice(path, naux, name)
+
+
+def _load_coulomb_pair(row_dir, atom_index, naux):
+    directory = _coulomb_slice_directory(row_dir, atom_index)
+    rhoj1 = _read_coulomb_slice(
+        directory / "rhoj1.npy", naux, f"atom {atom_index} rhoj1"
+    )
+    wj1 = _read_coulomb_slice(directory / "wj1.npy", naux, f"atom {atom_index} wj1")
+    return rhoj1, wj1
+
+
+def _write_coulomb_pair(row_dir, atom_index, rhoj1, wj1, naux):
+    directory = _coulomb_slice_directory(row_dir, atom_index)
+    _write_coulomb_slice(directory, "rhoj1", rhoj1, naux)
+    _write_coulomb_slice(directory, "wj1", wj1, naux)
+
+
+async def _prepare_coulomb_slices(mf, mol, prepared, node_runner):
+    """Write per-atom rhoj1 and wj1 before any span VM starts."""
+    row_dir = prepared["row_dir"]
+    n_atoms = prepared["n_atoms"]
+    if int(mol.natm) != n_atoms:
+        raise ValueError(f"molecule has {mol.natm} atoms, Hessian task has {n_atoms}")
+    naux = int(prepared["auxmol"].nao)
+    hessian_task_id = prepared["hessian_task_id"]
+    missing = []
+    for atom_index in range(n_atoms):
+        directory = _coulomb_slice_directory(row_dir, atom_index)
+        rho_path = directory / "rhoj1.npy"
+        wj_path = directory / "wj1.npy"
+        if rho_path.is_file() or wj_path.is_file():
+            _load_coulomb_pair(row_dir, atom_index, naux)
+            continue
+        missing.append(atom_index)
+    copied = []
+    compute = []
+    for atom_index in missing:
+        record = await find_hessian_atom_contribution(hessian_task_id, atom_index)
+        if record is None:
+            compute.append(atom_index)
+            continue
+        if int(record.n_atoms) != n_atoms:
+            raise ValueError(
+                f"stored Hessian contribution for atom {atom_index} has n_atoms="
+                f"{record.n_atoms}, molecule has {n_atoms}"
+            )
+        if int(record.naux) != naux:
+            raise ValueError(
+                f"stored Hessian contribution for atom {atom_index} has naux="
+                f"{record.naux}, aux basis has {naux}"
+            )
+        arrays = await materialize_hessian_contribution(record, row_dir)
+        _write_coulomb_pair(
+            row_dir, atom_index, arrays["rhoj1"], arrays["wj1"], naux
+        )
+        copied.append(atom_index)
+    if copied:
+        node_runner.info(
+            f"Copied Coulomb slices for atoms {copied} from stored contributions"
+        )
+    if not compute:
+        return
+    node_runner.info(f"Building Coulomb slices for atoms {compute}")
+    slices = coulomb_j_slices(mf, compute)
+    for atom_index in compute:
+        pair = slices.get(atom_index)
+        if pair is None:
+            raise ValueError(f"Coulomb slices for atom {atom_index} were not produced")
+        rhoj1, wj1 = pair
+        _write_coulomb_pair(row_dir, atom_index, rhoj1, wj1, naux)
+
+
 async def _span_hessian(mf, mol, qm_input, budget_mb, node_runner):
-    """Store atom contributions and list aux spans that still need a VM."""
+    """List aux spans that still need a VM.
+
+    Atom contributions are stored afterwards, while those VMs run.
+    """
     from pyscf import lib
 
     hessian_task_id = complex_hash_function(qm_input)
@@ -144,73 +251,6 @@ async def _span_hessian(mf, mol, qm_input, budget_mb, node_runner):
     n_atoms = int(mol.natm)
     row_dir = hessian_contribution_directory(hessian_task_id)
     row_dir.mkdir(parents=True, exist_ok=True)
-    atoms = [None] * n_atoms
-    for atom_index in range(n_atoms):
-        record = await find_hessian_atom_contribution(hessian_task_id, atom_index)
-        if record is None:
-            continue
-        if int(record.n_atoms) != n_atoms:
-            raise ValueError(
-                f"stored Hessian contribution for atom {atom_index} has n_atoms="
-                f"{record.n_atoms}, molecule has {n_atoms}"
-            )
-        atoms[atom_index] = await materialize_hessian_contribution(record, row_dir)
-        node_runner.info(
-            f"Hessian contribution for atom {atom_index} is already stored"
-        )
-    pending = [index for index, item in enumerate(atoms) if item is None]
-    if pending:
-        from molecular_qm_psi4.util.pyscf_hessian_h1 import make_df_rks_h1
-
-        node_runner.info(f"Building AO derivatives for atoms {pending}")
-        h1ao = make_df_rks_h1(
-            hessian,
-            mf.mo_coeff,
-            mf.mo_occ,
-            pending,
-            budget_mb,
-            log=node_runner.info,
-        )
-        slices = coulomb_j_slices(mf, pending)
-        mo1s, mo_e1s = solve_df_rks_cphf(
-            hessian,
-            mf.mo_energy,
-            mf.mo_coeff,
-            mf.mo_occ,
-            h1ao,
-            pending,
-            budget_mb,
-            log=node_runner.info,
-        )
-        nao = int(mol.nao)
-        nocc = int((mf.mo_occ > 0).sum())
-        naux = int(slices[pending[0]][0].shape[0])
-        for atom_index in pending:
-            if mo1s[atom_index] is None or mo_e1s[atom_index] is None:
-                raise ValueError(f"CPHF response for atom {atom_index} was not produced")
-            if h1ao[atom_index] is None:
-                raise ValueError(f"make_h1 did not return atom {atom_index}")
-            rhoj1, wj1 = slices[atom_index]
-            arrays = {
-                "mo1": mo1s[atom_index],
-                "mo_e1": mo_e1s[atom_index],
-                "h1ao": h1ao[atom_index],
-                "rhoj1": rhoj1,
-                "wj1": wj1,
-            }
-            await store_hessian_contribution(
-                hessian_task_id,
-                atom_index,
-                n_atoms,
-                nao,
-                nocc,
-                naux,
-                arrays,
-                row_dir,
-            )
-            atoms[atom_index] = arrays
-    if any(item is None for item in atoms):
-        raise ValueError("a Hessian atom contribution is missing")
     nocc = int((mf.mo_occ > 0).sum())
     blk = largest_aux_blk(
         int(mol.nao),
@@ -244,7 +284,6 @@ async def _span_hessian(mf, mol, qm_input, budget_mb, node_runner):
     return {
         "hessian": hessian,
         "auxmol": auxmol,
-        "atoms": atoms,
         "hessian_task_id": hessian_task_id,
         "row_dir": row_dir,
         "n_atoms": n_atoms,
@@ -252,6 +291,140 @@ async def _span_hessian(mf, mol, qm_input, budget_mb, node_runner):
         "wave_width": wave_width,
         "budget_mb": float(budget_mb),
     }
+
+
+async def _store_span_atoms(mf, mol, prepared, node_runner):
+    """Store AO-derivative and CPHF contributions while the span VMs run.
+
+    ``rhoj1`` and ``wj1`` are read from the Coulomb slices written before the
+    VMs started.
+    """
+    from molecular_qm_psi4.util.pyscf_hessian_h1 import make_df_rks_h1
+
+    hessian = prepared["hessian"]
+    hessian_task_id = prepared["hessian_task_id"]
+    row_dir = prepared["row_dir"]
+    n_atoms = prepared["n_atoms"]
+    budget_mb = prepared["budget_mb"]
+    naux = int(prepared["auxmol"].nao)
+    atoms = [None] * n_atoms
+    for atom_index in range(n_atoms):
+        record = await find_hessian_atom_contribution(hessian_task_id, atom_index)
+        if record is None:
+            continue
+        if int(record.n_atoms) != n_atoms:
+            raise ValueError(
+                f"stored Hessian contribution for atom {atom_index} has n_atoms="
+                f"{record.n_atoms}, molecule has {n_atoms}"
+            )
+        if int(record.naux) != naux:
+            raise ValueError(
+                f"stored Hessian contribution for atom {atom_index} has naux="
+                f"{record.naux}, aux basis has {naux}"
+            )
+        atoms[atom_index] = await materialize_hessian_contribution(record, row_dir)
+        node_runner.info(f"Hessian contribution for atom {atom_index} is already stored")
+    pending = [index for index, item in enumerate(atoms) if item is None]
+    if pending:
+        node_runner.info(f"Building AO derivatives for atoms {pending}")
+        h1ao = make_df_rks_h1(
+            hessian,
+            mf.mo_coeff,
+            mf.mo_occ,
+            pending,
+            budget_mb,
+            log=node_runner.info,
+        )
+        mo1s, mo_e1s = solve_df_rks_cphf(
+            hessian,
+            mf.mo_energy,
+            mf.mo_coeff,
+            mf.mo_occ,
+            h1ao,
+            pending,
+            budget_mb,
+            log=node_runner.info,
+        )
+        nao = int(mol.nao)
+        nocc = int((mf.mo_occ > 0).sum())
+        for atom_index in pending:
+            if mo1s[atom_index] is None or mo_e1s[atom_index] is None:
+                raise ValueError(f"CPHF response for atom {atom_index} was not produced")
+            if h1ao[atom_index] is None:
+                raise ValueError(f"make_h1 did not return atom {atom_index}")
+            rhoj1, wj1 = _load_coulomb_pair(row_dir, atom_index, naux)
+            arrays = {
+                "mo1": mo1s[atom_index],
+                "mo_e1": mo_e1s[atom_index],
+                "h1ao": h1ao[atom_index],
+                "rhoj1": rhoj1,
+                "wj1": wj1,
+            }
+            await store_hessian_contribution(
+                hessian_task_id,
+                atom_index,
+                n_atoms,
+                nao,
+                nocc,
+                naux,
+                arrays,
+                row_dir,
+            )
+            atoms[atom_index] = arrays
+    if any(item is None for item in atoms):
+        raise ValueError("a Hessian atom contribution is missing")
+    prepared["atoms"] = atoms
+
+
+async def _store_span_xc_nlc(mf, prepared, node_runner):
+    """Store XC and NLC partials. A row that is already stored is left as it is."""
+    hessian = prepared["hessian"]
+    hessian_task_id = prepared["hessian_task_id"]
+    row_dir = prepared["row_dir"]
+    n_atoms = prepared["n_atoms"]
+    budget_mb = prepared["budget_mb"]
+    existing = await find_partial_contributions(hessian_task_id)
+    saw_xc = False
+    saw_nlc = False
+    for record in existing:
+        if record.piece == "xc":
+            if saw_xc:
+                raise ValueError(f"multiple XC partials for task {hessian_task_id}")
+            saw_xc = True
+        elif record.piece == "nlc":
+            if saw_nlc:
+                raise ValueError(f"multiple NLC partials for task {hessian_task_id}")
+            saw_nlc = True
+        elif record.piece != "aux":
+            raise ValueError(f"unknown Hessian partial piece {record.piece!r}")
+    if not saw_xc:
+        array = partial_xc_and_e1(
+            hessian,
+            mf.mo_energy,
+            mf.mo_coeff,
+            mf.mo_occ,
+            budget_mb,
+            node_runner=node_runner,
+        )
+        await store_partial_contribution(
+            hessian_task_id, "xc", 0, 0, n_atoms, array, {}, row_dir
+        )
+    if not hasattr(mf, "do_nlc"):
+        raise ValueError("mean field do_nlc is required")
+    include_nlc = mf.do_nlc()
+    if type(include_nlc) is int and include_nlc in (0, 1):
+        include_nlc = bool(include_nlc)
+    if not isinstance(include_nlc, bool):
+        raise ValueError(f"mean field do_nlc must return bool, got {include_nlc!r}")
+    if include_nlc and not saw_nlc:
+        array = partial_nlc(
+            hessian, mf.mo_coeff, mf.mo_occ, budget_mb, node_runner=node_runner
+        )
+        await store_partial_contribution(
+            hessian_task_id, "nlc", 0, 0, n_atoms, array, {}, row_dir
+        )
+    elif saw_nlc and not include_nlc:
+        raise ValueError(f"stored NLC partial for xc {mf.xc!r}, which has no NLC")
 
 
 async def _assemble_span_hessian(mf, mol, prepared, node_runner):
@@ -266,7 +439,7 @@ async def _assemble_span_hessian(mf, mol, prepared, node_runner):
     hessian_task_id = prepared["hessian_task_id"]
     row_dir = prepared["row_dir"]
     n_atoms = prepared["n_atoms"]
-    budget_mb = prepared["budget_mb"]
+    await _store_span_xc_nlc(mf, prepared, node_runner)
     existing = await find_partial_contributions(hessian_task_id)
     partial = np.zeros((n_atoms, n_atoms, 3, 3))
     aux_blocks = []
@@ -297,19 +470,7 @@ async def _assemble_span_hessian(mf, mol, prepared, node_runner):
         else:
             raise ValueError(f"unknown Hessian partial piece {record.piece!r}")
     if not saw_xc:
-        array = partial_xc_and_e1(
-            hessian,
-            mf.mo_energy,
-            mf.mo_coeff,
-            mf.mo_occ,
-            budget_mb,
-            node_runner=node_runner,
-        )
-        await store_partial_contribution(
-            hessian_task_id, "xc", 0, 0, n_atoms, array, {}, row_dir
-        )
-        partial += array
-        saw_xc = True
+        raise ValueError(f"XC partial for task {hessian_task_id} is missing")
     if not hasattr(mf, "do_nlc"):
         raise ValueError("mean field do_nlc is required")
     include_nlc = mf.do_nlc()
@@ -318,14 +479,8 @@ async def _assemble_span_hessian(mf, mol, prepared, node_runner):
     if not isinstance(include_nlc, bool):
         raise ValueError(f"mean field do_nlc must return bool, got {include_nlc!r}")
     if include_nlc and not saw_nlc:
-        array = partial_nlc(
-            hessian, mf.mo_coeff, mf.mo_occ, budget_mb, node_runner=node_runner
-        )
-        await store_partial_contribution(
-            hessian_task_id, "nlc", 0, 0, n_atoms, array, {}, row_dir
-        )
-        partial += array
-    elif saw_nlc and not include_nlc:
+        raise ValueError(f"NLC partial for task {hessian_task_id} is missing")
+    if saw_nlc and not include_nlc:
         raise ValueError(f"stored NLC partial for xc {mf.xc!r}, which has no NLC")
     n_aux_shells = len(list(auxmol.ao_loc)) - 1
     if not aux_blocks_cover(aux_blocks, 0, n_aux_shells):
@@ -390,10 +545,9 @@ async def pyscf_span_segment(opts: PySCFSpanSegmentInput, **kwargs) -> SimstackR
     """
     One aux span of the analytical Hessian, on its own VM.
 
-    The parent stores the atom contributions first. This VM streams
-    ``int3c2e_ip1`` for shells ``[shell_start, shell_end)``, contracts that
-    span, and stores the partial. The solved span file is deleted before the
-    VM exits.
+    This VM streams ``int3c2e_ip1`` for shells ``[shell_start, shell_end)``
+    from the Coulomb slices the parent stored first. It does not wait for AO
+    derivatives or CPHF. The solved span file is deleted before the VM exits.
     """
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
@@ -427,23 +581,10 @@ async def pyscf_span_segment(opts: PySCFSpanSegmentInput, **kwargs) -> SimstackR
         auxmol = attach_df_auxmol(mf, mol)
         n_atoms = int(mol.natm)
         row_dir = hessian_contribution_directory(opts.hessian_task_id)
-        atoms = []
-        for atom_index in range(n_atoms):
-            record = await find_hessian_atom_contribution(opts.hessian_task_id, atom_index)
-            if record is None:
-                raise ValueError(
-                    f"Hessian contribution for atom {atom_index} is not stored"
-                )
-            atoms.append(await materialize_hessian_contribution(record, row_dir))
-        rhoj1 = np.stack([item["rhoj1"] for item in atoms], axis=0)
-        wj1 = np.stack([item["wj1"] for item in atoms], axis=0)
         ni = mf._numint
         hybrid = ni.libxc.is_hybrid_xc(mf.xc)
         if not isinstance(hybrid, bool):
             raise ValueError(f"hybrid flag for xc {mf.xc!r} must be bool, got {hybrid!r}")
-        density = live_full_range_density(
-            mol, auxmol, mf.mo_coeff, mf.mo_occ, hybrid
-        )
         nocc = int((mf.mo_occ > 0).sum())
         blk = largest_aux_blk(
             int(mol.nao),
@@ -469,6 +610,9 @@ async def pyscf_span_segment(opts: PySCFSpanSegmentInput, **kwargs) -> SimstackR
             node_runner.info(f"Aux span {shell0}:{shell1} is already stored")
             _discard_span_file(solved_path)
             return node_runner.succeed()
+        density = live_full_range_density(
+            mol, auxmol, mf.mo_coeff, mf.mo_occ, hybrid
+        )
         write_solved_span(
             mol,
             auxmol,
@@ -482,6 +626,15 @@ async def pyscf_span_segment(opts: PySCFSpanSegmentInput, **kwargs) -> SimstackR
             blk,
             log=node_runner.info,
         )
+        naux = int(auxmol.nao)
+        rho_rows = []
+        wj_rows = []
+        for atom_index in range(n_atoms):
+            rhoj1_atom, wj1_atom = _load_coulomb_pair(row_dir, atom_index, naux)
+            rho_rows.append(rhoj1_atom)
+            wj_rows.append(wj1_atom)
+        rhoj1 = np.stack(rho_rows, axis=0)
+        wj1 = np.stack(wj_rows, axis=0)
         ip1_handle = h5py.File(solved_path, "r")
         try:
             fit_cache = {"density": density, "ip1": ip1_handle}
@@ -533,9 +686,11 @@ async def pyscf_span_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
     """
     PySCF node that evaluates an analytical Hessian one aux span per child VM.
 
-    A frequency job calls ``pyscf_span_segment`` for each aux span. Those
-    children run on their own VMs, up to ``max_vm`` at a time. Optimization
-    calls ``pyscf_optimization`` on its own VM. This node does not call
+    A frequency job stores Coulomb slices, then starts ``pyscf_span_segment``
+    for each aux span. Those children run on their own VMs, up to ``max_vm``
+    at a time. While they run, this node builds AO derivatives, the CPHF
+    response, and the XC and NLC partials. Optimization calls
+    ``pyscf_optimization`` on its own VM. This node does not call
     ``pyscf_hessian_orchestrator`` and does not write ``df_integrals.h5``.
     Imaginary frequencies below -50 cm^-1 fail the node.
 
@@ -698,6 +853,7 @@ async def pyscf_span_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 prepared = await _span_hessian(
                     mf, mol, qm_input, budget_mb, node_runner
                 )
+                await _prepare_coulomb_slices(mf, mol, prepared, node_runner)
                 pending_spans = prepared["pending_spans"]
                 wave_width = prepared["wave_width"]
                 segment_queue = asyncio.Queue()
@@ -734,11 +890,17 @@ async def pyscf_span_calculator(qm_input: QMInput, **kwargs) -> SimstackResult:
                 if pending_spans:
                     n_workers = wave_width if wave_width < len(pending_spans) else len(pending_spans)
                     node_runner.info(
-                        f"Waiting on {len(pending_spans)} aux spans with {n_workers} VMs"
+                        f"Starting {len(pending_spans)} aux span VMs, "
+                        f"{n_workers} at a time, while AO derivatives continue"
                     )
                     async with asyncio.TaskGroup() as tg:
                         for _worker in range(n_workers):
                             tg.create_task(run_segment_vm())
+                        await _store_span_atoms(mf, mol, prepared, node_runner)
+                        await _store_span_xc_nlc(mf, prepared, node_runner)
+                else:
+                    await _store_span_atoms(mf, mol, prepared, node_runner)
+                    await _store_span_xc_nlc(mf, prepared, node_runner)
                 hessian, freq_info = await _assemble_span_hessian(
                     mf, mol, prepared, node_runner
                 )

@@ -90,8 +90,9 @@ class PySCFHessianAtomContribution(Model):
 class PySCFSpanSegmentInput(Model):
     """One aux-span VM of ``pyscf_span_calculator``.
 
-    ``hessian_task_id`` is a hash of the QMInput. Atom contributions are already
-    stored under that hash. This VM streams one aux span and stores its partial.
+    ``hessian_task_id`` is a hash of the QMInput. The parent stores one
+    ``rhoj1`` and one ``wj1`` per atom before this VM starts. This VM streams
+    one aux span and contracts it from those slices.
     """
 
     field_name: str = "PySCFSpanSegmentInput"

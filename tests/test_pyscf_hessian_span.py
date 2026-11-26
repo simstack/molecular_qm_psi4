@@ -260,3 +260,29 @@ def test_separate_vm_kwargs_keeps_the_parent_resource_and_requests_a_vm():
     doc = pyscf_span_calculator.__doc__ or ""
     if "pyscf_optimization" not in doc or "pyscf_span_segment" not in doc:
         raise AssertionError("called nodes are missing from the span calculator docstring")
+
+
+def test_coulomb_slice_files_require_shape_naux_by_3(tmp_path):
+    import numpy as np
+
+    from molecular_qm_psi4.nodes.pyscf_span_calculator import (
+        _load_coulomb_pair,
+        _write_coulomb_pair,
+        _write_coulomb_slice,
+    )
+
+    rho = np.arange(12, dtype=float).reshape(4, 3)
+    wj = np.arange(12, dtype=float).reshape(4, 3) + 1
+    _write_coulomb_pair(tmp_path, 0, rho, wj, 4)
+    loaded_rho, loaded_wj = _load_coulomb_pair(tmp_path, 0, 4)
+    if loaded_rho.shape != (4, 3) or not np.array_equal(loaded_rho, rho):
+        raise AssertionError(f"rhoj1 was not stored, got {loaded_rho}")
+    if loaded_wj.shape != (4, 3) or not np.array_equal(loaded_wj, wj):
+        raise AssertionError(f"wj1 was not stored, got {loaded_wj}")
+    with pytest.raises(ValueError, match="missing"):
+        _load_coulomb_pair(tmp_path, 1, 4)
+    with pytest.raises(ValueError, match="shape"):
+        _load_coulomb_pair(tmp_path, 0, 5)
+    _write_coulomb_slice(tmp_path / "coulomb_slices" / "atom_2", "rhoj1", rho, 4)
+    with pytest.raises(ValueError, match="missing"):
+        _load_coulomb_pair(tmp_path, 2, 4)

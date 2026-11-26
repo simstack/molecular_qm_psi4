@@ -73,6 +73,7 @@ from molecular_qm_psi4.nodes.thermo_benchmark2 import (
     ThermoBenchmark2Step,
     thermo_benchmark2,
 )
+from molecular_qm_psi4.nodes.thermo_span_benchmark import thermo_span_benchmark
 from molecular_qm_psi4.nodes.thermo_reference_benchmark2 import (
     compare_conformers_reference,
     thermo_reference_benchmark2,
@@ -163,6 +164,7 @@ __all__ = [
     "ThermoBenchmark2MethodList",
     "ThermoBenchmark2Step",
     "thermo_benchmark2",
+    "thermo_span_benchmark",
     "thermo_benchmark_dataset",
     "compare_conformers_over_basis_sets",
     "compare_conformers_over_functionals",

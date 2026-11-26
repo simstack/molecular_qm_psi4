@@ -98,8 +98,19 @@ def thermochemistry_node_for(engine=None):
 
 
 async def run_qm_calculator(qm_input, engine=None, **kwargs):
-    """Run Psi4 or PySCF on the same ``QMInput``."""
-    calculator = calculator_node_for(engine)
+    """Run Psi4 or PySCF on the same ``QMInput``.
+
+    ``calculator`` selects the node. It is not forwarded to that node. When it
+    is omitted, the engine selects ``psi4_calculator`` or ``pyscf_calculator``.
+    """
+    if "calculator" in kwargs:
+        calculator = kwargs.pop("calculator")
+        if not callable(calculator):
+            raise ValueError(
+                f"calculator must be a node function, got {calculator!r}"
+            )
+    else:
+        calculator = calculator_node_for(engine)
     return await calculator(qm_input, **kwargs)
 
 
