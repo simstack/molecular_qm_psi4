@@ -44,8 +44,7 @@ def test_thermo_span_benchmark_documents_the_span_calculator():
     called = parsed.called_nodes()
     if called != [
         "multistep_optimizer",
-        "compare_conformers",
-        "pyscf_span_calculator",
+        "compare_span_conformers",
     ]:
         raise AssertionError(f"called nodes are {called}")
 
@@ -105,7 +104,7 @@ async def test_thermo_span_benchmark_passes_the_span_calculator(monkeypatch):
     monkeypatch.setattr(module, "_persist_qm_input", persist_input)
     monkeypatch.setattr(module, "_persist_step_molecule", persist_molecule)
     monkeypatch.setattr(module, "multistep_optimizer", optimizer)
-    monkeypatch.setattr(module, "compare_conformers", compare)
+    monkeypatch.setattr(module, "compare_span_conformers", compare)
     step = _method_step()
     with pytest.raises(RuntimeError, match="compared"):
         await node(

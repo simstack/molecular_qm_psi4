@@ -17,8 +17,8 @@ from molecular_qm_models import (
 from molecular_qm_psi4.nodes.compare_conformers import (
     CompareConformersModel,
     CompareConformersResult,
-    compare_conformers,
 )
+from molecular_qm_psi4.nodes.compare_span_conformers import compare_span_conformers
 from molecular_qm_psi4.nodes.multistep_optimizer import (
     PreOptimizerInput,
     _child_qm_result,
@@ -108,7 +108,7 @@ async def thermo_span_benchmark(
     DFTB pre-optimization, when enabled, stays ``dftb_calculator``. The two conformers are
     pre-optimized at the same time. If either pre-optimization fails, the node
     fails and the method comparisons are not started. Each
-    ``compare_conformers`` call uses ``pyscf_span_calculator`` and starts from
+    ``compare_span_conformers`` call uses ``pyscf_span_calculator`` and starts from
     the optimizer geometries, so method rows are independent. ``methods`` is
     one list of basis-set and functional pairs. Each pair also carries SCF
     accuracy, DFT grid, and optimization accuracy. Those values are copied onto
@@ -133,8 +133,7 @@ async def thermo_span_benchmark(
 
     Called Nodes:
         multistep_optimizer
-        compare_conformers
-        pyscf_span_calculator
+        compare_span_conformers
     """
     node_runner = kwargs.get("node_runner")
     if node_runner is None:
@@ -309,7 +308,7 @@ async def thermo_span_benchmark(
         functional_name = step.functional.functional.value
         dispersion_name = dispersion.value.value
         node_runner.info(
-            f"compare_conformers basis={basis_name} functional={functional_name} "
+            f"compare_span_conformers basis={basis_name} functional={functional_name} "
             f"dispersion_correction={dispersion_name} "
             f"scf_accuracy={step.scf_accuracy.value} dft_grid={step.dft_grid.value} "
             f"optimization_accuracy={step.optimization_accuracy.value} "
@@ -335,7 +334,7 @@ async def thermo_span_benchmark(
         kwargs["custom_name"] = (
             f"pyscf-span-{basis_name}-{functional_name}-{dispersion_name}"
         )
-        calc_result = await compare_conformers(arg, **kwargs)
+        calc_result = await compare_span_conformers(arg, **kwargs)
         if isinstance(calc_result, CompareConformersResult):
             compare_result = calc_result
         elif isinstance(calc_result, SimstackResult):
@@ -343,7 +342,7 @@ async def thermo_span_benchmark(
                 return node_runner.fail(
                     calc_result.error_message
                     or (
-                        f"compare_conformers failed for basis {basis_name}, "
+                        f"compare_span_conformers failed for basis {basis_name}, "
                         f"functional {functional_name}, "
                         f"dispersion {dispersion_name}"
                     )
@@ -353,17 +352,17 @@ async def thermo_span_benchmark(
             compare_result = getattr(calc_result, "result", None)
         if compare_result is None:
             return node_runner.fail(
-                f"compare_conformers returned no result for basis {basis_name}, "
+                f"compare_span_conformers returned no result for basis {basis_name}, "
                 f"functional {functional_name}, dispersion {dispersion_name}"
             )
         if compare_result.final_molecule1 is None:
             return node_runner.fail(
-                f"compare_conformers returned no final_molecule1 for basis {basis_name}, "
+                f"compare_span_conformers returned no final_molecule1 for basis {basis_name}, "
                 f"functional {functional_name}, dispersion {dispersion_name}"
             )
         if compare_result.final_molecule2 is None:
             return node_runner.fail(
-                f"compare_conformers returned no final_molecule2 for basis {basis_name}, "
+                f"compare_span_conformers returned no final_molecule2 for basis {basis_name}, "
                 f"functional {functional_name}, dispersion {dispersion_name}"
             )
         row_molecule = compare_result.molecule_for_table() or mol1
