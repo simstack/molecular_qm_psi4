@@ -100,15 +100,17 @@ async def thermo_span_benchmark(
 ) -> SimstackResult:
     """Optimize both conformers with ``multistep_optimizer``, then compare them.
 
-    This is ``thermo_benchmark2`` with ``pyscf_span_calculator`` in place of
-    ``pyscf_calculator``. ``qm_input`` is only the shared template (conformer 1,
-    charge, solvent). The optimization protocol is ``preopt``, passed to
-    ``multistep_optimizer``. ``preopt.engine`` must be PySCF. The two conformers
-    are pre-optimized at the same time. If either pre-optimization fails, the
-    node fails and the method comparisons are not started. Each
-    ``compare_conformers`` call also uses ``pyscf_span_calculator`` and starts
-    from the optimizer geometries, so method rows are independent. ``methods``
-    is one list of basis-set and functional pairs. Each pair also carries SCF
+    This is ``thermo_benchmark2`` with the PySCF nodes split by step.
+    ``qm_input`` is only the shared template (conformer 1, charge, solvent).
+    The optimization protocol is ``preopt``, passed to ``multistep_optimizer``.
+    ``preopt.engine`` must be PySCF. Pre-optimization sets frequencies off, so
+    ``multistep_optimizer`` calls ``pyscf_optimization`` for each DFT step.
+    DFTB pre-optimization, when enabled, stays ``dftb_calculator``. The two conformers are
+    pre-optimized at the same time. If either pre-optimization fails, the node
+    fails and the method comparisons are not started. Each
+    ``compare_conformers`` call uses ``pyscf_span_calculator`` and starts from
+    the optimizer geometries, so method rows are independent. ``methods`` is
+    one list of basis-set and functional pairs. Each pair also carries SCF
     accuracy, DFT grid, and optimization accuracy. Those values are copied onto
     that step's ``QMInput``. Geometry optimization uses 300 iterations.
     Dispersion stays on ``Functional``.

@@ -1,3 +1,4 @@
+import inspect
 from unittest.mock import AsyncMock, MagicMock
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ from molecular_qm_dftb.models.dftb_input import DftbHamiltonian, DftbInput, SkfS
 from molecular_qm_models import BasisSet, Functional, Molecule, QMInput, QMResult
 from molecular_qm_models.basis_set import BasisSetEnum
 from molecular_qm_models.qm_input import GridType, OptimizationAccuracy, SCFAccuracy
+from molecular_qm_psi4.nodes import multistep_optimizer as multistep_module
 from molecular_qm_psi4.nodes.multistep_optimizer import (
     OptimizationStepInput,
     PreOptimizerInput,
@@ -21,7 +23,12 @@ from molecular_qm_psi4.nodes.multistep_optimizer import (
     _qm_input_for_step,
     _setting_label,
 )
-from molecular_qm_psi4.util.qm_engine import attach_optimizer_timings, timings_from_child_result
+from molecular_qm_psi4.util.qm_engine import (
+    QMEngine,
+    attach_optimizer_timings,
+    timings_from_child_result,
+)
+from simstack.util.docstring_parser import DocstringParser
 from simstack.core.definitions import TaskStatus
 from simstack.core.simstack_result import SimstackResult
 from simstack.models.simple_table import SimpleTable
@@ -453,3 +460,67 @@ def test_attach_optimizer_timings_copies_iteration_table():
     assert "n_steps=2" in node_runner.info.call_args[0][0]
     assert "wall=15.50s" in node_runner.info.call_args[0][0]
     assert "frequencies wall=3.25s" in node_runner.info.call_args[0][0]
+
+
+def test_multistep_optimizer_documents_pyscf_optimization():
+    called = DocstringParser(inspect.unwrap(multistep_module.multistep_optimizer).__doc__).called_nodes()
+    assert called == [
+        "dftb_calculator",
+        "psi4_calculator",
+        "pyscf_calculator",
+        "pyscf_optimization",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pyscf_step_without_frequencies_calls_pyscf_optimization(monkeypatch):
+    calls = []
+
+    async def persist_input(opts, node_runner, db=None):
+        return opts
+
+    async def persist_molecule(molecule, node_runner, step_name, db=None):
+        return molecule
+
+    async def optimization(qm_input, **kwargs):
+        calls.append(("optimization", "calculator" in kwargs))
+        return QMResult(
+            final_structure=Molecule.from_molecule(qm_input.molecule),
+            final_energy=-1.0,
+        )
+
+    async def calculator(qm_input, engine=None, **kwargs):
+        calls.append(("calculator", engine))
+        return QMResult(
+            final_structure=Molecule.from_molecule(qm_input.molecule),
+            final_energy=-1.0,
+        )
+
+    monkeypatch.setattr(multistep_module, "_persist_qm_input", persist_input)
+    monkeypatch.setattr(multistep_module, "_persist_step_molecule", persist_molecule)
+    monkeypatch.setattr(multistep_module, "pyscf_optimization", optimization)
+    monkeypatch.setattr(multistep_module, "run_qm_calculator", calculator)
+    runner = SimpleNamespace(
+        info=lambda *args, **kwargs: None,
+        warning=lambda *args, **kwargs: None,
+        succeed=lambda: "ok",
+    )
+    molecule = _water()
+    qm_input = _source_qm_input(molecule)
+    qm_input.frequencies = False
+    await inspect.unwrap(multistep_module.multistep_optimizer)(
+        qm_input,
+        PreOptimizerInput(engine=QMEngine.PYSCF, steps=[_sto3g_step()]),
+        node_runner=runner,
+        calculator=object(),
+    )
+    assert calls == [("optimization", False)]
+
+    calls.clear()
+    qm_input.frequencies = True
+    await inspect.unwrap(multistep_module.multistep_optimizer)(
+        qm_input,
+        PreOptimizerInput(engine=QMEngine.PYSCF, steps=[_sto3g_step()]),
+        node_runner=runner,
+    )
+    assert calls == [("calculator", QMEngine.PYSCF)]

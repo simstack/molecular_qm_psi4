@@ -16,9 +16,11 @@ from molecular_qm_models import (
 )
 from molecular_qm_models.basis_set import BasisSet
 from molecular_qm_models.density_functional import Functional
+from molecular_qm_psi4.nodes.pyscf_calculator import pyscf_optimization
 from molecular_qm_psi4.util.qm_engine import (
     QMEngine,
     engine_field_schema_extra,
+    resolve_engine,
     run_qm_calculator,
     timings_from_child_result,
 )
@@ -417,20 +419,23 @@ async def multistep_optimizer(
     basis set, functional, SCF/optimization accuracy, and grid. SCF and
     geometry-optimization iteration limits are always 1000.
     Frequencies from ``qm_input`` run only on the last Psi4/PySCF step.
-    ``preopt.engine`` selects Psi4 or PySCF.
+    ``preopt.engine`` selects Psi4 or PySCF. A PySCF step with frequencies off
+    calls ``pyscf_optimization`` directly. A PySCF step with frequencies on
+    still uses the QM calculator, which computes the Hessian and thermochemistry.
 
     Parameters:
         qm_input (QMInput): Molecule and shared QM settings used as the copy template.
         preopt (PreOptimizerInput): DFTB toggle, full DftbInput, ordered DFT steps, and engine.
 
+    SimstackResult:
+        qm_result (QMResult): Result of the last successful step.
+        step_table (SimpleTable): Per-step settings (including dispersion), energy, iterations, optimization wall/CPU time, frequency wall/CPU time, and totals.
+
     Called Nodes:
         dftb_calculator
         psi4_calculator
         pyscf_calculator
-
-    SimstackResult:
-        qm_result (QMResult): Result of the last successful step.
-        step_table (SimpleTable): Per-step settings (including dispersion), energy, iterations, optimization wall/CPU time, frequency wall/CPU time, and totals.
+        pyscf_optimization
     """
     node_runner = kwargs.get("node_runner")
     steps = list(preopt.steps or [])
@@ -557,7 +562,12 @@ async def multistep_optimizer(
         )
         kwargs["custom_name"] = f"{basis_name}/{functional_name}"
         try:
-            calc_result = await run_qm_calculator(current_input, engine, **kwargs)
+            if resolve_engine(engine) == QMEngine.PYSCF and not run_frequencies:
+                opt_kwargs = dict(kwargs)
+                opt_kwargs.pop("calculator", None)
+                calc_result = await pyscf_optimization(current_input, **opt_kwargs)
+            else:
+                calc_result = await run_qm_calculator(current_input, engine, **kwargs)
         except Exception as exc:
             error = str(exc)
             qm_result = None
